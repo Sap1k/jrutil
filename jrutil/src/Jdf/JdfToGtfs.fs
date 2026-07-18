@@ -65,6 +65,23 @@ let getGtfsRouteType (jdfRoute: JdfModel.Route) =
     | (JdfModel.Ferry, _) -> "1000" // Water transport
     | (JdfModel.Trolleybus, _) -> "800" // Trolleybus
 
+let getGtfsRouteColors (publicLineNumber: string option)
+                       (jdfRoute: JdfModel.Route) =
+    let colors background text = Some background, Some text
+    let colorsWithWhiteText background = colors background "ffffff"
+    match jdfRoute.transportMode with
+    | JdfModel.Bus -> colorsWithWhiteText "0076a3"
+    | JdfModel.Tram -> colorsWithWhiteText "7a0200"
+    | JdfModel.CableCar -> colors "c8d021" "1c1745"
+    | JdfModel.Trolleybus -> colorsWithWhiteText "80166f"
+    | JdfModel.Metro ->
+        match publicLineNumber |> Option.map (fun value -> value.ToUpperInvariant()) with
+        | Some "A" -> colorsWithWhiteText "00b274"
+        | Some "B" -> colors "fbaf33" "1c1745"
+        | Some "C" -> colorsWithWhiteText "d31245"
+        | _ -> colorsWithWhiteText "1c1745"
+    | JdfModel.Ferry -> colors "00b3cb" "1c1745"
+
 let getStopName (jdfStop: JdfModel.Stop) =
     // This tries to mimic how IDOS displays these names
     match (jdfStop.district, jdfStop.nearbyPlace) with
@@ -259,19 +276,23 @@ let getGtfsRoutesWithPublicLines
                                 (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.routes
     |> Array.map (fun jdfRoute ->
+    let publicLineNumber =
+        publicLineNumbers.[jdfRoute.id, jdfRoute.idDistinction]
+    let routeColor, routeTextColor =
+        getGtfsRouteColors publicLineNumber jdfRoute
     {
         id = jdfRouteId jdfRoute.id jdfRoute.idDistinction
         agencyId = Some (jdfAgencyId jdfRoute.agencyId
                                      jdfRoute.agencyDistinction)
-        shortName = publicLineNumbers.[jdfRoute.id, jdfRoute.idDistinction]
+        shortName = publicLineNumber
         longName = Some jdfRoute.name
         description = None
         // TODO: Deal with routes that don't allow national service
         // (only international)
         routeType = getGtfsRouteType jdfRoute
         url = None
-        color = None
-        textColor = None
+        color = routeColor
+        textColor = routeTextColor
         sortOrder = None
     }: GtfsModel.Route)
 
