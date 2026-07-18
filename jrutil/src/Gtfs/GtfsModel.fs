@@ -111,6 +111,22 @@ type StopTime = {
     [<CsvFieldName("stop_zone_ids")>] stopZoneIds: string option
 }
 
+// Serialization projection containing only fields from the GTFS Schedule
+// specification. StopTime retains stopZoneIds solely for parsing legacy JrUtil
+// feeds which used that non-standard column.
+type StandardStopTime = {
+    [<CsvFieldName("trip_id")>] tripId: string
+    [<CsvFieldName("arrival_time")>] arrivalTime: Period option
+    [<CsvFieldName("departure_time")>] departureTime: Period option
+    [<CsvFieldName("stop_id")>] stopId: string
+    [<CsvFieldName("stop_sequence")>] stopSequence: int
+    [<CsvFieldName("stop_headsign")>] headsign: string option
+    [<CsvFieldName("pickup_type")>] pickupType: ServiceType option
+    [<CsvFieldName("drop_off_type")>] dropoffType: ServiceType option
+    [<CsvFieldName("shape_dist_traveled")>] shapeDistTraveled: decimal option
+    [<CsvFieldName("timepoint")>] timepoint: TimePoint option
+}
+
 
 type CalendarEntry = {
     [<CsvFieldName("service_id")>] id: string
@@ -169,6 +185,15 @@ type CzStop = {
     [<CsvFieldName("source_ids")>] sourceIds: string option
 }
 
+type CzStopZone = {
+    [<CsvFieldName("stop_place_id")>] stopPlaceId: string
+    [<CsvFieldName("zone_id")>] zoneId: string
+    [<CsvFieldName("zone_code")>] zoneCode: string
+    [<CsvFieldName("route_id")>] routeId: string
+    [<CsvFieldName("ids_system_id")>] idsSystemId: string option
+    [<CsvFieldName("source_provenance")>] sourceProvenance: string
+}
+
 // There are also other files, but I don't think JrUtil will be generating
 // them right now
 
@@ -184,4 +209,5 @@ type GtfsFeed = {
     czRoutes: CzRoute array option
     czTrips: CzTrip array option
     czStops: CzStop array option
+    czStopZones: CzStopZone array option
 }

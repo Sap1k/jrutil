@@ -45,6 +45,15 @@ let jdfStopPostNumId cis stopId (stopPostNum: string) =
 let jdfRouteId id idDistinction =
     sprintf "-CISR-%s-%d" id idDistinction
 
+let jdfSourceRouteId (id: string) idDistinction =
+    sprintf "jdf-route:%s/%d" (Uri.EscapeDataString(id)) idDistinction
+
+let jdfSourceZoneId (routeId: string) routeDistinction (zoneCode: string) =
+    sprintf "jdf-zone:%s/%d/%s"
+            (Uri.EscapeDataString(routeId))
+            routeDistinction
+            (Uri.EscapeDataString(zoneCode))
+
 let jdfTripId routeId routeDistinction id =
     sprintf "CIST-%s-%d-%d" routeId routeDistinction id
 
@@ -210,6 +219,29 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
             sl.stopId, (sl.lat, sl.lon))
         |> Map
 
+    let zonesByStop =
+        jdfBatch.routeStops
+        |> Seq.collect (fun routeStop ->
+            Jdf.normalizeZoneTokens [routeStop.zone]
+            |> Seq.map (fun zoneCode ->
+                routeStop.stopId,
+                jdfSourceZoneId routeStop.routeId
+                                routeStop.routeDistinction
+                                zoneCode,
+                zoneCode))
+        |> Seq.groupBy (fun (stopId, _, _) -> stopId)
+        |> Seq.map (fun (stopId, memberships) ->
+            let memberships =
+                memberships
+                |> Seq.map (fun (_, zoneId, zoneCode) -> zoneId, zoneCode)
+                |> Seq.distinct
+                |> Seq.toArray
+            stopId,
+            match memberships with
+            | [| _, zoneCode |] -> Some zoneCode
+            | _ -> None)
+        |> Map
+
     let gtfsStops =
         jdfBatch.stops |> Array.map (fun jdfStop ->
             let latLon =
@@ -222,8 +254,9 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 description = None
                 lat = latLon |> Option.map fst
                 lon = latLon |> Option.map snd
-                // This is just a list of all zones this stop is in
-                zoneId = Jdf.stopZone jdfBatch jdfStop
+                // GTFS only permits one zone_id. Plural memberships are
+                // represented losslessly in cz_stop_zones.txt.
+                zoneId = zonesByStop |> Map.tryFind jdfStop.id |> Option.flatten
                 url = None
                 locationType = Some GtfsModel.Stop
                 parentStation = None
@@ -642,7 +675,7 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
                     // This will be dynamic when support for JDF's
                     // min/max times comes.
                     timepoint = Some GtfsModel.Exact
-                    stopZoneIds = Jdf.normalizeZones [jdfRouteStop.zone]
+                    stopZoneIds = None
                 }
                 Some stopTime
         )
@@ -746,6 +779,26 @@ let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
             }: GtfsModel.CzStop)
     Array.concat [stops; stopPosts; numberedStopPosts]
 
+let getCzStopZones stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+    jdfBatch.routeStops
+    |> Seq.collect (fun routeStop ->
+        Jdf.normalizeZoneTokens [routeStop.zone]
+        |> Seq.map (fun zoneCode ->
+            {
+                stopPlaceId = jdfStopId stopIdsCis routeStop.stopId
+                zoneId = jdfSourceZoneId routeStop.routeId
+                                             routeStop.routeDistinction
+                                             zoneCode
+                zoneCode = zoneCode
+                routeId = jdfRouteId routeStop.routeId
+                                     routeStop.routeDistinction
+                idsSystemId = None
+                sourceProvenance = sprintf "jdf:%s" jdfBatch.version.version
+            }: GtfsModel.CzStopZone))
+    |> Seq.distinct
+    |> Seq.sortBy (fun zone -> zone.stopPlaceId, zone.routeId, zone.zoneId)
+    |> Seq.toArray
+
 let warnUnhandledServiceNotes (jdfBatch: JdfModel.JdfBatch) () =
     jdfBatch.serviceNotes
     |> Seq.filter (fun sn -> sn.noteType = None)
@@ -777,5 +830,6 @@ let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
         czRoutes = Some (getCzRoutes publicLineNumbers jdfBatch)
         czTrips = Some (getCzTrips tripsToDelete jdfBatch)
         czStops = Some (getCzStops stopIdsCis jdfBatch)
+        czStopZones = Some (getCzStopZones stopIdsCis jdfBatch)
     }
     feed

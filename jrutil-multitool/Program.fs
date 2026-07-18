@@ -16,6 +16,7 @@ jrutil, a tool for working with czech public transport data
 
 Usage:
     jrutil-multitool.exe jdf-to-gtfs [options] <JDF-in-dir> <GTFS-out-dir>
+    jrutil-multitool.exe jdf-to-bundle [options] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] <JDF-out-dir> <JDF-in-dir>...
@@ -29,6 +30,8 @@ Options:
     -c --cache=DIR               Persistent cache directory
     -i --by-id                   Merge stops by numeric ID
     --stop-ids-cis               Treat JDF stop numbers as authoritative CIS IDs
+    --snapshot-descriptor=FILE    Retrieval provenance and input checksum JSON
+    --converter-version=VALUE     Exact JrUtil fork version or commit for provenance
 
 Passing - to an input path parameter will make most jrutil commands read
 input filenames from stdin. Each result will be output into a sequentially
@@ -85,7 +88,20 @@ let main (args: string array) =
         Utils.persistentCachePath <- optArgValue args "--cache"
 
         let stopCoordsByIdPath = optArgValue args "--stop-coords-by-id"
-        if argFlagSet args "jdf-to-gtfs" then
+        let mutable exitCode = 0
+        if argFlagSet args "jdf-to-bundle" then
+            try
+                JdfBundle.writeBundle
+                    (argValue args "--snapshot-descriptor")
+                    (argValue args "--converter-version")
+                    (argFlagSet args "--stop-ids-cis")
+                    (argValue args "<JDF-input>")
+                    (argValue args "<bundle-out-dir>")
+                Log.Information("Finished!")
+            with e ->
+                exitCode <- 1
+                Log.Error(e, "JDF bundle conversion failed")
+        else if argFlagSet args "jdf-to-gtfs" then
             let stopIdsCis = argFlagSet args "--stop-ids-cis"
             let jdfPar = Jdf.jdfBatchDirParser ()
             let gtfsSer = Gtfs.gtfsFeedToFolder ()
@@ -212,5 +228,5 @@ let main (args: string array) =
             jdfWri (Jdf.FsPath outDir) merger.batch
             Log.Information("Finished!")
         else printfn "%s" docstring
-        0
+        exitCode
     )
