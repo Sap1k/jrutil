@@ -25,9 +25,15 @@ type JdfToGtfsTests() =
         let feed = batch () |> JdfToGtfs.getGtfsFeed false
 
         route "-CISR-586001-1" feed
-        |> fun item -> assertEqual (Some "10") item.shortName
+        |> fun item ->
+            assertEqual (Some "10") item.shortName
+            assertEqual (Some "0076a3") item.color
+            assertEqual (Some "ffffff") item.textColor
         route "-CISR-446002-1" feed
-        |> fun item -> assertEqual (Some "N2") item.shortName
+        |> fun item ->
+            assertEqual (Some "N2") item.shortName
+            assertEqual (Some "80166f") item.color
+            assertEqual (Some "ffffff") item.textColor
         route "-CISR-582486-1" feed
         |> fun item -> assertEqual (Some "486") item.shortName
 
@@ -57,6 +63,32 @@ type JdfToGtfsTests() =
             assertEqual true (routeIds.Contains item.routeId))
         feed.czTrips |> Option.get |> Array.iter (fun item ->
             assertEqual true (tripIds.Contains item.tripId))
+
+    [<TestMethod>]
+    member _.``JDF routes receive default colors by transport mode``() =
+        let sourceRoute = (batch ()).routes.[0]
+        let colors mode publicLineNumber =
+            { sourceRoute with transportMode = mode }
+            |> JdfToGtfs.getGtfsRouteColors publicLineNumber
+
+        assertEqual (Some "0076a3", Some "ffffff")
+                    (colors JdfModel.Bus None)
+        assertEqual (Some "7a0200", Some "ffffff")
+                    (colors JdfModel.Tram None)
+        assertEqual (Some "80166f", Some "ffffff")
+                    (colors JdfModel.Trolleybus None)
+        assertEqual (Some "c8d021", Some "1c1745")
+                    (colors JdfModel.CableCar None)
+        assertEqual (Some "00b274", Some "ffffff")
+                    (colors JdfModel.Metro (Some "A"))
+        assertEqual (Some "fbaf33", Some "1c1745")
+                    (colors JdfModel.Metro (Some "b"))
+        assertEqual (Some "d31245", Some "ffffff")
+                    (colors JdfModel.Metro (Some "C"))
+        assertEqual (Some "1c1745", Some "ffffff")
+                    (colors JdfModel.Metro (Some "D"))
+        assertEqual (Some "00b3cb", Some "1c1745")
+                    (colors JdfModel.Ferry None)
 
     [<TestMethod>]
     member _.``Ambiguous or malformed public line identity is not guessed``() =
