@@ -20,6 +20,9 @@ let gtfsFeedToFolder () =
     let calendarEntrySerializer = getRowsSerializerWriter<CalendarEntry>
     let calendarExceptionSerializer = getRowsSerializerWriter<CalendarException>
     let feedInfoSerializer = getRowsSerializerWriter<FeedInfo>
+    let czRouteSerializer = getRowsSerializerWriter<CzRoute>
+    let czTripSerializer = getRowsSerializerWriter<CzTrip>
+    let czStopSerializer = getRowsSerializerWriter<CzStop>
 
     fun path feed ->
         Directory.CreateDirectory(path) |> ignore
@@ -41,6 +44,9 @@ let gtfsFeedToFolder () =
         match feed.feedInfo with
         | Some fi -> serializeTo "feed_info.txt" feedInfoSerializer [fi]
         | _ -> ()
+        serializeToOpt "cz_routes.txt" czRouteSerializer feed.czRoutes
+        serializeToOpt "cz_trips.txt" czTripSerializer feed.czTrips
+        serializeToOpt "cz_stops.txt" czStopSerializer feed.czStops
 
 let gtfsParseFolder () =
     // In Python, I'd make a dictionary of file name -> type
@@ -61,7 +67,10 @@ let gtfsParseFolder () =
     let stopTimesParser = fileParser "stop_times.txt"
     let calendarParser = fileParserOpt "calendar.txt"
     let calendarExceptionsParser = fileParserOpt "calendar_dates.txt"
-    let feedInfoParser = fileParserOpt "feedinfo.txt"
+    let feedInfoParser = fileParserOpt "feed_info.txt"
+    let czRoutesParser = fileParserOpt "cz_routes.txt"
+    let czTripsParser = fileParserOpt "cz_trips.txt"
+    let czStopsParser = fileParserOpt "cz_stops.txt"
 
     fun path ->
         let feed: GtfsFeed = {
@@ -75,6 +84,9 @@ let gtfsParseFolder () =
             feedInfo =
                 feedInfoParser path
                 |> Option.map (fun fi -> fi.[0])
+            czRoutes = czRoutesParser path
+            czTrips = czTripsParser path
+            czStops = czStopsParser path
         }
         feed
 

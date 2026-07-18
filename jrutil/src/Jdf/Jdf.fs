@@ -29,15 +29,23 @@ let parseAttributes batch (attributes: int option array) =
         attrRef.value
     )
 
-let stopZone batch (stop: Stop) =
-    let zones =
-        batch.routeStops
-        |> Seq.filter (fun rs -> rs.stopId = stop.id)
-        |> Seq.map (fun rs -> rs.zone)
+let normalizeZones (zones: string option seq) =
+    let seen = System.Collections.Generic.HashSet<string>()
+    let normalized =
+        zones
         |> Seq.choose id
-        |> set
-    if Set.isEmpty zones then None
-    else Some <| String.concat "," zones
+        |> Seq.collect (fun zone -> zone.Split(','))
+        |> Seq.map (fun zone -> zone.Trim())
+        |> Seq.filter (fun zone -> zone <> "" && seen.Add(zone))
+        |> Seq.toArray
+    if normalized.Length = 0 then None
+    else Some (System.String.Join(",", normalized))
+
+let stopZone batch (stop: Stop) =
+    batch.routeStops
+    |> Seq.filter (fun rs -> rs.stopId = stop.id)
+    |> Seq.map (fun rs -> rs.zone)
+    |> normalizeZones
 
 let tripIsReverse tripId = tripId % 2L = 0L
 

@@ -410,6 +410,9 @@ let gtfsFeed (czptts: CzPttXml.CzpttcisMessage seq) =
             |> Seq.toArray
             |> Some
         feedInfo = gtfsFeedInfo publicMessages |> Some
+        czRoutes = None
+        czTrips = None
+        czStops = None
     }
     feed
 
