@@ -29,15 +29,17 @@ let parseAttributes batch (attributes: int option array) =
         attrRef.value
     )
 
-let normalizeZones (zones: string option seq) =
+let normalizeZoneTokens (zones: string option seq) =
     let seen = System.Collections.Generic.HashSet<string>()
-    let normalized =
-        zones
-        |> Seq.choose id
-        |> Seq.collect (fun zone -> zone.Split(','))
-        |> Seq.map (fun zone -> zone.Trim())
-        |> Seq.filter (fun zone -> zone <> "" && seen.Add(zone))
-        |> Seq.toArray
+    zones
+    |> Seq.choose id
+    |> Seq.collect (fun zone -> zone.Split(','))
+    |> Seq.map (fun zone -> zone.Trim())
+    |> Seq.filter (fun zone -> zone <> "" && seen.Add(zone))
+    |> Seq.toArray
+
+let normalizeZones (zones: string option seq) =
+    let normalized = normalizeZoneTokens zones
     if normalized.Length = 0 then None
     else Some (System.String.Join(",", normalized))
 

@@ -9,21 +9,17 @@ open JrUtil.GtfsCsvSerializer
 open JrUtil.GtfsModel
 open JrUtil.GtfsParser
 
-let gtfsFeedToFolder () =
+let gtfsStandardTablesToFolder () =
     // This is an attempt at speeding serialization up. In the end it didn't do
     // much, but this should be faster so I'm leaving it like this
     let agencySerializer = getRowsSerializerWriter<Agency>
     let stopSerializer = getRowsSerializerWriter<Stop>
     let routeSerializer = getRowsSerializerWriter<Route>
     let tripSerializer = getRowsSerializerWriter<Trip>
-    let stopTimeSerializer = getRowsSerializerWriter<StopTime>
+    let stopTimeSerializer = getRowsSerializerWriter<StandardStopTime>
     let calendarEntrySerializer = getRowsSerializerWriter<CalendarEntry>
     let calendarExceptionSerializer = getRowsSerializerWriter<CalendarException>
     let feedInfoSerializer = getRowsSerializerWriter<FeedInfo>
-    let czRouteSerializer = getRowsSerializerWriter<CzRoute>
-    let czTripSerializer = getRowsSerializerWriter<CzTrip>
-    let czStopSerializer = getRowsSerializerWriter<CzStop>
-
     fun path feed ->
         Directory.CreateDirectory(path) |> ignore
         let serializeTo name ser obj =
@@ -36,7 +32,22 @@ let gtfsFeedToFolder () =
         serializeTo "stops.txt" stopSerializer feed.stops
         serializeTo "routes.txt" routeSerializer feed.routes
         serializeTo "trips.txt" tripSerializer feed.trips
-        serializeTo "stop_times.txt" stopTimeSerializer feed.stopTimes
+        let standardStopTimes =
+            feed.stopTimes
+            |> Array.map (fun stopTime ->
+                {
+                    tripId = stopTime.tripId
+                    arrivalTime = stopTime.arrivalTime
+                    departureTime = stopTime.departureTime
+                    stopId = stopTime.stopId
+                    stopSequence = stopTime.stopSequence
+                    headsign = stopTime.headsign
+                    pickupType = stopTime.pickupType
+                    dropoffType = stopTime.dropoffType
+                    shapeDistTraveled = stopTime.shapeDistTraveled
+                    timepoint = stopTime.timepoint
+                }: StandardStopTime)
+        serializeTo "stop_times.txt" stopTimeSerializer standardStopTimes
         serializeToOpt "calendar.txt" calendarEntrySerializer feed.calendar
         serializeToOpt "calendar_dates.txt"
                        calendarExceptionSerializer
@@ -44,9 +55,30 @@ let gtfsFeedToFolder () =
         match feed.feedInfo with
         | Some fi -> serializeTo "feed_info.txt" feedInfoSerializer [fi]
         | _ -> ()
+
+let gtfsExtensionsToFolder () =
+    let czRouteSerializer = getRowsSerializerWriter<CzRoute>
+    let czTripSerializer = getRowsSerializerWriter<CzTrip>
+    let czStopSerializer = getRowsSerializerWriter<CzStop>
+    let czStopZoneSerializer = getRowsSerializerWriter<CzStopZone>
+    fun path feed ->
+        Directory.CreateDirectory(path) |> ignore
+        let serializeToOpt name ser obj =
+            obj |> Option.iter (fun rows ->
+                let filePath = Path.Combine(path, name)
+                use file = File.Open(filePath, FileMode.Create)
+                ser file rows)
         serializeToOpt "cz_routes.txt" czRouteSerializer feed.czRoutes
         serializeToOpt "cz_trips.txt" czTripSerializer feed.czTrips
         serializeToOpt "cz_stops.txt" czStopSerializer feed.czStops
+        serializeToOpt "cz_stop_zones.txt" czStopZoneSerializer feed.czStopZones
+
+let gtfsFeedToFolder () =
+    let standardSerializer = gtfsStandardTablesToFolder ()
+    let extensionSerializer = gtfsExtensionsToFolder ()
+    fun path feed ->
+        standardSerializer path feed
+        extensionSerializer path feed
 
 let gtfsParseFolder () =
     // In Python, I'd make a dictionary of file name -> type
@@ -71,6 +103,7 @@ let gtfsParseFolder () =
     let czRoutesParser = fileParserOpt "cz_routes.txt"
     let czTripsParser = fileParserOpt "cz_trips.txt"
     let czStopsParser = fileParserOpt "cz_stops.txt"
+    let czStopZonesParser = fileParserOpt "cz_stop_zones.txt"
 
     fun path ->
         let feed: GtfsFeed = {
@@ -87,6 +120,7 @@ let gtfsParseFolder () =
             czRoutes = czRoutesParser path
             czTrips = czTripsParser path
             czStops = czStopsParser path
+            czStopZones = czStopZonesParser path
         }
         feed
 

@@ -413,6 +413,7 @@ let gtfsFeed (czptts: CzPttXml.CzpttcisMessage seq) =
         czRoutes = None
         czTrips = None
         czStops = None
+        czStopZones = None
     }
     feed
 

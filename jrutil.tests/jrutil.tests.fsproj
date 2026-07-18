@@ -15,6 +15,7 @@
     <Compile Include="SearchParserTests.fs" />
     <Compile Include="SqlSearchTests.fs" />
     <Compile Include="JdfToGtfsTests.fs" />
+    <Compile Include="JdfBundleTests.fs" />
     <Compile Include="EntryPoint.fs" />
   </ItemGroup>
 
