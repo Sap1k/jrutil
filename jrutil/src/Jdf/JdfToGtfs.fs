@@ -3,6 +3,7 @@
 
 module JrUtil.JdfToGtfs
 
+open System
 open System.Text.RegularExpressions
 open NodaTime
 open NodaTime.Calendars
@@ -36,6 +37,11 @@ let jdfStopPostId cis stopId stopPostId =
     then sprintf "-CISS-%d-%d" stopId stopPostId
     else sprintf "JDFS-%d-%d" stopId stopPostId
 
+let jdfStopPostNumId cis stopId (stopPostNum: string) =
+    sprintf "%s-N-%s"
+            (jdfStopId cis stopId)
+            (Uri.EscapeDataString(stopPostNum))
+
 let jdfRouteId id idDistinction =
     sprintf "-CISR-%s-%d" id idDistinction
 
@@ -66,6 +72,96 @@ let getStopName (jdfStop: JdfModel.Stop) =
     | (Some d, None) -> sprintf "%s,%s" jdfStop.town d
     | (None, Some np) -> sprintf "%s,,%s" jdfStop.town np
     | (Some d, Some np) -> sprintf "%s,%s,%s" jdfStop.town d np
+
+let nonEmptyTrimmed (value: string) =
+    if String.IsNullOrWhiteSpace(value) then None
+    else Some (value.Trim())
+
+let normalizeNumericDesignation (value: string) =
+    let withoutZeros = value.TrimStart('0')
+    if withoutZeros = "" then "0" else withoutZeros
+
+let getPublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
+    let integrationsByRoute =
+        jdfBatch.routeIntegrations
+        |> Seq.groupBy (fun ri -> ri.routeId, ri.routeDistinction)
+        |> Map
+
+    jdfBatch.routes
+    |> Seq.map (fun route ->
+        let key = route.id, route.idDistinction
+        let preferred =
+            integrationsByRoute
+            |> Map.tryFind key
+            |> Option.defaultValue Seq.empty
+            |> Seq.filter (fun ri -> ri.preferential)
+            |> Seq.toArray
+
+        let normalizeExplicit value =
+            value
+            |> nonEmptyTrimmed
+            |> Option.map (fun designation ->
+                if Regex.IsMatch(designation, "^[0-9]+$")
+                then normalizeNumericDesignation designation
+                else designation)
+
+        let publicLineNumber =
+            match preferred with
+            | [| integration |] ->
+                match normalizeExplicit integration.routeName with
+                | Some value -> Some value
+                | None ->
+                    Log.Warning(
+                        "JDF route {RouteId}/{RouteDistinction} has an empty preferred LinExt designation",
+                        route.id, route.idDistinction)
+                    None
+            | [||] ->
+                if Regex.IsMatch(route.id, "^[0-9]{6}$") then
+                    route.id.Substring(3)
+                    |> normalizeNumericDesignation
+                    |> Some
+                else
+                    Log.Warning(
+                        "JDF route {RouteId}/{RouteDistinction} has no preferred LinExt designation and its CIS line ID is not six digits",
+                        route.id, route.idDistinction)
+                    None
+            | _ ->
+                Log.Warning(
+                    "JDF route {RouteId}/{RouteDistinction} has {PreferredCount} preferred LinExt designations",
+                    route.id, route.idDistinction, preferred.Length)
+                None
+        key, publicLineNumber)
+    |> Map
+
+let derivedStopPosts (jdfBatch: JdfModel.JdfBatch) =
+    jdfBatch.tripStops
+    |> Seq.choose (fun tripStop ->
+        match tripStop.stopPostId, tripStop.stopPostNum |> Option.bind nonEmptyTrimmed with
+        | None, Some stopPostNum -> Some (tripStop.stopId, stopPostNum)
+        | _ -> None)
+    |> Seq.distinct
+    |> Seq.toArray
+
+let stopPostNumbersById (jdfBatch: JdfModel.JdfBatch) =
+    jdfBatch.tripStops
+    |> Seq.choose (fun tripStop ->
+        match tripStop.stopPostId, tripStop.stopPostNum |> Option.bind nonEmptyTrimmed with
+        | Some stopPostId, Some stopPostNum ->
+            Some ((tripStop.stopId, stopPostId), stopPostNum)
+        | _ -> None)
+    |> Seq.groupBy fst
+    |> Seq.choose (fun (key, values) ->
+        let numbers = values |> Seq.map snd |> Seq.distinct |> Seq.toArray
+        match numbers with
+        | [| number |] -> Some (key, number)
+        | [||] -> None
+        | _ ->
+            let stopId, stopPostId = key
+            Log.Warning(
+                "JDF stop post {StopId}/{StopPostId} has conflicting station numbers {StationNumbers}",
+                stopId, stopPostId, String.Join(",", numbers))
+            None)
+    |> Map
 
 // TODO: Naming in this whole module
 let convertToGtfsAgency: JdfModel.Agency -> GtfsModel.Agency = fun jdfAgency ->
@@ -129,6 +225,7 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 platformCode = None
             }: GtfsModel.Stop)
     let gtfsStopsById = Map <| seq { for s in gtfsStops -> s.id, s }
+    let postNumbersById = stopPostNumbersById jdfBatch
     let gtfsStopPosts =
         jdfBatch.stopPosts |> Array.map (fun jdfStopPost ->
             let parentStop = gtfsStopsById.[jdfStopId stopIdsCis jdfStopPost.stopId]
@@ -139,20 +236,34 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                                    jdfStopPost.stopPostId
                 platformCode =
                     jdfStopPost.postName
+                    |> Option.bind nonEmptyTrimmed
+                    |> Option.orElseWith (fun () ->
+                        postNumbersById
+                        |> Map.tryFind (jdfStopPost.stopId,
+                                        jdfStopPost.stopPostId))
                     |> Option.orElse (Some (string jdfStopPost.stopPostId))
             }: GtfsModel.Stop)
+    let gtfsNumberedStopPosts =
+        derivedStopPosts jdfBatch
+        |> Array.map (fun (stopId, stopPostNum) ->
+            let parentStop = gtfsStopsById.[jdfStopId stopIdsCis stopId]
+            { parentStop with
+                id = jdfStopPostNumId stopIdsCis stopId stopPostNum
+                platformCode = Some stopPostNum
+            }: GtfsModel.Stop)
 
-    Array.concat [ gtfsStops; gtfsStopPosts ]
+    Array.concat [ gtfsStops; gtfsStopPosts; gtfsNumberedStopPosts ]
 
-let getGtfsRoutes: JdfModel.JdfBatch -> GtfsModel.Route array = fun jdfBatch ->
+let getGtfsRoutesWithPublicLines
+        (publicLineNumbers: Map<string * int, string option>)
+                                (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.routes
     |> Array.map (fun jdfRoute ->
     {
         id = jdfRouteId jdfRoute.id jdfRoute.idDistinction
         agencyId = Some (jdfAgencyId jdfRoute.agencyId
                                      jdfRoute.agencyDistinction)
-        // TODO: From JdfModel.RouteIntegration? What about multiple names?
-        shortName = Some (string jdfRoute.id)
+        shortName = publicLineNumbers.[jdfRoute.id, jdfRoute.idDistinction]
         longName = Some jdfRoute.name
         description = None
         // TODO: Deal with routes that don't allow national service
@@ -162,7 +273,10 @@ let getGtfsRoutes: JdfModel.JdfBatch -> GtfsModel.Route array = fun jdfBatch ->
         color = None
         textColor = None
         sortOrder = None
-    })
+    }: GtfsModel.Route)
+
+let getGtfsRoutes (jdfBatch: JdfModel.JdfBatch) =
+    getGtfsRoutesWithPublicLines (getPublicLineNumbers jdfBatch) jdfBatch
 
 
 /// Returns a boolean array, where each item represents a day in the route's
@@ -484,10 +598,15 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
                     arrivalTime = arrTime |> Option.orElse depTime
                     departureTime = depTime |> Option.orElse arrTime
                     stopId =
-                        match jdfTripStop.stopPostId with
-                        | Some sp ->
+                        match jdfTripStop.stopPostId,
+                              jdfTripStop.stopPostNum |> Option.bind nonEmptyTrimmed with
+                        | Some sp, _ ->
                             jdfStopPostId stopIdCis jdfTripStop.stopId sp
-                        | None -> jdfStopId stopIdCis jdfTripStop.stopId
+                        | None, Some stopPostNum ->
+                            jdfStopPostNumId stopIdCis
+                                                 jdfTripStop.stopId
+                                                 stopPostNum
+                        | None, None -> jdfStopId stopIdCis jdfTripStop.stopId
                     stopSequence = i
                     headsign = None
                     pickupType =
@@ -502,12 +621,109 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
                     // This will be dynamic when support for JDF's
                     // min/max times comes.
                     timepoint = Some GtfsModel.Exact
-                    stopZoneIds = jdfRouteStop.zone
+                    stopZoneIds = Jdf.normalizeZones [jdfRouteStop.zone]
                 }
                 Some stopTime
         )
         |> Seq.choose id
     )
+
+let getCzRoutes (publicLineNumbers: Map<string * int, string option>)
+                (jdfBatch: JdfModel.JdfBatch) =
+    jdfBatch.routes
+    |> Array.map (fun route ->
+        let zones =
+            jdfBatch.routeStops
+            |> Seq.filter (fun routeStop ->
+                routeStop.routeId = route.id
+                && routeStop.routeDistinction = route.idDistinction)
+            |> Seq.map (fun routeStop -> routeStop.zone)
+            |> Jdf.normalizeZones
+        {
+            routeId = jdfRouteId route.id route.idDistinction
+            cisLineId = Some route.id
+            publicLineNumber =
+                publicLineNumbers.[route.id, route.idDistinction]
+            idsSystemId = None
+            idsZoneIds = zones
+            sourceProvenance = sprintf "jdf:%s" jdfBatch.version.version
+        }: GtfsModel.CzRoute)
+
+let getCzTrips (tripsToDelete: Set<string>)
+               (jdfBatch: JdfModel.JdfBatch) =
+    jdfBatch.trips
+    |> Seq.choose (fun trip ->
+        let sourceTripId =
+            jdfTripId trip.routeId trip.routeDistinction trip.id
+        if tripsToDelete |> Set.contains sourceTripId then None
+        else
+            Some ({
+                tripId = sourceTripId
+                cisLineId = Some trip.routeId
+                cisTripId = Some trip.id
+                trainNumber = None
+                sourceTripIds = Some sourceTripId
+                coverageSources = Some "jdf"
+            }: GtfsModel.CzTrip))
+    |> Seq.toArray
+
+let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+    let cisStopId stopId = if stopIdsCis then Some stopId else None
+    let sourceStopId stopId = sprintf "jdf-stop:%d" stopId
+    let sourcePostId stopId stopPostId =
+        sprintf "jdf-stop-post-id:%d/%d" stopId stopPostId
+    let sourcePostNum (stopId: int64) (stopPostNum: string) =
+        sprintf "jdf-stop-post-num:%d/%s"
+                stopId
+                (Uri.EscapeDataString(stopPostNum))
+    let postNumbersById = stopPostNumbersById jdfBatch
+
+    let stops =
+        jdfBatch.stops
+        |> Array.map (fun stop ->
+            let stopId = jdfStopId stopIdsCis stop.id
+            {
+                stopId = stopId
+                stopPlaceId = stopId
+                cisStopId = cisStopId stop.id
+                postId = None
+                aswId = None
+                sourceIds = Some (sourceStopId stop.id)
+            }: GtfsModel.CzStop)
+    let stopPosts =
+        jdfBatch.stopPosts
+        |> Array.map (fun stopPost ->
+            let sourceIds =
+                match postNumbersById
+                      |> Map.tryFind (stopPost.stopId, stopPost.stopPostId) with
+                | Some stopPostNum ->
+                    String.Join(",", [|
+                        sourcePostId stopPost.stopId stopPost.stopPostId
+                        sourcePostNum stopPost.stopId stopPostNum
+                    |])
+                | None -> sourcePostId stopPost.stopId stopPost.stopPostId
+            {
+                stopId = jdfStopPostId stopIdsCis
+                                           stopPost.stopId
+                                           stopPost.stopPostId
+                stopPlaceId = jdfStopId stopIdsCis stopPost.stopId
+                cisStopId = cisStopId stopPost.stopId
+                postId = Some (string stopPost.stopPostId)
+                aswId = None
+                sourceIds = Some sourceIds
+            }: GtfsModel.CzStop)
+    let numberedStopPosts =
+        derivedStopPosts jdfBatch
+        |> Array.map (fun (stopId, stopPostNum) ->
+            {
+                stopId = jdfStopPostNumId stopIdsCis stopId stopPostNum
+                stopPlaceId = jdfStopId stopIdsCis stopId
+                cisStopId = cisStopId stopId
+                postId = Some stopPostNum
+                aswId = None
+                sourceIds = Some (sourcePostNum stopId stopPostNum)
+            }: GtfsModel.CzStop)
+    Array.concat [stops; stopPosts; numberedStopPosts]
 
 let warnUnhandledServiceNotes (jdfBatch: JdfModel.JdfBatch) () =
     jdfBatch.serviceNotes
@@ -521,10 +737,11 @@ let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     warnUnhandledServiceNotes jdfBatch ()
 
     let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar jdfBatch
+    let publicLineNumbers = getPublicLineNumbers jdfBatch
     let feed: GtfsModel.GtfsFeed = {
         agencies = jdfBatch.agencies |> Array.map convertToGtfsAgency
         stops = getGtfsStops stopIdsCis jdfBatch
-        routes = getGtfsRoutes jdfBatch
+        routes = getGtfsRoutesWithPublicLines publicLineNumbers jdfBatch
         trips = getGtfsTrips jdfBatch
             |> Seq.filter (fun t ->
                 tripsToDelete |> Set.contains t.id |> not)
@@ -536,5 +753,8 @@ let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
         calendar = Some calendar
         calendarExceptions = Some calendarExceptions
         feedInfo = None
+        czRoutes = Some (getCzRoutes publicLineNumbers jdfBatch)
+        czTrips = Some (getCzTrips tripsToDelete jdfBatch)
+        czStops = Some (getCzStops stopIdsCis jdfBatch)
     }
     feed

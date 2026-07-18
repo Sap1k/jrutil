@@ -16,6 +16,8 @@ open JrUtil.GtfsModelMeta
 let rec getFormatter fieldType =
     if fieldType = typeof<string> then (fun x -> [| unbox x |])
     else if fieldType = typeof<int> then (fun x -> [| sprintf "%d" (unbox x) |])
+    else if fieldType = typeof<int64> then
+        (fun x -> [| (unbox<int64> x).ToString(CultureInfo.InvariantCulture) |])
     else if fieldType = typeof<decimal> then
         (fun x -> [| sprintf "%M" (unbox x) |])
     else if fieldType = typeof<bool> then

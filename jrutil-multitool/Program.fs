@@ -28,6 +28,7 @@ Options:
     -l --logfile=FILE            Logfile
     -c --cache=DIR               Persistent cache directory
     -i --by-id                   Merge stops by numeric ID
+    --stop-ids-cis               Treat JDF stop numbers as authoritative CIS IDs
 
 Passing - to an input path parameter will make most jrutil commands read
 input filenames from stdin. Each result will be output into a sequentially
@@ -85,6 +86,7 @@ let main (args: string array) =
 
         let stopCoordsByIdPath = optArgValue args "--stop-coords-by-id"
         if argFlagSet args "jdf-to-gtfs" then
+            let stopIdsCis = argFlagSet args "--stop-ids-cis"
             let jdfPar = Jdf.jdfBatchDirParser ()
             let gtfsSer = Gtfs.gtfsFeedToFolder ()
             inOutFiles (argValues args "<JDF-in-dir>" |> Seq.head)
@@ -94,10 +96,9 @@ let main (args: string array) =
                 try
                     Log.Information("Reading JDF")
                     let jdf = jdfPar (Jdf.FsPath inpath)
-                    // TODO: Allow choice for stopIdsCis
                     Log.Information("Converting to GTFS")
                     let gtfs =
-                        JdfToGtfs.getGtfsFeed false jdf
+                        JdfToGtfs.getGtfsFeed stopIdsCis jdf
                         |> Gtfs.deduplicateCalendar
                         |> gtfsWithCoords stopCoordsByIdPath
 

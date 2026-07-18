@@ -140,6 +140,35 @@ type FeedInfo = {
     [<CsvFieldName("feed_version")>] version: string option
 }
 
+// Oběhy Czech schedule extensions. These records intentionally use the
+// corresponding intermediate GTFS IDs as their foreign keys.
+type CzRoute = {
+    [<CsvFieldName("route_id")>] routeId: string
+    [<CsvFieldName("cis_line_id")>] cisLineId: string option
+    [<CsvFieldName("public_line_number")>] publicLineNumber: string option
+    [<CsvFieldName("ids_system_id")>] idsSystemId: string option
+    [<CsvFieldName("ids_zone_ids")>] idsZoneIds: string option
+    [<CsvFieldName("source_provenance")>] sourceProvenance: string
+}
+
+type CzTrip = {
+    [<CsvFieldName("trip_id")>] tripId: string
+    [<CsvFieldName("cis_line_id")>] cisLineId: string option
+    [<CsvFieldName("cis_trip_id")>] cisTripId: int64 option
+    [<CsvFieldName("train_number")>] trainNumber: string option
+    [<CsvFieldName("source_trip_ids")>] sourceTripIds: string option
+    [<CsvFieldName("coverage_sources")>] coverageSources: string option
+}
+
+type CzStop = {
+    [<CsvFieldName("stop_id")>] stopId: string
+    [<CsvFieldName("stop_place_id")>] stopPlaceId: string
+    [<CsvFieldName("cis_stop_id")>] cisStopId: int64 option
+    [<CsvFieldName("post_id")>] postId: string option
+    [<CsvFieldName("asw_id")>] aswId: string option
+    [<CsvFieldName("source_ids")>] sourceIds: string option
+}
+
 // There are also other files, but I don't think JrUtil will be generating
 // them right now
 
@@ -152,4 +181,7 @@ type GtfsFeed = {
     calendar: CalendarEntry array option
     calendarExceptions: CalendarException array option
     feedInfo: FeedInfo option
+    czRoutes: CzRoute array option
+    czTrips: CzTrip array option
+    czStops: CzStop array option
 }

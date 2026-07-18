@@ -30,6 +30,39 @@ PostgreSQL database.
 
 *mkscriptenv.sh* creates an environment for writing .fsx scripts in *scripts*.
 
+# Oběhy JDF schedule extensions
+
+JDF-to-GTFS conversion also writes three optional Czech extension files used
+by the Oběhy canonical importer:
+
+| File | Purpose |
+| --- | --- |
+| `cz_routes.txt` | CIS line identity, passenger-facing line number, raw fare zones and JDF provenance |
+| `cz_trips.txt` | CIS line/trip identity and source-trip provenance |
+| `cz_stops.txt` | Source stop-place, CIS stop and post identities |
+
+The selected public line number is written to both `cz_routes.txt` and
+`routes.txt`'s `route_short_name`. A preferred JDF `LinExt` designation wins;
+otherwise the last three digits of the six-digit CIS line ID are used.
+Numeric designations have leading zeroes removed, while alphanumeric
+designations retain their spelling and case.
+
+JDF post references from `Oznacniky.txt` and text-only station numbers from
+`Zasspoje.txt` are both projected as distinct child stops. Raw zone lists are
+split, trimmed and deduplicated without attempting to infer their IDS system.
+`ids_system_id` therefore remains empty for this conversion.
+
+JDF stop numbers are not always global CIS identifiers. Pass `--stop-ids-cis`
+only for a batch known to use the national CIS stop registry:
+
+```text
+dotnet run --project jrutil-multitool -- \
+  jdf-to-gtfs --stop-ids-cis JDF-input GTFS-output
+```
+
+The extension files are optional in the shared GTFS model. CZPTT conversion
+does not populate them yet.
+
 # Installation:
 
 This project uses [.NET Core](https://www.microsoft.com/net).
