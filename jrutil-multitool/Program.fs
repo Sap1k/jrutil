@@ -24,11 +24,12 @@ Usage:
 
 Options:
     -C --stop-coords-by-id=FILE  CSV file assigning coordinates to stops by ID
-    -g --ext-geodata=FILE        CSV file with stop positions (name,lat,lon,region)
-    -o --cz-pbf=URL              OSM data for Czech Republic
+    -g --ext-geodata=PATH        CSV file or directory with stop positions
+    -o --cz-pbf=PATH             OSM data for Czech Republic
     -l --logfile=FILE            Logfile
     -c --cache=DIR               Persistent cache directory
     -i --by-id                   Merge stops by numeric ID
+    -s --strict                  Fail instead of skipping a malformed batch
     --stop-ids-cis               Treat JDF stop numbers as authoritative CIS IDs
     --snapshot-descriptor=FILE    Retrieval provenance and input checksum JSON
     --converter-version=VALUE     Exact JrUtil fork version or commit for provenance
@@ -148,8 +149,7 @@ let main (args: string array) =
                 geodataPath
                 |> Option.map (fun gdp ->
                     Utils.logWrappedOp "Reading external stops" <| fun () ->
-                        ExternalCsv.OtherStops.Parse(File.ReadAllText(gdp))
-                        |> ExternalCsv.otherStopsForJdfMatch)
+                        ExternalCsv.otherStopsFromPathForJdfMatch gdp)
                 |> Option.defaultValue [||]
             let osmStopsToMatch =
                 czPbf
@@ -201,6 +201,7 @@ let main (args: string array) =
         else if argFlagSet args "merge-jdf" then
             let outDir = argValue args "<JDF-out-dir>"
             let mergeById = argFlagSet args "--by-id"
+            let strict = argFlagSet args "--strict"
 
             let merger = JdfMerger.JdfMerger(
                 if mergeById then JdfMerger.MergeStopsById
@@ -214,12 +215,10 @@ let main (args: string array) =
                     use _logCtx = LogContext.PushProperty("JdfBatch", batchName)
                     Log.Information("Merging JDF batch {BatchPath}", batchPath)
 
-                    try
+                    runBatchAction strict (fun e ->
+                        Log.Error(e, "Error while processing {Batch}", batchPath)) (fun () ->
                         let batch = jdfPar batchDir
-                        merger.add(batch)
-                    with e ->
-                        Log.Error(e, "Error while processing {Batch}",
-                                  batchPath)
+                        merger.add(batch))
 
             Log.Information("Resolving route overlaps")
             merger.resolveRouteOverlaps()

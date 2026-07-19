@@ -263,6 +263,13 @@ let withProcessedArgs docstring (args: string array) fn =
         1
     | _ -> assert false; 1
 
+let runBatchAction strict onError action =
+    try
+        action ()
+    with e ->
+        onError e
+        if strict then reraise()
+
 let measureTime msg func =
     let sw = Stopwatch.StartNew()
     let res = func()
