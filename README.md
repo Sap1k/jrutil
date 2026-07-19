@@ -84,6 +84,12 @@ dotnet run --project jrutil-multitool -- \
 The extension files are optional in the shared GTFS model. CZPTT conversion
 does not populate them yet.
 
+For `fix-jdf`, `--ext-geodata` accepts either one headerless stop-position CSV
+or a directory. Directory inputs recursively load `*.csv` files in stable
+relative-path order and remove exact duplicate rows before constructing the
+stop matcher. Pass `--strict` to `merge-jdf` when a malformed input batch must
+fail the command instead of being logged and skipped.
+
 ## Oběhy JDF conversion bundles
 
 `jdf-to-bundle` accepts either an extracted JDF directory or a ZIP and writes

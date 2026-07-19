@@ -21,6 +21,21 @@ type JdfToGtfsTests() =
         feed.routes |> Array.find (fun item -> item.id = routeId)
 
     [<TestMethod>]
+    member _.``JDF writer creates a missing filesystem output directory``() =
+        let root =
+            Path.Combine(
+                Path.GetTempPath(),
+                "jrutil-jdf-writer-" + Guid.NewGuid().ToString("N"))
+        let output = Path.Combine(root, "missing", "nested")
+        try
+            Jdf.jdfBatchDirWriter () (Jdf.FsPath output) (batch ())
+
+            assertEqual true (File.Exists(Path.Combine(output, "VerzeJDF.txt")))
+            assertEqual true (File.Exists(Path.Combine(output, "Zastavky.txt")))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``JDF conversion emits Oběhy identities and public line numbers``() =
         let feed = batch () |> JdfToGtfs.getGtfsFeed false
 

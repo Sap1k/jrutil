@@ -16,6 +16,7 @@ open NodaTime
 open Parquet
 open Parquet.Schema
 open Parquet.Serialization
+open Serilog
 
 open JrUtil
 
@@ -785,6 +786,7 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
 
 let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath outputPath =
     if String.IsNullOrWhiteSpace(converterVersion) then invalidArg "converterVersion" "Converter version is required"
+    Log.Information("Bundle phase: loading and validating snapshot descriptor")
     let descriptor = loadSnapshotDescriptor snapshotDescriptorPath
     validateSnapshot descriptor inputPath
     let outputFull = Path.GetFullPath(outputPath)
@@ -798,24 +800,35 @@ let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath out
     let mutable completed = false
     try
         withJdfInput inputPath (fun source ->
+            Log.Information("Bundle phase: parsing merged JDF")
             let batch = Jdf.jdfBatchDirParser () source
+            Log.Information("Bundle phase: converting JDF to GTFS")
             let feed =
                 JdfToGtfs.getGtfsFeedForBundle stopIdsCis batch
                 |> Gtfs.deduplicateCalendar
                 |> Gtfs.fillStandardRequiredFields
             let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
             let extensionsPath = Path.Combine(temp, "extensions")
+            Log.Information("Bundle phase: writing GTFS tables")
             Gtfs.gtfsStandardTablesToFolder () gtfsPath feed
+            Log.Information("Bundle phase: writing GTFS extension tables")
             Gtfs.gtfsExtensionsToFolder () extensionsPath feed
+            Log.Information("Bundle phase: preparing Parquet relations")
             let tables = getTables stopIdsCis batch feed
             let mutable parquetRows = Map.empty
-            for name, parquetTable in tables do
+            for index, (name, parquetTable) in tables |> Array.indexed do
+                Log.Information(
+                    "Bundle phase: writing Parquet table {Index}/{Total}: {Table} ({Rows} rows)",
+                    index + 1, tables.Length, name, parquetTable.rows.Count)
                 writeParquet descriptor (Path.Combine(temp, name)) parquetTable
                 parquetRows <- parquetRows |> Map.add name parquetTable.rows.Count
+            Log.Information("Bundle phase: creating diagnostics")
             let bundleDiagnostics = diagnostics batch feed
             writeDiagnostics (Path.Combine(temp, "diagnostics.json")) bundleDiagnostics
+            Log.Information("Bundle phase: hashing payloads and creating manifest")
             let files = fileEntries temp parquetRows
             writeManifest (Path.Combine(temp, "manifest.json")) descriptor converterVersion stopIdsCis batch files)
+        Log.Information("Bundle phase: activating completed bundle")
         Directory.Move(temp, outputFull)
         completed <- true
     finally

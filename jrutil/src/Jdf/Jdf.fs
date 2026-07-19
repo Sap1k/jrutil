@@ -271,6 +271,10 @@ let jdfBatchDirWriter () =
     let stopLocationsWriter = fileWriter "Polzast.txt"
 
     fun dir (batch: JdfBatch) ->
+        match dir with
+        | FsPath path -> Directory.CreateDirectory(path) |> ignore
+        | ZipArchive _ -> ()
+
         versionWriter dir [|
             { batch.version with version = "1.11" }
         |] ()
