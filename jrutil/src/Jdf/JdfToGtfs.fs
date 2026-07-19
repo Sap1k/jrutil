@@ -22,40 +22,42 @@ open JrUtil.Holidays
 // And probably even more things. These are just the ones that are likely
 // to become a problem.
 
-let jdfAgencyId id idDistinction =
-    sprintf "JDFA-%s-%d" id idDistinction
+let jdfAgencyId (id: string) idDistinction =
+    sprintf "jdf:agency:%s:%d" (Uri.EscapeDataString(id)) idDistinction
 
 let jdfStopId cis id =
     if cis
     // Stop IDs which are global (from the CIS database)
-    then sprintf "-CISS-%d" id
+    then sprintf "cis:stop:%d" id
     // Stop IDs which are local to the file
-    else sprintf "JDFS-%d" id
+    else sprintf "jdf:stop:%d" id
+
+let jdfUnspecifiedStopId cis id =
+    sprintf "%s:unspecified" (jdfStopId cis id)
 
 let jdfStopPostId cis stopId stopPostId =
-    if cis
-    then sprintf "-CISS-%d-%d" stopId stopPostId
-    else sprintf "JDFS-%d-%d" stopId stopPostId
+    sprintf "%s:post:id:%d" (jdfStopId cis stopId) stopPostId
 
 let jdfStopPostNumId cis stopId (stopPostNum: string) =
-    sprintf "%s-N-%s"
+    sprintf "%s:post:%s"
             (jdfStopId cis stopId)
             (Uri.EscapeDataString(stopPostNum))
 
-let jdfRouteId id idDistinction =
-    sprintf "-CISR-%s-%d" id idDistinction
+let jdfRouteId (id: string) idDistinction =
+    sprintf "jdf:route:%s:%d" (Uri.EscapeDataString(id)) idDistinction
 
 let jdfSourceRouteId (id: string) idDistinction =
-    sprintf "jdf-route:%s/%d" (Uri.EscapeDataString(id)) idDistinction
+    jdfRouteId id idDistinction
 
 let jdfSourceZoneId (routeId: string) routeDistinction (zoneCode: string) =
-    sprintf "jdf-zone:%s/%d/%s"
+    sprintf "jdf:zone:%s:%d:%s"
             (Uri.EscapeDataString(routeId))
             routeDistinction
             (Uri.EscapeDataString(zoneCode))
 
-let jdfTripId routeId routeDistinction id =
-    sprintf "CIST-%s-%d-%d" routeId routeDistinction id
+let jdfTripId (routeId: string) routeDistinction id =
+    sprintf "jdf:trip:%s:%d:%d"
+            (Uri.EscapeDataString(routeId)) routeDistinction id
 
 let getGtfsRouteType (jdfRoute: JdfModel.Route) =
     match (jdfRoute.transportMode, jdfRoute.routeType) with
@@ -258,7 +260,7 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 // represented losslessly in cz_stop_zones.txt.
                 zoneId = zonesByStop |> Map.tryFind jdfStop.id |> Option.flatten
                 url = None
-                locationType = Some GtfsModel.Stop
+                locationType = Some GtfsModel.Station
                 parentStation = None
                 // TODO: Try to guess from jdfStop.country
                 timezone = Some "Europe/Prague"
@@ -275,6 +277,14 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 platformCode = None
             }: GtfsModel.Stop)
     let gtfsStopsById = Map <| seq { for s in gtfsStops -> s.id, s }
+    let gtfsUnspecifiedStops =
+        jdfBatch.stops |> Array.map (fun jdfStop ->
+            let parentStop = gtfsStopsById.[jdfStopId stopIdsCis jdfStop.id]
+            { parentStop with
+                id = jdfUnspecifiedStopId stopIdsCis jdfStop.id
+                locationType = Some GtfsModel.Stop
+                parentStation = Some parentStop.id
+            }: GtfsModel.Stop)
     let postNumbersById = stopPostNumbersById jdfBatch
     let gtfsStopPosts =
         jdfBatch.stopPosts |> Array.map (fun jdfStopPost ->
@@ -284,6 +294,8 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 id = jdfStopPostId stopIdsCis
                                    jdfStopPost.stopId
                                    jdfStopPost.stopPostId
+                locationType = Some GtfsModel.Stop
+                parentStation = Some parentStop.id
                 platformCode =
                     jdfStopPost.postName
                     |> Option.bind nonEmptyTrimmed
@@ -299,10 +311,13 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
             let parentStop = gtfsStopsById.[jdfStopId stopIdsCis stopId]
             { parentStop with
                 id = jdfStopPostNumId stopIdsCis stopId stopPostNum
+                locationType = Some GtfsModel.Stop
+                parentStation = Some parentStop.id
                 platformCode = Some stopPostNum
             }: GtfsModel.Stop)
 
-    Array.concat [ gtfsStops; gtfsStopPosts; gtfsNumberedStopPosts ]
+    Array.concat [ gtfsStops; gtfsUnspecifiedStops
+                   gtfsStopPosts; gtfsNumberedStopPosts ]
 
 let getGtfsRoutesWithPublicLines
         (publicLineNumbers: Map<string * int, string option>)
@@ -660,7 +675,8 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
                             jdfStopPostNumId stopIdCis
                                                  jdfTripStop.stopId
                                                  stopPostNum
-                        | None, None -> jdfStopId stopIdCis jdfTripStop.stopId
+                        | None, None ->
+                            jdfUnspecifiedStopId stopIdCis jdfTripStop.stopId
                     stopSequence = i
                     headsign = None
                     pickupType =
@@ -686,20 +702,11 @@ let getCzRoutes (publicLineNumbers: Map<string * int, string option>)
                 (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.routes
     |> Array.map (fun route ->
-        let zones =
-            jdfBatch.routeStops
-            |> Seq.filter (fun routeStop ->
-                routeStop.routeId = route.id
-                && routeStop.routeDistinction = route.idDistinction)
-            |> Seq.map (fun routeStop -> routeStop.zone)
-            |> Jdf.normalizeZones
         {
             routeId = jdfRouteId route.id route.idDistinction
             cisLineId = Some route.id
             publicLineNumber =
                 publicLineNumbers.[route.id, route.idDistinction]
-            idsSystemId = None
-            idsZoneIds = zones
             sourceProvenance = sprintf "jdf:%s" jdfBatch.version.version
         }: GtfsModel.CzRoute)
 
@@ -723,11 +730,11 @@ let getCzTrips (tripsToDelete: Set<string>)
 
 let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     let cisStopId stopId = if stopIdsCis then Some stopId else None
-    let sourceStopId stopId = sprintf "jdf-stop:%d" stopId
+    let sourceStopId stopId = sprintf "jdf:stop:%d" stopId
     let sourcePostId stopId stopPostId =
-        sprintf "jdf-stop-post-id:%d/%d" stopId stopPostId
+        sprintf "jdf:stop:%d:post:id:%d" stopId stopPostId
     let sourcePostNum (stopId: int64) (stopPostNum: string) =
-        sprintf "jdf-stop-post-num:%d/%s"
+        sprintf "jdf:stop:%d:post:%s"
                 stopId
                 (Uri.EscapeDataString(stopPostNum))
     let postNumbersById = stopPostNumbersById jdfBatch
@@ -743,6 +750,17 @@ let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 postId = None
                 aswId = None
                 sourceIds = Some (sourceStopId stop.id)
+            }: GtfsModel.CzStop)
+    let unspecifiedStops =
+        jdfBatch.stops
+        |> Array.map (fun stop ->
+            {
+                stopId = jdfUnspecifiedStopId stopIdsCis stop.id
+                stopPlaceId = jdfStopId stopIdsCis stop.id
+                cisStopId = cisStopId stop.id
+                postId = None
+                aswId = None
+                sourceIds = None
             }: GtfsModel.CzStop)
     let stopPosts =
         jdfBatch.stopPosts
@@ -777,7 +795,7 @@ let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 aswId = None
                 sourceIds = Some (sourcePostNum stopId stopPostNum)
             }: GtfsModel.CzStop)
-    Array.concat [stops; stopPosts; numberedStopPosts]
+    Array.concat [stops; unspecifiedStops; stopPosts; numberedStopPosts]
 
 let getCzStopZones stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.routeStops
@@ -807,8 +825,9 @@ let warnUnhandledServiceNotes (jdfBatch: JdfModel.JdfBatch) () =
 
 // Some JDF feeds have only local IDs for stops, some have global IDs for the
 // whole CIS. Set stopIdsCis accordingly.
-let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
-    warnUnhandledServiceNotes jdfBatch ()
+let private getGtfsFeedInternal warnUnhandledNotes stopIdsCis
+                                (jdfBatch: JdfModel.JdfBatch) =
+    if warnUnhandledNotes then warnUnhandledServiceNotes jdfBatch ()
 
     let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar jdfBatch
     let publicLineNumbers = getPublicLineNumbers jdfBatch
@@ -833,3 +852,11 @@ let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
         czStopZones = Some (getCzStopZones stopIdsCis jdfBatch)
     }
     feed
+
+let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+    getGtfsFeedInternal true stopIdsCis jdfBatch
+
+// Bundle sidecars retain otherwise-unhandled textual service notes, so the
+// standalone conversion warning would be misleading while building a bundle.
+let getGtfsFeedForBundle stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+    getGtfsFeedInternal false stopIdsCis jdfBatch

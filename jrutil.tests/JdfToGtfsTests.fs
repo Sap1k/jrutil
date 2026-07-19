@@ -24,41 +24,49 @@ type JdfToGtfsTests() =
     member _.``JDF conversion emits Oběhy identities and public line numbers``() =
         let feed = batch () |> JdfToGtfs.getGtfsFeed false
 
-        route "-CISR-586001-1" feed
+        route "jdf:route:586001:1" feed
         |> fun item ->
             assertEqual (Some "10") item.shortName
             assertEqual (Some "0076a3") item.color
             assertEqual (Some "ffffff") item.textColor
-        route "-CISR-446002-1" feed
+        route "jdf:route:446002:1" feed
         |> fun item ->
             assertEqual (Some "N2") item.shortName
             assertEqual (Some "80166f") item.color
             assertEqual (Some "ffffff") item.textColor
-        route "-CISR-582486-1" feed
+        route "jdf:route:582486:1" feed
         |> fun item -> assertEqual (Some "486") item.shortName
 
         let czRoutes = feed.czRoutes |> Option.get
         let numericRoute =
             czRoutes
-            |> Array.find (fun item -> item.routeId = "-CISR-586001-1")
+            |> Array.find (fun item -> item.routeId = "jdf:route:586001:1")
         assertEqual (Some "586001") numericRoute.cisLineId
         assertEqual (Some "10") numericRoute.publicLineNumber
-        assertEqual None numericRoute.idsSystemId
-        assertEqual (Some "6,193") numericRoute.idsZoneIds
         assertEqual "jdf:1.11" numericRoute.sourceProvenance
 
         let czTrip =
             feed.czTrips
             |> Option.get
-            |> Array.find (fun item -> item.tripId = "CIST-586001-1-1")
-        assertEqual "CIST-586001-1-1" czTrip.tripId
+            |> Array.find (fun item -> item.tripId = "jdf:trip:586001:1:1")
+        assertEqual "jdf:trip:586001:1:1" czTrip.tripId
         assertEqual (Some "586001") czTrip.cisLineId
         assertEqual (Some 1L) czTrip.cisTripId
-        assertEqual (Some "CIST-586001-1-1") czTrip.sourceTripIds
+        assertEqual (Some "jdf:trip:586001:1:1") czTrip.sourceTripIds
         assertEqual (Some "jdf") czTrip.coverageSources
 
         let routeIds = feed.routes |> Array.map (fun item -> item.id) |> set
         let tripIds = feed.trips |> Array.map (fun item -> item.id) |> set
+        feed.agencies |> Array.iter (fun item ->
+            assertEqual true (item.id |> Option.exists (fun id -> id.StartsWith("jdf:agency:"))))
+        feed.routes |> Array.iter (fun item ->
+            assertEqual true (item.id.StartsWith("jdf:route:")))
+        feed.trips |> Array.iter (fun item ->
+            assertEqual true (item.id.StartsWith("jdf:trip:")))
+        feed.stops |> Array.iter (fun item ->
+            assertEqual true (item.id.StartsWith("jdf:stop:")))
+        feed.czStopZones |> Option.get |> Array.iter (fun item ->
+            assertEqual true (item.zoneId.StartsWith("jdf:zone:")))
         feed.czRoutes |> Option.get |> Array.iter (fun item ->
             assertEqual true (routeIds.Contains item.routeId))
         feed.czTrips |> Option.get |> Array.iter (fun item ->
@@ -120,36 +128,48 @@ type JdfToGtfsTests() =
         let feed = batch () |> JdfToGtfs.getGtfsFeed false
         let stopIds = feed.stops |> Array.map (fun stop -> stop.id) |> set
 
-        assertEqual true (stopIds.Contains "JDFS-100-N-1")
-        assertEqual true (stopIds.Contains "JDFS-200-7")
+        assertEqual true (stopIds.Contains "jdf:stop:100:post:1")
+        assertEqual true (stopIds.Contains "jdf:stop:200:post:id:7")
+        assertEqual true (stopIds.Contains "jdf:stop:200:unspecified")
         feed.stops
-        |> Array.find (fun stop -> stop.id = "JDFS-100")
-        |> fun stop -> assertEqual None stop.zoneId
+        |> Array.find (fun stop -> stop.id = "jdf:stop:100")
+        |> fun stop ->
+            assertEqual None stop.zoneId
+            assertEqual (Some GtfsModel.Station) stop.locationType
         feed.stops
-        |> Array.find (fun stop -> stop.id = "JDFS-200")
+        |> Array.find (fun stop -> stop.id = "jdf:stop:200")
         |> fun stop -> assertEqual (Some "193") stop.zoneId
         feed.stops
-        |> Array.find (fun stop -> stop.id = "JDFS-100-N-1")
-        |> fun stop -> assertEqual (Some "1") stop.platformCode
+        |> Array.find (fun stop -> stop.id = "jdf:stop:200:unspecified")
+        |> fun stop ->
+            assertEqual (Some GtfsModel.Stop) stop.locationType
+            assertEqual (Some "jdf:stop:200") stop.parentStation
         feed.stops
-        |> Array.find (fun stop -> stop.id = "JDFS-200-7")
-        |> fun stop -> assertEqual (Some "B") stop.platformCode
+        |> Array.find (fun stop -> stop.id = "jdf:stop:100:post:1")
+        |> fun stop ->
+            assertEqual (Some "1") stop.platformCode
+            assertEqual (Some "jdf:stop:100") stop.parentStation
+        feed.stops
+        |> Array.find (fun stop -> stop.id = "jdf:stop:200:post:id:7")
+        |> fun stop ->
+            assertEqual (Some "B") stop.platformCode
+            assertEqual (Some "jdf:stop:200") stop.parentStation
 
         let numericStopTimes =
             feed.stopTimes
             |> Array.filter (fun stopTime ->
-                stopTime.tripId = "CIST-586001-1-1")
+                stopTime.tripId = "jdf:trip:586001:1:1")
             |> Array.sortBy (fun stopTime -> stopTime.stopSequence)
-        assertEqual "JDFS-100-N-1" numericStopTimes.[0].stopId
+        assertEqual "jdf:stop:100:post:1" numericStopTimes.[0].stopId
         assertEqual None numericStopTimes.[0].stopZoneIds
-        assertEqual "JDFS-200" numericStopTimes.[1].stopId
+        assertEqual "jdf:stop:200:unspecified" numericStopTimes.[1].stopId
         let formalStopTimes =
             feed.stopTimes
             |> Array.filter (fun stopTime ->
-                stopTime.tripId = "CIST-446002-1-1")
+                stopTime.tripId = "jdf:trip:446002:1:1")
             |> Array.sortBy (fun stopTime -> stopTime.stopSequence)
-        assertEqual "JDFS-100-8" formalStopTimes.[0].stopId
-        assertEqual "JDFS-200-7" formalStopTimes.[1].stopId
+        assertEqual "jdf:stop:100:post:id:8" formalStopTimes.[0].stopId
+        assertEqual "jdf:stop:200:post:id:7" formalStopTimes.[1].stopId
         feed.stopTimes
         |> Array.iter (fun stopTime ->
             assertEqual true (stopIds.Contains stopTime.stopId))
@@ -159,21 +179,21 @@ type JdfToGtfsTests() =
             (feed.stops |> Array.map (fun stop -> stop.id) |> set)
             (czStops |> Array.map (fun stop -> stop.stopId) |> set)
         let numberedPost =
-            czStops |> Array.find (fun stop -> stop.stopId = "JDFS-100-N-1")
-        assertEqual "JDFS-100" numberedPost.stopPlaceId
+            czStops |> Array.find (fun stop -> stop.stopId = "jdf:stop:100:post:1")
+        assertEqual "jdf:stop:100" numberedPost.stopPlaceId
         assertEqual (Some "1") numberedPost.postId
-        assertEqual (Some "jdf-stop-post-num:100/1") numberedPost.sourceIds
+        assertEqual (Some "jdf:stop:100:post:1") numberedPost.sourceIds
         let formalPost =
-            czStops |> Array.find (fun stop -> stop.stopId = "JDFS-200-7")
+            czStops |> Array.find (fun stop -> stop.stopId = "jdf:stop:200:post:id:7")
         assertEqual (Some "7") formalPost.postId
         assertEqual
-            (Some "jdf-stop-post-id:200/7,jdf-stop-post-num:200/A")
+            (Some "jdf:stop:200:post:id:7,jdf:stop:200:post:A")
             formalPost.sourceIds
         let czStopZones = feed.czStopZones |> Option.get
-        assertEqual 4 czStopZones.Length
-        assertEqual 3
+        assertEqual 5 czStopZones.Length
+        assertEqual 4
             (czStopZones
-             |> Array.filter (fun zone -> zone.stopPlaceId = "JDFS-100")
+             |> Array.filter (fun zone -> zone.stopPlaceId = "jdf:stop:100")
              |> Array.length)
         czStopZones |> Array.iter (fun zone -> assertEqual None zone.idsSystemId)
 
@@ -183,7 +203,7 @@ type JdfToGtfsTests() =
         let czStops = feed.czStops |> Option.get
         czStops |> Array.iter (fun stop -> assertEqual true stop.cisStopId.IsSome)
         assertEqual true (feed.stops |> Array.exists (fun stop ->
-            stop.id = "-CISS-100-N-1"))
+            stop.id = "cis:stop:100:post:1"))
 
         let root =
             Path.Combine(Path.GetTempPath(), "jrutil-obehy-" + Guid.NewGuid().ToString("N"))
@@ -195,7 +215,7 @@ type JdfToGtfsTests() =
             write second feed
 
             let expectedHeaders = [|
-                "cz_routes.txt", "route_id,cis_line_id,public_line_number,ids_system_id,ids_zone_ids,source_provenance"
+                "cz_routes.txt", "route_id,cis_line_id,public_line_number,source_provenance"
                 "cz_trips.txt", "trip_id,cis_line_id,cis_trip_id,train_number,source_trip_ids,coverage_sources"
                 "cz_stops.txt", "stop_id,stop_place_id,cis_stop_id,post_id,asw_id,source_ids"
                 "cz_stop_zones.txt", "stop_place_id,zone_id,zone_code,route_id,ids_system_id,source_provenance"
@@ -217,8 +237,8 @@ type JdfToGtfsTests() =
             let parsed = Gtfs.gtfsParseFolder () first
             assertEqual (Some 3) (parsed.czRoutes |> Option.map Array.length)
             assertEqual (Some 2) (parsed.czTrips |> Option.map Array.length)
-            assertEqual (Some 5) (parsed.czStops |> Option.map Array.length)
-            assertEqual (Some 4) (parsed.czStopZones |> Option.map Array.length)
+            assertEqual (Some 7) (parsed.czStops |> Option.map Array.length)
+            assertEqual (Some 5) (parsed.czStopZones |> Option.map Array.length)
             assertEqual false
                 ((File.ReadLines(Path.Combine(first, "stop_times.txt")) |> Seq.head)
                     .Contains("stop_zone_ids"))

@@ -197,6 +197,58 @@ let private nullableObj value =
 let private localDateString (value: LocalDate) =
     value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
 
+let private nonEmptyText (value: string option) =
+    value
+    |> Option.bind (fun text ->
+        if String.IsNullOrWhiteSpace(text) then None else Some text)
+
+let private serviceNoteTypeName = function
+    | JdfModel.Service -> "service"
+    | JdfModel.ServiceAlso -> "service_also"
+    | JdfModel.ServiceOnly -> "service_only"
+    | JdfModel.NoService -> "no_service"
+    | JdfModel.ServiceOddWeeks -> "odd_weeks"
+    | JdfModel.ServiceEvenWeeks -> "even_weeks"
+    | JdfModel.ServiceOddWeeksFromTo -> "odd_weeks_from_to"
+    | JdfModel.ServiceEvenWeeksFromTo -> "even_weeks_from_to"
+
+let private restrictionGroupCode = function
+    | JdfModel.TravelExclusion0 -> Some "§"
+    | JdfModel.TravelExclusion1 -> Some "A"
+    | JdfModel.TravelExclusion2 -> Some "B"
+    | JdfModel.TravelExclusion3 -> Some "C"
+    | _ -> None
+
+let private restrictionGroups batch attributes =
+    Jdf.parseAttributes batch attributes
+    |> Seq.choose restrictionGroupCode
+
+let private withOwnerOrdinals ownerKey values =
+    values
+    |> Seq.groupBy ownerKey
+    |> Seq.collect (fun (_, ownedValues) ->
+        ownedValues |> Seq.mapi (fun index value -> index + 1, value))
+
+let private sourceSegment (value: string) = Uri.EscapeDataString(value)
+
+let private routeNoticeId routeId distinction noticeId =
+    $"jdf:notice:route:{sourceSegment routeId}:{distinction}:{noticeId}"
+
+let private tripNoticeId routeId distinction tripId noticeId =
+    $"jdf:notice:trip:{sourceSegment routeId}:{distinction}:{tripId}:{noticeId}"
+
+let private reservationNoticeId routeId distinction tripId ordinal =
+    $"jdf:notice:reservation:{sourceSegment routeId}:{distinction}:{tripId}:{ordinal}"
+
+let private transferId routeId distinction tripId ordinal =
+    $"jdf:transfer:{sourceSegment routeId}:{distinction}:{tripId}:{ordinal}"
+
+let private restrictionId routeId distinction tripId routeStopId =
+    $"jdf:restriction:{sourceSegment routeId}:{distinction}:{tripId}:{routeStopId}"
+
+let private routeStopSourceId routeId distinction sourceRouteStopId =
+    $"jdf:route-stop:{sourceSegment routeId}:{distinction}:{sourceRouteStopId}"
+
 let private table fields rows =
     { fields = fields; rows = rows |> Array.map (fun value -> value :> IDictionary<string, obj>) }
 
@@ -210,6 +262,7 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
         |> Seq.map (fun location -> location.stopId, location)
         |> Map
     let retainedTripIds = feed.trips |> Seq.map (fun trip -> trip.id) |> Set
+    let retainedRouteIds = feed.routes |> Seq.map (fun route -> route.id) |> Set
     let gtfsStopTimes = feed.stopTimes |> Seq.groupBy (fun call -> call.tripId) |> Map
 
     let routes =
@@ -265,20 +318,152 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
         |> Seq.sortBy (fun value -> string value.["gtfs_trip_id"], unbox<int> value.["stop_sequence"])
         |> Seq.toArray
 
-    let stopZones =
+    let routeStopZones =
         batch.routeStops
         |> Seq.collect (fun routeStop ->
             Jdf.normalizeZoneTokens [routeStop.zone]
             |> Seq.mapi (fun index zoneCode ->
                 row [
-                    "stop_place_id", box (JdfToGtfs.jdfStopId stopIdsCis routeStop.stopId)
-                    "zone_id", box (JdfToGtfs.jdfSourceZoneId routeStop.routeId routeStop.routeDistinction zoneCode)
+                    "gtfs_route_id", box (JdfToGtfs.jdfRouteId routeStop.routeId routeStop.routeDistinction)
                     "source_route_stop_id", box routeStop.routeStopId
+                    "zone_id", box (JdfToGtfs.jdfSourceZoneId routeStop.routeId routeStop.routeDistinction zoneCode)
                     "zone_order", box index ]))
         |> Seq.distinctBy (fun value ->
-            value.["stop_place_id"], value.["zone_id"], value.["source_route_stop_id"])
+            value.["gtfs_route_id"], value.["source_route_stop_id"], value.["zone_id"])
         |> Seq.sortBy (fun value ->
-            string value.["stop_place_id"], string value.["zone_id"], unbox<int64> value.["source_route_stop_id"])
+            string value.["gtfs_route_id"], unbox<int64> value.["source_route_stop_id"],
+            unbox<int> value.["zone_order"], string value.["zone_id"])
+        |> Seq.toArray
+
+    let emittedCallKeys =
+        calls
+        |> Seq.map (fun value ->
+            (string value.["gtfs_trip_id"], unbox<int64> value.["source_route_stop_id"]), ())
+        |> Map
+
+    let notices =
+        let routeNotices =
+            batch.routeInfo
+            |> Array.choose (fun notice ->
+                if String.IsNullOrWhiteSpace(notice.text) then None else
+                let gtfsRouteId = JdfToGtfs.jdfRouteId notice.routeId notice.routeDistinction
+                if not (retainedRouteIds.Contains gtfsRouteId) then None else
+                Some (row [
+                    "source_notice_id", box (routeNoticeId notice.routeId notice.routeDistinction notice.id)
+                    "notice_kind", box "route_information"
+                    "gtfs_route_id", box gtfsRouteId
+                    "gtfs_trip_id", null
+                    "label", null
+                    "text", box notice.text
+                    "valid_from", null
+                    "valid_to", null
+                    "service_note_type", null ]))
+        let serviceNotices =
+            batch.serviceNotes
+            |> Array.choose (fun notice ->
+                let text = nonEmptyText notice.note
+                let label = nonEmptyText (Some notice.designation)
+                // A typed, text-free time code is already represented exactly
+                // by calendar.txt/calendar_dates.txt.
+                if notice.noteType.IsSome && text.IsNone then None
+                elif text.IsNone && label.IsNone then None
+                else
+                    let gtfsTripId =
+                        JdfToGtfs.jdfTripId notice.routeId notice.routeDistinction notice.tripId
+                    if not (retainedTripIds.Contains gtfsTripId) then None else
+                    Some (row [
+                        "source_notice_id", box (tripNoticeId notice.routeId notice.routeDistinction notice.tripId notice.id)
+                        "notice_kind", box "service_note"
+                        "gtfs_route_id", null
+                        "gtfs_trip_id", box gtfsTripId
+                        "label", nullableObj label
+                        "text", nullableObj text
+                        "valid_from", notice.dateFrom |> Option.map localDateString |> nullableObj
+                        "valid_to", notice.dateTo |> Option.map localDateString |> nullableObj
+                        "service_note_type", notice.noteType |> Option.map serviceNoteTypeName |> nullableObj ]))
+        let reservationNotices =
+            batch.reservationOptions
+            |> withOwnerOrdinals (fun notice -> notice.routeId, notice.routeDistinction, notice.tripId)
+            |> Seq.choose (fun (ordinal, notice) ->
+                if String.IsNullOrWhiteSpace(notice.note) then None else
+                let gtfsTripId =
+                    JdfToGtfs.jdfTripId notice.routeId notice.routeDistinction notice.tripId
+                if not (retainedTripIds.Contains gtfsTripId) then None else
+                Some (row [
+                    "source_notice_id", box (reservationNoticeId notice.routeId notice.routeDistinction notice.tripId ordinal)
+                    "notice_kind", box "reservation"
+                    "gtfs_route_id", null
+                    "gtfs_trip_id", box gtfsTripId
+                    "label", null
+                    "text", box notice.note
+                    "valid_from", null
+                    "valid_to", null
+                    "service_note_type", null ]))
+            |> Seq.toArray
+        Array.concat [routeNotices; serviceNotices; reservationNotices]
+        |> Array.sortBy (fun value -> string value.["source_notice_id"])
+
+    let transfers =
+        batch.transfers
+        |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
+        |> Seq.choose (fun (ordinal, transfer) ->
+            let gtfsTripId =
+                JdfToGtfs.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+            if not (retainedTripIds.Contains gtfsTripId)
+               || not (emittedCallKeys.ContainsKey (gtfsTripId, transfer.routeStopId)) then None
+            else Some (row [
+                "source_transfer_id", box (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)
+                "gtfs_trip_id", box gtfsTripId
+                "source_route_stop_id", box transfer.routeStopId
+                "transfer_type", box transfer.transferType
+                "transfer_route_id", nullableObj transfer.transferRouteId
+                "transfer_stop_id", nullableObj transfer.transferStopId
+                "transfer_stop_post_id", nullableObj transfer.transferStopPostId
+                "transfer_end_stop_id", nullableObj transfer.transferEndStopId
+                "transfer_end_stop_post_id", nullableObj transfer.transferEndStopPostId
+                "wait_minutes", nullableObj transfer.waitMinutes
+                "note", nonEmptyText transfer.note |> nullableObj ]))
+        |> Seq.sortBy (fun value ->
+            string value.["gtfs_trip_id"], unbox<int64> value.["source_route_stop_id"],
+            string value.["source_transfer_id"])
+        |> Seq.toArray
+
+    let restrictions =
+        let routeStopAssignments =
+            batch.routeStops
+            |> Seq.collect (fun routeStop ->
+                let gtfsRouteId =
+                    JdfToGtfs.jdfRouteId routeStop.routeId routeStop.routeDistinction
+                if not (retainedRouteIds.Contains gtfsRouteId) then Seq.empty else
+                restrictionGroups batch routeStop.attributes
+                |> Seq.map (fun groupCode -> row [
+                    "assignment_scope", box "route_stop"
+                    "gtfs_route_id", box gtfsRouteId
+                    "gtfs_trip_id", null
+                    "source_route_stop_id", box routeStop.routeStopId
+                    "group_code", box groupCode ]))
+        let tripCallAssignments =
+            batch.tripStops
+            |> Seq.collect (fun tripStop ->
+                let gtfsTripId =
+                    JdfToGtfs.jdfTripId tripStop.routeId tripStop.routeDistinction tripStop.tripId
+                if not (retainedTripIds.Contains gtfsTripId)
+                   || not (emittedCallKeys.ContainsKey (gtfsTripId, tripStop.routeStopId)) then Seq.empty
+                else restrictionGroups batch tripStop.attributes
+                     |> Seq.map (fun groupCode -> row [
+                        "assignment_scope", box "trip_call"
+                        "gtfs_route_id", null
+                        "gtfs_trip_id", box gtfsTripId
+                        "source_route_stop_id", box tripStop.routeStopId
+                        "group_code", box groupCode ]))
+        Seq.append routeStopAssignments tripCallAssignments
+        |> Seq.distinctBy (fun value ->
+            value.["assignment_scope"], value.["gtfs_route_id"], value.["gtfs_trip_id"],
+            value.["source_route_stop_id"], value.["group_code"])
+        |> Seq.sortBy (fun value ->
+            string value.["assignment_scope"], string value.["gtfs_route_id"],
+            string value.["gtfs_trip_id"], unbox<int64> value.["source_route_stop_id"],
+            string value.["group_code"])
         |> Seq.toArray
 
     let stringField name nullable = field<string> name nullable
@@ -298,10 +483,26 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
         "source_call_metadata.parquet", table [|
             stringField "gtfs_trip_id" false; intField "stop_sequence" false
             int64Field "source_route_stop_id" false |] calls
-        "source_stop_zone_metadata.parquet", table [|
-            stringField "stop_place_id" false; stringField "zone_id" false
-            int64Field "source_route_stop_id" false
-            intField "zone_order" false |] stopZones
+        "source_route_stop_zone_metadata.parquet", table [|
+            stringField "gtfs_route_id" false; int64Field "source_route_stop_id" false
+            stringField "zone_id" false; intField "zone_order" false |] routeStopZones
+        "source_notice_metadata.parquet", table [|
+            stringField "source_notice_id" false; stringField "notice_kind" false
+            stringField "gtfs_route_id" true; stringField "gtfs_trip_id" true
+            stringField "label" true; stringField "text" true
+            stringField "valid_from" true; stringField "valid_to" true
+            stringField "service_note_type" true |] notices
+        "source_transfer_metadata.parquet", table [|
+            stringField "source_transfer_id" false; stringField "gtfs_trip_id" false
+            int64Field "source_route_stop_id" false; stringField "transfer_type" false
+            int64Field "transfer_route_id" true; int64Field "transfer_stop_id" true
+            int64Field "transfer_stop_post_id" true; int64Field "transfer_end_stop_id" true
+            int64Field "transfer_end_stop_post_id" true; intField "wait_minutes" true
+            stringField "note" true |] transfers
+        "source_travel_restriction_metadata.parquet", table [|
+            stringField "assignment_scope" false; stringField "gtfs_route_id" true
+            stringField "gtfs_trip_id" true; int64Field "source_route_stop_id" false
+            stringField "group_code" false |] restrictions
     |]
 
 let private writeParquet descriptor path table =
@@ -319,8 +520,18 @@ let private writeParquet descriptor path table =
                                                     metadata, CancellationToken.None)
     } |> fun operation -> operation.GetAwaiter().GetResult()
 
-let private diagnostics stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
+let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
     let retainedTrips = feed.trips |> Seq.map (fun trip -> trip.id) |> Set
+    let emittedCallKeys =
+        batch.tripStops
+        |> Seq.choose (fun call ->
+            let gtfsTripId = JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
+            if not (retainedTrips.Contains gtfsTripId) then None else
+            match call.departureTime with
+            | Some JdfModel.Passing | Some JdfModel.NotPassing -> None
+            | None when call.arrivalTime = None -> None
+            | _ -> Some (gtfsTripId, call.routeStopId))
+        |> Set
     let filteredTrips =
         batch.trips
         |> Seq.choose (fun trip ->
@@ -329,21 +540,139 @@ let private diagnostics stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.G
                 severity = "warning"; code = "filtered_trip"; sourceObjectId = gtfsId
                 message = "Trip has no retained service dates and was omitted"
             })
-    let unhandledNotes =
-        batch.serviceNotes
-        |> Seq.filter (fun note -> note.noteType = None)
-        |> Seq.map (fun note -> {
-            severity = "warning"; code = "unhandled_service_note"
-            sourceObjectId = $"{note.routeId}/{note.routeDistinction}/{note.tripId}/{note.id}"
-            message = $"Unhandled service note {note.designation}"
+    let filteredEnrichments =
+        let serviceNotes =
+            batch.serviceNotes
+            |> Seq.choose (fun note ->
+                let hasText = nonEmptyText note.note |> Option.isSome
+                let isUnhandled = note.noteType.IsNone && not (String.IsNullOrWhiteSpace(note.designation))
+                let gtfsTripId = JdfToGtfs.jdfTripId note.routeId note.routeDistinction note.tripId
+                if (hasText || isUnhandled) && not (retainedTrips.Contains gtfsTripId) then
+                    Some (tripNoticeId note.routeId note.routeDistinction note.tripId note.id)
+                else None)
+        let reservations =
+            batch.reservationOptions
+            |> withOwnerOrdinals (fun note -> note.routeId, note.routeDistinction, note.tripId)
+            |> Seq.choose (fun (ordinal, note) ->
+                let gtfsTripId = JdfToGtfs.jdfTripId note.routeId note.routeDistinction note.tripId
+                if not (retainedTrips.Contains gtfsTripId) then
+                    Some (reservationNoticeId note.routeId note.routeDistinction note.tripId ordinal)
+                else None)
+        let transfers =
+            batch.transfers
+            |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
+            |> Seq.choose (fun (ordinal, transfer) ->
+                let gtfsTripId =
+                    JdfToGtfs.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+                if not (retainedTrips.Contains gtfsTripId) then
+                    Some (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)
+                else None)
+        let restrictions =
+            batch.tripStops
+            |> Seq.filter (fun call -> restrictionGroups batch call.attributes |> Seq.isEmpty |> not)
+            |> Seq.choose (fun call ->
+                let gtfsTripId = JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
+                if not (retainedTrips.Contains gtfsTripId) then
+                    Some (restrictionId call.routeId call.routeDistinction call.tripId call.routeStopId)
+                else None)
+        Seq.concat [serviceNotes; reservations; transfers; restrictions]
+        |> Seq.map (fun sourceObjectId -> {
+            severity = "warning"; code = "filtered_enrichment"
+            sourceObjectId = sourceObjectId
+            message = "Enrichment belongs to a trip omitted from GTFS"
         })
+    let unjoinableCallEnrichments =
+        let transfers =
+            batch.transfers
+            |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
+            |> Seq.choose (fun (ordinal, transfer) ->
+                let gtfsTripId =
+                    JdfToGtfs.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+                if retainedTrips.Contains gtfsTripId
+                   && not (emittedCallKeys.Contains (gtfsTripId, transfer.routeStopId)) then
+                    Some (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)
+                else None)
+        let restrictions =
+            batch.tripStops
+            |> Seq.filter (fun call -> restrictionGroups batch call.attributes |> Seq.isEmpty |> not)
+            |> Seq.choose (fun call ->
+                let gtfsTripId = JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
+                if retainedTrips.Contains gtfsTripId
+                   && not (emittedCallKeys.Contains (gtfsTripId, call.routeStopId)) then
+                    Some (restrictionId call.routeId call.routeDistinction call.tripId call.routeStopId)
+                else None)
+        Seq.append transfers restrictions
+        |> Seq.map (fun sourceObjectId -> {
+            severity = "warning"; code = "unjoinable_call_enrichment"
+            sourceObjectId = sourceObjectId
+            message = "Call-scoped enrichment cannot join an emitted GTFS call"
+        })
+    let blankNotices =
+        let routeNotices =
+            batch.routeInfo
+            |> Seq.filter (fun note -> String.IsNullOrWhiteSpace(note.text))
+            |> Seq.map (fun note -> routeNoticeId note.routeId note.routeDistinction note.id)
+        let serviceNotices =
+            batch.serviceNotes
+            |> Seq.filter (fun note -> note.noteType.IsNone
+                                      && String.IsNullOrWhiteSpace(note.designation)
+                                      && nonEmptyText note.note |> Option.isNone)
+            |> Seq.map (fun note -> tripNoticeId note.routeId note.routeDistinction note.tripId note.id)
+        let reservations =
+            batch.reservationOptions
+            |> withOwnerOrdinals (fun note -> note.routeId, note.routeDistinction, note.tripId)
+            |> Seq.filter (fun (_, note) -> String.IsNullOrWhiteSpace(note.note))
+            |> Seq.map (fun (ordinal, note) ->
+                reservationNoticeId note.routeId note.routeDistinction note.tripId ordinal)
+        Seq.concat [routeNotices; serviceNotices; reservations]
+        |> Seq.map (fun sourceObjectId -> {
+            severity = "warning"; code = "blank_notice"
+            sourceObjectId = sourceObjectId
+            message = "Textual notice is blank and was omitted"
+        })
+    let singletonRestrictions =
+        let routeStops =
+            batch.routeStops
+            |> Seq.map (fun stop -> (stop.routeId, stop.routeDistinction, stop.routeStopId), stop)
+            |> Map
+        batch.tripStops
+        |> Seq.groupBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
+        |> Seq.collect (fun ((routeId, distinction, tripId), calls) ->
+            let gtfsTripId = JdfToGtfs.jdfTripId routeId distinction tripId
+            if not (retainedTrips.Contains gtfsTripId) then Seq.empty else
+            calls
+            |> Seq.filter (fun call -> emittedCallKeys.Contains (gtfsTripId, call.routeStopId))
+            |> Seq.collect (fun call ->
+                let routeStop = routeStops.[routeId, distinction, call.routeStopId]
+                Seq.append (restrictionGroups batch routeStop.attributes)
+                           (restrictionGroups batch call.attributes)
+                |> Seq.distinct
+                |> Seq.map (fun groupCode -> groupCode, call.routeStopId))
+            |> Seq.groupBy fst
+            |> Seq.choose (fun (groupCode, members) ->
+                let count = members |> Seq.map snd |> Seq.distinct |> Seq.length
+                if count = 1 then Some {
+                    severity = "warning"; code = "singleton_travel_restriction"
+                    sourceObjectId = $"{gtfsTripId}:restriction-group:{sourceSegment groupCode}"
+                    message = "Effective travel-exclusion group has only one emitted call"
+                } else None))
+    let conflictingRouteStops =
+        batch.routeStops
+        |> Seq.groupBy (fun stop -> stop.routeId, stop.routeDistinction, stop.routeStopId)
+        |> Seq.choose (fun ((routeId, distinction, routeStopId), rows) ->
+            let stopIds = rows |> Seq.map (fun stop -> stop.stopId) |> Seq.distinct |> Seq.toArray
+            if stopIds.Length <= 1 then None else Some {
+                severity = "error"; code = "conflicting_route_stop_zone_mapping"
+                sourceObjectId = routeStopSourceId routeId distinction routeStopId
+                message = "One source route-stop ID refers to multiple stop places"
+            })
     let publicLines = JdfToGtfs.getPublicLineNumbers batch
     let missingLines =
         batch.routes
         |> Seq.filter (fun route -> publicLines.[route.id, route.idDistinction].IsNone)
         |> Seq.map (fun route -> {
             severity = "warning"; code = "missing_public_line_number"
-            sourceObjectId = $"{route.id}/{route.idDistinction}"
+            sourceObjectId = JdfToGtfs.jdfRouteId route.id route.idDistinction
             message = "No unambiguous public line number could be selected"
         })
     let multiZones =
@@ -371,10 +700,11 @@ let private diagnostics stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.G
                 let joinedNumbers = String.Join(",", numbers)
                 Some {
                 severity = "warning"; code = "conflicting_post_numbers"
-                sourceObjectId = $"{stopId}/{postId}"
+                sourceObjectId = $"jdf:stop:{stopId}:post:id:{postId}"
                 message = $"Authoritative post has conflicting display numbers: {joinedNumbers}"
                 })
-    Seq.concat [filteredTrips; unhandledNotes; missingLines; multiZones; conflictingPosts]
+    Seq.concat [filteredTrips; filteredEnrichments; unjoinableCallEnrichments; blankNotices
+                singletonRestrictions; conflictingRouteStops; missingLines; multiZones; conflictingPosts]
     |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
     |> Seq.toArray
 
@@ -470,7 +800,7 @@ let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath out
         withJdfInput inputPath (fun source ->
             let batch = Jdf.jdfBatchDirParser () source
             let feed =
-                JdfToGtfs.getGtfsFeed stopIdsCis batch
+                JdfToGtfs.getGtfsFeedForBundle stopIdsCis batch
                 |> Gtfs.deduplicateCalendar
                 |> Gtfs.fillStandardRequiredFields
             let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
@@ -482,7 +812,7 @@ let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath out
             for name, parquetTable in tables do
                 writeParquet descriptor (Path.Combine(temp, name)) parquetTable
                 parquetRows <- parquetRows |> Map.add name parquetTable.rows.Count
-            let bundleDiagnostics = diagnostics stopIdsCis batch feed
+            let bundleDiagnostics = diagnostics batch feed
             writeDiagnostics (Path.Combine(temp, "diagnostics.json")) bundleDiagnostics
             let files = fileEntries temp parquetRows
             writeManifest (Path.Combine(temp, "manifest.json")) descriptor converterVersion stopIdsCis batch files)

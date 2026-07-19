@@ -180,7 +180,7 @@ let deduplicateCalendar (feed: GtfsFeed) =
                     |> Array.map (fun b -> if b then '1' else '0')
                     |> System.String)
                 |> Option.defaultValue "exc"
-            let newId = $"CAL-{bitmapStr}-{i}"
+            let newId = $"gtfs:service:{bitmapStr}:{i}"
 
             oldIds,
             newId,

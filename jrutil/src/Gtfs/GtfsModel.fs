@@ -162,8 +162,6 @@ type CzRoute = {
     [<CsvFieldName("route_id")>] routeId: string
     [<CsvFieldName("cis_line_id")>] cisLineId: string option
     [<CsvFieldName("public_line_number")>] publicLineNumber: string option
-    [<CsvFieldName("ids_system_id")>] idsSystemId: string option
-    [<CsvFieldName("ids_zone_ids")>] idsZoneIds: string option
     [<CsvFieldName("source_provenance")>] sourceProvenance: string
 }
 
