@@ -58,7 +58,9 @@ type JdfBundleTests() =
 
             let expectedFiles = [|
                 "source_route_metadata.parquet"; "source_stop_metadata.parquet"
-                "source_call_metadata.parquet"; "source_stop_zone_metadata.parquet"
+                "source_call_metadata.parquet"; "source_route_stop_zone_metadata.parquet"
+                "source_notice_metadata.parquet"; "source_transfer_metadata.parquet"
+                "source_travel_restriction_metadata.parquet"
                 "diagnostics.json"; "manifest.json"
                 Path.Combine("gtfs-intermediate", "stop_times.txt")
                 Path.Combine("extensions", "cz_stop_zones.txt")
@@ -90,10 +92,29 @@ type JdfBundleTests() =
                 "source_call_metadata.parquet", [|
                     "gtfs_trip_id", typeof<string>, false; "stop_sequence", typeof<int>, false
                     "source_route_stop_id", typeof<int64>, false |]
-                "source_stop_zone_metadata.parquet", [|
-                    "stop_place_id", typeof<string>, false; "zone_id", typeof<string>, false
+                "source_route_stop_zone_metadata.parquet", [|
+                    "gtfs_route_id", typeof<string>, false
                     "source_route_stop_id", typeof<int64>, false
-                    "zone_order", typeof<int>, false |]
+                    "zone_id", typeof<string>, false; "zone_order", typeof<int>, false |]
+                "source_notice_metadata.parquet", [|
+                    "source_notice_id", typeof<string>, false; "notice_kind", typeof<string>, false
+                    "gtfs_route_id", typeof<string>, true; "gtfs_trip_id", typeof<string>, true
+                    "label", typeof<string>, true; "text", typeof<string>, true
+                    "valid_from", typeof<string>, true; "valid_to", typeof<string>, true
+                    "service_note_type", typeof<string>, true |]
+                "source_transfer_metadata.parquet", [|
+                    "source_transfer_id", typeof<string>, false; "gtfs_trip_id", typeof<string>, false
+                    "source_route_stop_id", typeof<int64>, false; "transfer_type", typeof<string>, false
+                    "transfer_route_id", typeof<int64>, true; "transfer_stop_id", typeof<int64>, true
+                    "transfer_stop_post_id", typeof<int64>, true
+                    "transfer_end_stop_id", typeof<int64>, true
+                    "transfer_end_stop_post_id", typeof<int64>, true
+                    "wait_minutes", typeof<int>, true; "note", typeof<string>, true |]
+                "source_travel_restriction_metadata.parquet", [|
+                    "assignment_scope", typeof<string>, false
+                    "gtfs_route_id", typeof<string>, true; "gtfs_trip_id", typeof<string>, true
+                    "source_route_stop_id", typeof<int64>, false
+                    "group_code", typeof<string>, false |]
             |]
             let parquet =
                 schemas
@@ -108,16 +129,22 @@ type JdfBundleTests() =
                 "source_routes.parquet"; "source_stop_places.parquet"
                 "source_boarding_points.parquet"; "source_trips.parquet"
                 "source_calls.parquet"; "fare_zones.parquet"; "source_stop_zones.parquet"
+                "source_stop_zone_metadata.parquet"
             |]
             mirroredFiles |> Array.iter (fun fileName ->
                 assertEqual false (File.Exists(Path.Combine(first, fileName))))
 
-            let memberships = parquet.["source_stop_zone_metadata.parquet"]
-            assertEqual 4 memberships.Data.Count
+            let memberships = parquet.["source_route_stop_zone_metadata.parquet"]
+            assertEqual 5 memberships.Data.Count
             let calls = parquet.["source_call_metadata.parquet"]
             assertEqual true (calls.Data.Count > 0)
+            assertEqual 3 parquet.["source_notice_metadata.parquet"].Data.Count
+            assertEqual 1 parquet.["source_transfer_metadata.parquet"].Data.Count
+            assertEqual 5 parquet.["source_travel_restriction_metadata.parquet"].Data.Count
 
             let parsed = Gtfs.gtfsParseFolder () (Path.Combine(first, "gtfs-intermediate"))
+            parsed.trips |> Seq.iter (fun trip ->
+                assertEqual true (trip.serviceId.StartsWith("gtfs:service:")))
             let routeIds = parsed.routes |> Seq.map (fun route -> route.id) |> set
             parquet.["source_route_metadata.parquet"].Data |> Seq.iter (fun value ->
                 assertEqual true (routeIds.Contains(string value.["gtfs_route_id"])))
@@ -132,11 +159,81 @@ type JdfBundleTests() =
             let extensionZoneKeys =
                 GtfsParser.getGtfsFileParser<GtfsModel.CzStopZone>
                     (Path.Combine(first, "extensions", "cz_stop_zones.txt"))
-                |> Seq.map (fun zone -> zone.stopPlaceId, zone.zoneId)
+                |> Seq.map (fun zone -> zone.routeId, zone.zoneId)
                 |> set
             memberships.Data |> Seq.iter (fun value ->
-                assertEqual true (extensionZoneKeys.Contains(string value.["stop_place_id"],
+                assertEqual true (extensionZoneKeys.Contains(string value.["gtfs_route_id"],
                                                                string value.["zone_id"])))
+
+            let tripIds = parsed.trips |> Seq.map (fun trip -> trip.id) |> set
+            parquet.["source_notice_metadata.parquet"].Data |> Seq.iter (fun value ->
+                if value.ContainsKey("gtfs_route_id") && not (isNull value.["gtfs_route_id"]) then
+                    assertEqual true (routeIds.Contains(string value.["gtfs_route_id"]))
+                if value.ContainsKey("gtfs_trip_id") && not (isNull value.["gtfs_trip_id"]) then
+                    assertEqual true (tripIds.Contains(string value.["gtfs_trip_id"])))
+            let sourceCallKeys =
+                calls.Data
+                |> Seq.map (fun value -> string value.["gtfs_trip_id"],
+                                         Convert.ToInt64(value.["source_route_stop_id"]))
+                |> set
+            parquet.["source_transfer_metadata.parquet"].Data |> Seq.iter (fun value ->
+                assertEqual true (sourceCallKeys.Contains(string value.["gtfs_trip_id"],
+                                                           Convert.ToInt64(value.["source_route_stop_id"]))))
+            parquet.["source_travel_restriction_metadata.parquet"].Data |> Seq.iter (fun value ->
+                let scope = string value.["assignment_scope"]
+                assertEqual true (scope = "route_stop" || scope = "trip_call")
+                if scope = "route_stop" then
+                    assertEqual true (routeIds.Contains(string value.["gtfs_route_id"]))
+                    assertEqual false (value.ContainsKey("gtfs_trip_id"))
+                else
+                    assertEqual false (value.ContainsKey("gtfs_route_id"))
+                    assertEqual true (sourceCallKeys.Contains(string value.["gtfs_trip_id"],
+                                                               Convert.ToInt64(value.["source_route_stop_id"]))))
+            let noticeKinds =
+                parquet.["source_notice_metadata.parquet"].Data
+                |> Seq.map (fun value -> string value.["notice_kind"])
+                |> set
+            assertEqual (set ["route_information"; "service_note"; "reservation"]) noticeKinds
+            let noticeIds =
+                parquet.["source_notice_metadata.parquet"].Data
+                |> Seq.map (fun value -> string value.["source_notice_id"])
+                |> set
+            assertEqual true (noticeIds |> Seq.forall (fun value -> value.StartsWith("jdf:notice:")))
+            assertEqual false
+                (noticeIds.Contains "jdf:notice:trip:586001:1:1:2")
+            assertEqual false
+                (noticeIds.Contains "jdf:notice:trip:586001:1:3:1")
+            parquet.["source_notice_metadata.parquet"].Data
+            |> Seq.find (fun value -> string value.["notice_kind"] = "service_note")
+            |> fun value -> assertEqual "Poznámka ke spoji" (string value.["text"])
+            let transfer = parquet.["source_transfer_metadata.parquet"].Data |> Seq.exactlyOne
+            assertEqual true ((string transfer.["source_transfer_id"]).StartsWith("jdf:transfer:"))
+            assertEqual 5 (Convert.ToInt32(transfer.["wait_minutes"]))
+            assertEqual "Vycka na pripoj" (string transfer.["note"])
+            let restrictionScopes =
+                parquet.["source_travel_restriction_metadata.parquet"].Data
+                |> Seq.countBy (fun value -> string value.["assignment_scope"])
+                |> Map
+            assertEqual 3 restrictionScopes.["route_stop"]
+            assertEqual 2 restrictionScopes.["trip_call"]
+
+            use diagnostics = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "diagnostics.json")))
+            let diagnosticCodes =
+                diagnostics.RootElement.GetProperty("diagnostics").EnumerateArray()
+                |> Seq.map (fun value -> value.GetProperty("code").GetString())
+                |> set
+            assertEqual true (diagnosticCodes.Contains "filtered_enrichment")
+            assertEqual true (diagnosticCodes.Contains "unjoinable_call_enrichment")
+            assertEqual true (diagnosticCodes.Contains "blank_notice")
+            assertEqual true (diagnosticCodes.Contains "singleton_travel_restriction")
+            assertEqual false (diagnosticCodes.Contains "unhandled_service_note")
+            let filteredEnrichmentIds =
+                diagnostics.RootElement.GetProperty("diagnostics").EnumerateArray()
+                |> Seq.filter (fun value -> value.GetProperty("code").GetString() = "filtered_enrichment")
+                |> Seq.map (fun value -> value.GetProperty("source_object_id").GetString())
+                |> set
+            assertEqual true
+                (filteredEnrichmentIds.Contains "jdf:restriction:586001:1:3:1")
 
             use manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "manifest.json")))
             assertEqual "obehy-jrutil-jdf" (manifest.RootElement.GetProperty("bundle_format").GetString())

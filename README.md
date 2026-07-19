@@ -37,7 +37,7 @@ by the Oběhy canonical importer:
 
 | File | Purpose |
 | --- | --- |
-| `cz_routes.txt` | CIS line identity, passenger-facing line number, raw fare zones and JDF provenance |
+| `cz_routes.txt` | CIS line identity, passenger-facing line number and JDF provenance |
 | `cz_trips.txt` | CIS line/trip identity and source-trip provenance |
 | `cz_stops.txt` | Source stop-place, CIS stop and post identities |
 | `cz_stop_zones.txt` | Normalized, route-scoped stop-to-zone memberships |
@@ -49,15 +49,29 @@ Numeric designations have leading zeroes removed, while alphanumeric
 designations retain their spelling and case.
 
 JDF post references from `Oznacniky.txt` and text-only station numbers from
-`Zasspoje.txt` are both projected as distinct child stops. Raw zone lists are
-split, trimmed and deduplicated without attempting to infer their IDS system.
-`ids_system_id` therefore remains empty for this conversion. A route
+`Zasspoje.txt` are both projected as distinct child stops with standard GTFS
+`parent_station` links. In `cz_stops.txt`, `stop_id` identifies the exact GTFS
+place-or-post row while `stop_place_id` always identifies its containing stop
+place; they are equal for a place and differ for a post. Post IDs share one
+hierarchy while retaining source semantics: `:post:id:` is an authoritative
+`Oznacniky` ID and bare `:post:<value>` is a textual `Zasspoje` designation.
+
+Raw zone lists are split, trimmed and deduplicated without attempting to infer
+their IDS system. Per-membership `ids_system_id` in `cz_stop_zones.txt`
+therefore remains empty for this conversion. A route
 distinction and raw token form the source zone identity. Standard GTFS
 `stops.zone_id` is populated only when a stop has exactly one such identity;
 plural memberships remain authoritative in `cz_stop_zones.txt`. The bundle's
 zone Parquet contains only the JDF route-stop provenance and source order that
 cannot be reconstructed from that extension. Standard `stop_times.txt` never contains the old
 non-standard `stop_zone_ids` column.
+
+Generated intermediate identifiers consistently use colon-separated
+namespaces: `jdf:agency:…`, `jdf:route:…`, `jdf:trip:…`, `jdf:stop:…`,
+`jdf:zone:…`, `jdf:notice:…`, `jdf:transfer:…` and `jdf:restriction:…`.
+With `--stop-ids-cis`, stop and post IDs use `cis:stop:…`. Text components are
+URI-escaped before being embedded in an identifier. Deduplicated GTFS service
+patterns use the derived `gtfs:service:<weekday-bitmap>:<ordinal>` namespace.
 
 JDF stop numbers are not always global CIS identifiers. Pass `--stop-ids-cis`
 only for a batch known to use the national CIS stop registry:
@@ -99,16 +113,64 @@ bundle/
 ├── source_route_metadata.parquet
 ├── source_stop_metadata.parquet
 ├── source_call_metadata.parquet
-├── source_stop_zone_metadata.parquet
+├── source_route_stop_zone_metadata.parquet
+├── source_notice_metadata.parquet
+├── source_transfer_metadata.parquet
+├── source_travel_restriction_metadata.parquet
 ├── diagnostics.json
 └── manifest.json
 ```
 
-The four slim Parquet tables retain only source facts that would otherwise be
-lost: route distinction/source agency/validity, structured JDF stop-name
-components and original coordinate absence, JDF route-stop IDs behind emitted
-GTFS calls, and route-stop provenance/order behind normalized zone membership.
-Trip, boarding-point and fare-zone entity mirrors are intentionally absent.
+The seven slim Parquet tables retain only source facts that would otherwise be
+lost. The original route/stop/call metadata tables preserve JDF distinctions,
+structured stop-name components, coordinate absence and route-stop IDs. The
+additional relations preserve route-stop zone scope, textual notices,
+connection context and the `§`/`A`/`B`/`C` travel-exclusion groups. Trip,
+boarding-point, call and fare-zone entity mirrors are intentionally absent.
+
+The enrichment schemas are:
+
+```text
+source_route_stop_zone_metadata
+    gtfs_route_id, source_route_stop_id, zone_id, zone_order
+
+source_notice_metadata
+    source_notice_id, notice_kind, gtfs_route_id?, gtfs_trip_id?,
+    label?, text?, valid_from?, valid_to?, service_note_type?
+
+source_transfer_metadata
+    source_transfer_id, gtfs_trip_id, source_route_stop_id,
+    transfer_type, transfer_route_id?, transfer_stop_id?,
+    transfer_stop_post_id?, transfer_end_stop_id?,
+    transfer_end_stop_post_id?, wait_minutes?, note?
+
+source_travel_restriction_metadata
+    assignment_scope, gtfs_route_id?, gtfs_trip_id?,
+    source_route_stop_id, group_code
+```
+
+`source_notice_metadata` maps `Udaje` to route notices, text-bearing or
+otherwise unhandled `Caskody` to trip notices, and `Mistenky` to reservation
+notices. Calendar-only `Caskody` are not repeated because their complete effect
+is already present in GTFS calendars. `Navaznosti` records retain their source
+target IDs and waiting context without guessing a canonical target.
+
+Travel exclusions retain their source scope: `Zaslinky` produces
+`route_stop` assignments and `Zasspoje` produces `trip_call` assignments.
+For one trip, calls sharing the same effective group code (`§`, `A`, `B` or
+`C`) may not be used as both the boarding and alighting endpoints. Importers
+union route-stop and trip-call assignments rather than expecting expanded rows.
+
+The join path is deliberately relational: GTFS identifies routes, trips and
+calls; `source_call_metadata` maps a GTFS call to its JDF route-stop;
+route-stop zone, transfer and restriction relations add only facts missing
+from GTFS. These Parquet files are an immutable import format. A runtime
+application should import them into indexed database tables rather than query
+bundle files per request.
+
+Every row is a positive source claim. Absence from a later regional overlay is
+not a deletion of a national notice, zone or restriction; precedence and
+materialization belong to the downstream compiler.
 
 Snapshot descriptor schema version 1 is:
 

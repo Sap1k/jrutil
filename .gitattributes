@@ -1,2 +1,2 @@
 *.gz filter=lfs diff=lfs merge=lfs -text
-jrutil.tests/data/jdf/** -text
+jrutil.tests/data/jdf/** -text whitespace=cr-at-eol
