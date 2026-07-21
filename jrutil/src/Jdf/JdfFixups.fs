@@ -168,8 +168,9 @@ let matchStopByName (matcher: StopMatcher<JdfStopGeodata>)
     matcher.matchStop(jdfStopNameString stop)
 
 let exactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
-    matches
-    |> Array.filter (fun m ->
+    let countryMatches =
+        matches
+        |> Array.filter (fun m ->
         // Only take perfect matches
         if m.score <> 1.0f then false else
         // If the stop has a country assigned, honour it.
@@ -180,10 +181,28 @@ let exactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
         if not countryMatches then
             Interlocked.Increment(&countryRejectCount) |> ignore
             false
+        else true)
+
+    match stop.country, stop.regionId with
+    | Some country, _ when country <> "CZ" -> countryMatches
+    | _, None -> countryMatches
+    | _, Some expectedRegion ->
+        let expectedRegion = canonicalRegionCode expectedRegion
+        let strictMatches =
+            countryMatches
+            |> Array.filter (fun m ->
+                m.stop.data.regionId
+                |> Option.map canonicalRegionCode
+                |> Option.contains expectedRegion)
+        if strictMatches.Length > 0 then
+            Interlocked.Add(&strictRegionMatchCount, int64 strictMatches.Length) |> ignore
+            strictMatches
         else
-            // Keep strict okres matching as the fast path, but tolerate an
-            // exact-name candidate immediately across an adjacent boundary.
-            regionMatches stop.regionId m.stop.data)
+            // Only broaden to an adjacent-boundary candidate when no strict
+            // okres candidate exists. Mixing both sets makes a known strict
+            // match appear geographically ambiguous.
+            countryMatches
+            |> Array.filter (fun m -> regionMatches stop.regionId m.stop.data)
 
 let addRegionFromMatch (stop: Stop) match_ =
     match stop.regionId, match_ with
@@ -834,32 +853,76 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
     { jdfBatch with stops = augmentedStops |> Array.map fst },
     augmentedStops |> Array.map snd
 
+let private stopLocationFromMatch (stop: Stop) (match_: JdfStopToMatch) =
+    let wgs84Pt =
+        transformPoint
+            etrs89ExSrid wgs84Srid
+            (wgs84ToEtrs89Ex.Inverse())
+            match_.data.point
+    {
+        stopId = stop.id
+        lat = decimal wgs84Pt.Y
+        lon = decimal wgs84Pt.X
+        precision = match_.data.precision
+    }, match_.data.source
+
+let private addMatchedLocations jdfBatch matchedLocations =
+    { jdfBatch with
+        stopLocations =
+            Array.append jdfBatch.stopLocations (matchedLocations |> Array.map fst)
+        stopLocationSources =
+            Array.append
+                jdfBatch.stopLocationSources
+                (matchedLocations
+                 |> Array.choose (fun (location, source) ->
+                     source |> Option.map (fun value -> {
+                         stopId = location.stopId
+                         source = value
+                     })))
+    }
+
 let addStopLocations jdfBatch stopsWithMatches =
     let matchedLocations =
         stopsWithMatches
-        |> Array.choose (fun (s: Stop, mo) ->
-            mo |> Option.map (fun m ->
-                let wgs84Pt =
-                    transformPoint
-                        etrs89ExSrid wgs84Srid
-                        (wgs84ToEtrs89Ex.Inverse())
-                        m.data.point
-                {
-                    stopId = s.id
-                    lat = decimal wgs84Pt.Y
-                    lon = decimal wgs84Pt.X
-                    precision = m.data.precision
-                }, m.data.source))
-    { jdfBatch with
-        stopLocations = matchedLocations |> Array.map fst
-        stopLocationSources =
+        |> Array.choose (fun (stop: Stop, match_) ->
+            match_ |> Option.map (stopLocationFromMatch stop))
+    // A fixed single-route batch does not carry pre-existing locations.
+    { jdfBatch with stopLocations = [||]; stopLocationSources = [||] }
+    |> fun batch -> addMatchedLocations batch matchedLocations
+
+let reconcileMissingStopLocations (stopMatcher: StopMatcher<JdfStopGeodata>)
+                                  (jdfBatch: JdfBatch) =
+    let positionedStopIds = jdfBatch.stopLocations |> Seq.map (fun value -> value.stopId) |> Set
+    let matchedLocations =
+        jdfBatch.stops
+        |> Array.filter (fun stop -> not (positionedStopIds.Contains stop.id))
+        |> Array.choose (fun stop ->
+            let exact =
+                matchStopByName stopMatcher stop
+                |> Array.filter (fun match_ ->
+                    stopMatcher.checkExactMatch(
+                        stopNameToTokens (jdfStopNameString stop),
+                        stopNameToTokens match_.stop.name))
+                |> topStopMatch stop
+            let selected =
+                match exact with
+                | Some value -> Some value
+                | None ->
+                    // At this final normalized-stop stage there is no route
+                    // distance context left. A unique RUIAN town in the
+                    // expected okres is the conservative last fallback.
+                    matchCzTownByName stop
+                    |> topStopMatch stop
+            selected |> Option.map (stopLocationFromMatch stop))
+    if matchedLocations.Length > 0 then
+        let stopPrecise =
             matchedLocations
-            |> Array.choose (fun (location, source) ->
-                source |> Option.map (fun value -> {
-                    stopId = location.stopId
-                    source = value
-                }))
-    }
+            |> Array.filter (fun (location, _) -> location.precision = StopPrecise)
+            |> Array.length
+        Log.Information(
+            "Post-merge coordinate reconciliation added {LocationCount} locations ({StopPreciseCount} stop precise, {TownPreciseCount} town precise)",
+            matchedLocations.Length, stopPrecise, matchedLocations.Length - stopPrecise)
+    addMatchedLocations jdfBatch matchedLocations
 
 /// WARN: Expects tripsStops to be for one trip only and sorted by call order
 let checkMatchDistances
