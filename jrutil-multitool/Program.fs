@@ -211,36 +211,31 @@ let main (args: string array) =
                     JdfToGtfs.applyInternationalRoutePolicy
                         internationalRoutePolicy internationalRouteOverrides batch
                 internationalRouteDecisions.AddRange(routeFilter.decisions)
-                let rejectedBatch =
-                    internationalRoutePolicy = JdfToGtfs.RegionalAdjacent
-                    && routeFilter.decisions.Length > 0
-                    && routeFilter.decisions |> Array.forall (fun decision -> not decision.keep)
+                // Route classification can change after batches with the same
+                // distinction are merged. Always geocode the source batch so
+                // a route retained by the final merged policy cannot inherit
+                // deliberately skipped 0,0 coordinates.
+                let batchFixed, stopMatches =
+                    JdfFixups.fixPublicCisJrBatch stopMatcher batch
+
+                let stopsWithMatches = Array.zip batchFixed.stops stopMatches
+                Seq.concat [
+                    batchFixed.tripStops
+                    |> Seq.groupBy (fun ts -> ts.routeId, ts.tripId)
+                    |> Seq.map snd
+                    // Take one trip most likely to contain all stops' km
+                    // distances (testing all takes too much time)
+                    |> Seq.sortByDescending Seq.length
+                    |> Seq.head
+                    |> fun ts ->
+                        JdfFixups.checkMatchDistances
+                            (Seq.toArray ts) stopsWithMatches
+
+                    JdfFixups.checkMissingRegionsCountries batchFixed
+                ]
+                |> Seq.iter (fun msg -> Log.Write(msg))
                 let batchWithLocations =
-                    if rejectedBatch then
-                        // Preserve the source route for bundle-time diagnostics, but do not
-                        // spend matcher/geocoder work on stops that the output policy removes.
-                        batch
-                    else
-                        let batchFixed, stopMatches =
-                            JdfFixups.fixPublicCisJrBatch stopMatcher batch
-
-                        let stopsWithMatches = Array.zip batchFixed.stops stopMatches
-                        Seq.concat [
-                            batchFixed.tripStops
-                            |> Seq.groupBy (fun ts -> ts.routeId, ts.tripId)
-                            |> Seq.map snd
-                            // Take one trip most likely to contain all stops' km
-                            // distances (testing all takes too much time)
-                            |> Seq.sortByDescending Seq.length
-                            |> Seq.head
-                            |> fun ts ->
-                                JdfFixups.checkMatchDistances
-                                    (Seq.toArray ts) stopsWithMatches
-
-                            JdfFixups.checkMissingRegionsCountries batchFixed
-                        ]
-                        |> Seq.iter (fun msg -> Log.Write(msg))
-                        JdfFixups.addStopLocations batchFixed stopsWithMatches
+                    JdfFixups.addStopLocations batchFixed stopsWithMatches
 
                 let fixedOutDir = Path.Combine(outDir, batchName)
                 Directory.CreateDirectory(fixedOutDir) |> ignore
@@ -276,8 +271,35 @@ let main (args: string array) =
             Log.Information("Resolving route overlaps")
             merger.resolveRouteOverlaps()
 
+            let mergedBatch =
+                let externalStops =
+                    optArgValue args "--ext-geodata"
+                    |> Option.map (fun path ->
+                        Utils.logWrappedOp "Reading external stops for merged reconciliation"
+                        <| fun () -> ExternalCsv.otherStopsFromPathForJdfMatch path)
+                    |> Option.defaultValue [||]
+                let osmStops =
+                    optArgValue args "--cz-pbf"
+                    |> Option.map (fun path ->
+                        Utils.logWrappedOp "Reading OSM stops for merged reconciliation"
+                        <| fun () ->
+                            Osm.getCzOtherStops path ()
+                            |> Osm.czOtherStopsForJdfMatch)
+                    |> Option.defaultValue [||]
+                let reconcile candidates batch =
+                    if candidates |> Array.isEmpty then batch
+                    else
+                        use stopMatcher = new StopMatcher.StopMatcher<_>(candidates)
+                        JdfFixups.reconcileMissingStopLocations stopMatcher batch
+
+                // Checked external data includes manual gap fills and must win
+                // over broader OSM matches when both sources contain a stop.
+                merger.batch
+                |> reconcile externalStops
+                |> reconcile osmStops
+
             Log.Information("Writing merged JDF")
-            jdfWri (Jdf.FsPath outDir) merger.batch
+            jdfWri (Jdf.FsPath outDir) mergedBatch
             Log.Information("Finished!")
         else printfn "%s" docstring
         exitCode
