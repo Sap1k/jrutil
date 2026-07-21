@@ -360,6 +360,12 @@ type StopLocation = {
     precision: GeodataPrecision
 }
 
+// JrUtil extension kept separate from Polzast.txt for backward compatibility.
+type StopLocationSource = {
+    stopId: int64
+    source: string
+}
+
 type JdfBatch = {
     version: JdfVersion
     stops: Stop array
@@ -379,4 +385,5 @@ type JdfBatch = {
     alternateRouteNames: AlternateRouteName array
     reservationOptions: ReservationOptions array
     stopLocations: StopLocation array
+    stopLocationSources: StopLocationSource array
 }

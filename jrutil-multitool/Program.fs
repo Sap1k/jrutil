@@ -33,6 +33,8 @@ Options:
     --stop-ids-cis               Treat JDF stop numbers as authoritative CIS IDs
     --snapshot-descriptor=FILE    Retrieval provenance and input checksum JSON
     --converter-version=VALUE     Exact JrUtil fork version or commit for provenance
+    --international-route-policy=VALUE  keep-all (default) or regional-adjacent
+    --international-route-overrides=FILE  Optional route keep/drop override CSV
 
 Passing - to an input path parameter will make most jrutil commands read
 input filenames from stdin. Each result will be output into a sequentially
@@ -89,13 +91,27 @@ let main (args: string array) =
         Utils.persistentCachePath <- optArgValue args "--cache"
 
         let stopCoordsByIdPath = optArgValue args "--stop-coords-by-id"
+        let internationalRoutePolicy =
+            optArgValue args "--international-route-policy"
+            |> Option.defaultValue "keep-all"
+            |> JdfToGtfs.parseInternationalRoutePolicy
+        let internationalRouteOverrides =
+            optArgValue args "--international-route-overrides"
+            |> Option.map JdfToGtfs.loadInternationalRouteOverrides
+            |> Option.defaultValue [||]
+        if internationalRoutePolicy = JdfToGtfs.KeepAll
+           && internationalRouteOverrides.Length > 0 then
+            invalidArg "--international-route-overrides"
+                "International route overrides require --international-route-policy=regional-adjacent"
         let mutable exitCode = 0
         if argFlagSet args "jdf-to-bundle" then
             try
-                JdfBundle.writeBundle
+                JdfBundle.writeBundleWithPolicy
                     (argValue args "--snapshot-descriptor")
                     (argValue args "--converter-version")
                     (argFlagSet args "--stop-ids-cis")
+                    internationalRoutePolicy
+                    internationalRouteOverrides
                     (argValue args "<JDF-input>")
                     (argValue args "<bundle-out-dir>")
                 Log.Information("Finished!")
@@ -113,9 +129,20 @@ let main (args: string array) =
                 try
                     Log.Information("Reading JDF")
                     let jdf = jdfPar (Jdf.FsPath inpath)
+                    let routeKeys =
+                        jdf.routes
+                        |> Seq.map (fun route -> route.id, route.idDistinction)
+                        |> Set
+                    JdfToGtfs.validateInternationalRouteOverrides
+                        routeKeys internationalRouteOverrides
+                    let filterResult =
+                        JdfToGtfs.applyInternationalRoutePolicy
+                            internationalRoutePolicy internationalRouteOverrides jdf
+                    JdfToGtfs.logInternationalRouteDecisions
+                        internationalRoutePolicy filterResult.decisions
                     Log.Information("Converting to GTFS")
                     let gtfs =
-                        JdfToGtfs.getGtfsFeed stopIdsCis jdf
+                        JdfToGtfs.getGtfsFeed stopIdsCis filterResult.batch
                         |> Gtfs.deduplicateCalendar
                         |> gtfsWithCoords stopCoordsByIdPath
 
@@ -165,6 +192,9 @@ let main (args: string array) =
 
             let jdfPar = Jdf.jdfBatchDirParser ()
             let jdfWri = Jdf.jdfBatchDirWriter ()
+            JdfFixups.resetMatchDiagnostics ()
+            let internationalRouteDecisions = ResizeArray<JdfToGtfs.InternationalRouteDecision>()
+            let mutable internationalRouteKeys = Set.empty
             Jdf.findJdfBatches inDir
             |> Seq.iter (fun (batchPath, batchDir) ->
                 let batchName = Path.GetFileNameWithoutExtension(batchPath)
@@ -172,31 +202,54 @@ let main (args: string array) =
                 Log.Information("Processing JDF batch {BatchPath}", batchPath)
 
                 let batch = jdfPar batchDir
-                let batchFixed, stopMatches =
-                    JdfFixups.fixPublicCisJrBatch stopMatcher batch
-
-                let stopsWithMatches = Array.zip batchFixed.stops stopMatches
+                internationalRouteKeys <-
+                    batch.routes
+                    |> Seq.map (fun route -> route.id, route.idDistinction)
+                    |> Set
+                    |> Set.union internationalRouteKeys
+                let routeFilter =
+                    JdfToGtfs.applyInternationalRoutePolicy
+                        internationalRoutePolicy internationalRouteOverrides batch
+                internationalRouteDecisions.AddRange(routeFilter.decisions)
+                let rejectedBatch =
+                    internationalRoutePolicy = JdfToGtfs.RegionalAdjacent
+                    && routeFilter.decisions.Length > 0
+                    && routeFilter.decisions |> Array.forall (fun decision -> not decision.keep)
                 let batchWithLocations =
-                    JdfFixups.addStopLocations batchFixed stopsWithMatches
-                Seq.concat [
-                    batchFixed.tripStops
-                    |> Seq.groupBy (fun ts -> ts.routeId, ts.tripId)
-                    |> Seq.map snd
-                    // Take one trip most likely to contain all stops' km
-                    // distances (testing all takes too much time)
-                    |> Seq.sortByDescending Seq.length
-                    |> Seq.head
-                    |> fun ts ->
-                        JdfFixups.checkMatchDistances
-                            (Seq.toArray ts) stopsWithMatches
+                    if rejectedBatch then
+                        // Preserve the source route for bundle-time diagnostics, but do not
+                        // spend matcher/geocoder work on stops that the output policy removes.
+                        batch
+                    else
+                        let batchFixed, stopMatches =
+                            JdfFixups.fixPublicCisJrBatch stopMatcher batch
 
-                    JdfFixups.checkMissingRegionsCountries batchFixed
-                ]
-                |> Seq.iter (fun msg -> Log.Write(msg))
+                        let stopsWithMatches = Array.zip batchFixed.stops stopMatches
+                        Seq.concat [
+                            batchFixed.tripStops
+                            |> Seq.groupBy (fun ts -> ts.routeId, ts.tripId)
+                            |> Seq.map snd
+                            // Take one trip most likely to contain all stops' km
+                            // distances (testing all takes too much time)
+                            |> Seq.sortByDescending Seq.length
+                            |> Seq.head
+                            |> fun ts ->
+                                JdfFixups.checkMatchDistances
+                                    (Seq.toArray ts) stopsWithMatches
+
+                            JdfFixups.checkMissingRegionsCountries batchFixed
+                        ]
+                        |> Seq.iter (fun msg -> Log.Write(msg))
+                        JdfFixups.addStopLocations batchFixed stopsWithMatches
 
                 let fixedOutDir = Path.Combine(outDir, batchName)
                 Directory.CreateDirectory(fixedOutDir) |> ignore
                 jdfWri (Jdf.FsPath fixedOutDir) batchWithLocations)
+            JdfToGtfs.validateInternationalRouteOverrides
+                internationalRouteKeys internationalRouteOverrides
+            JdfFixups.logMatchDiagnostics ()
+            JdfToGtfs.logInternationalRouteDecisions
+                internationalRoutePolicy (internationalRouteDecisions.ToArray())
             Log.Information("Finished!")
         else if argFlagSet args "merge-jdf" then
             let outDir = argValue args "<JDF-out-dir>"

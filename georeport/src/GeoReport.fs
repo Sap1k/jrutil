@@ -157,7 +157,7 @@ let getOtherStopsMatches czPbf stopsPath extSourcesDir =
         Directory.EnumerateFiles(extSourcesDir)
         |> Seq.collect (fun path ->
             let sourceName = Path.GetFileNameWithoutExtension(path)
-            OtherStops.Load(Path.GetFullPath(path)).Rows
+            otherStopsFromPath (Path.GetFullPath(path))
             |> Seq.map (fun r -> {
                 name = r.Name
                 data = {|

@@ -108,6 +108,7 @@ let czOtherStopsForJdfMatch (stops: CzOtherStop seq) =
                 regionId = region
                 point = etrs89ExPt
                 precision = StopPrecise
+                source = Some "osm:czech-pbf"
             }
         })
     |> Seq.toArray

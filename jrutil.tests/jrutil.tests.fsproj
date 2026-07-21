@@ -13,10 +13,12 @@
     <Compile Include="UndatedStopHistoryTests.fs" />
     <Compile Include="HolidayTests.fs" />
     <Compile Include="StopMatcherTests.fs" />
+    <Compile Include="JdfFixupsTests.fs" />
     <Compile Include="ExternalCsvTests.fs" />
     <Compile Include="SearchParserTests.fs" />
     <Compile Include="SqlSearchTests.fs" />
     <Compile Include="JdfToGtfsTests.fs" />
+    <Compile Include="InternationalRouteFilterTests.fs" />
     <Compile Include="JdfBundleTests.fs" />
     <Compile Include="EntryPoint.fs" />
   </ItemGroup>

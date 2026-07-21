@@ -108,6 +108,7 @@ let jdf111BatchDirParser () =
     let alternateRouteNamesParser = fileParserOrEmpty "Altlinky.txt"
     let reservationOptionsParser = fileParserOrEmpty "Mistenky.txt"
     let stopLocationsParser = fileParserOrEmpty "Polzast.txt"
+    let stopLocationSourcesParser = fileParserOrEmpty "PolzastZdroj.txt"
     fun path ->
         {
             version = (versionParser path).[0]
@@ -128,6 +129,7 @@ let jdf111BatchDirParser () =
             alternateRouteNames = alternateRouteNamesParser path
             reservationOptions = reservationOptionsParser path
             stopLocations = stopLocationsParser path
+            stopLocationSources = stopLocationSourcesParser path
         }
 
 // This repetition is annoying. Refactoring suggestions welcome.
@@ -269,6 +271,7 @@ let jdfBatchDirWriter () =
     let alternateRouteNamesWriter = fileWriter "Altlinky.txt"
     let reservationOptionsWriter = fileWriter "Mistenky.txt"
     let stopLocationsWriter = fileWriter "Polzast.txt"
+    let stopLocationSourcesWriter = fileWriter "PolzastZdroj.txt"
 
     fun dir (batch: JdfBatch) ->
         match dir with
@@ -295,3 +298,4 @@ let jdfBatchDirWriter () =
         alternateRouteNamesWriter dir batch.alternateRouteNames ()
         reservationOptionsWriter dir batch.reservationOptions ()
         stopLocationsWriter dir batch.stopLocations ()
+        stopLocationSourcesWriter dir batch.stopLocationSources ()
