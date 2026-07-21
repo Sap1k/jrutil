@@ -36,6 +36,7 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
     let alternateRouteNamesByRoute = MultiDict()
     let reservationOptionsByRoute = MultiDict()
     let stopLocationsByStop = Dictionary()
+    let stopLocationSourcesByStop = Dictionary<int64, string>()
 
     let mutable lastStopId = 0L
     let mutable lastAttributeRefId = 0
@@ -97,6 +98,10 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         reservationOptions =
             reservationOptionsByRoute.Values |> Seq.collect id |> Seq.toArray
         stopLocations = stopLocationsByStop.Values |> Seq.toArray
+        stopLocationSources =
+            stopLocationSourcesByStop
+            |> Seq.map (fun pair -> { stopId = pair.Key; source = pair.Value })
+            |> Seq.toArray
     }
 
     member private this.deleteRoute(r: Route) =
@@ -391,6 +396,8 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                 |> Seq.map (fun s -> s.id, matchingStop s |> Option.get)
             ]
             |> Map
+        let batchLocationSources =
+            batch.stopLocationSources |> Seq.map (fun value -> value.stopId, value.source) |> Map
         for sl in batch.stopLocations do
             let stopId = stopIdMap.[sl.stopId]
             let hasOldSl, oldSl = stopLocationsByStop.TryGetValue(stopId)
@@ -412,6 +419,9 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                    && oldSl.precision = TownPrecise)
             then
                 stopLocationsByStop.[stopId] <- { sl with stopId = stopId }
+                match batchLocationSources |> Map.tryFind sl.stopId with
+                | Some source -> stopLocationSourcesByStop.[stopId] <- source
+                | None -> stopLocationSourcesByStop.Remove(stopId) |> ignore
 
         let stopPostsToAdd =
             stopPosts

@@ -188,6 +188,13 @@ type JdfToGtfsTests() =
         feed.stopTimes
         |> Array.iter (fun stopTime ->
             assertEqual true (stopIds.Contains stopTime.stopId))
+        let referencedStopIds = feed.stopTimes |> Seq.map (fun stopTime -> stopTime.stopId) |> set
+        let requiredParentIds =
+            feed.stops
+            |> Seq.filter (fun stop -> referencedStopIds.Contains stop.id)
+            |> Seq.choose (fun stop -> stop.parentStation)
+            |> set
+        assertEqual (Set.union referencedStopIds requiredParentIds) stopIds
 
         let czStops = feed.czStops |> Option.get
         assertEqual
@@ -211,6 +218,41 @@ type JdfToGtfsTests() =
              |> Array.filter (fun zone -> zone.stopPlaceId = "jdf:stop:100")
              |> Array.length)
         czStopZones |> Array.iter (fun zone -> assertEqual None zone.idsSystemId)
+
+    [<TestMethod>]
+    member _.``Town-level coordinates mark stop places and boarding points approximate``() =
+        let source = batch ()
+        let withLocations = {
+            source with
+                stopLocations = [|
+                    {
+                        stopId = 100L
+                        lat = 50.0M
+                        lon = 14.0M
+                        precision = JdfModel.TownPrecise
+                    }
+                    {
+                        stopId = 200L
+                        lat = 50.1M
+                        lon = 14.1M
+                        precision = JdfModel.StopPrecise
+                    }
+                |]
+        }
+        let feed = withLocations |> JdfToGtfs.getGtfsFeed false
+        let stop100Names =
+            feed.stops
+            |> Array.filter (fun stop -> stop.id.StartsWith("jdf:stop:100"))
+            |> Array.map (fun stop -> stop.name)
+        assertEqual true (stop100Names.Length > 1)
+        stop100Names
+        |> Array.iter (fun name ->
+            assertEqual true (name.EndsWith(" [APPROX]"))
+            assertEqual false (name.EndsWith(" [APPROX] [APPROX]")))
+        feed.stops
+        |> Array.filter (fun stop -> stop.id.StartsWith("jdf:stop:200"))
+        |> Array.iter (fun stop ->
+            assertEqual false (stop.name.EndsWith(" [APPROX]")))
 
     [<TestMethod>]
     member _.``CIS stop mode and extension serialization are deterministic``() =
@@ -252,7 +294,7 @@ type JdfToGtfsTests() =
             let parsed = Gtfs.gtfsParseFolder () first
             assertEqual (Some 3) (parsed.czRoutes |> Option.map Array.length)
             assertEqual (Some 2) (parsed.czTrips |> Option.map Array.length)
-            assertEqual (Some 7) (parsed.czStops |> Option.map Array.length)
+            assertEqual (Some 6) (parsed.czStops |> Option.map Array.length)
             assertEqual (Some 5) (parsed.czStopZones |> Option.map Array.length)
             assertEqual false
                 ((File.ReadLines(Path.Combine(first, "stop_times.txt")) |> Seq.head)

@@ -88,7 +88,9 @@ type JdfBundleTests() =
                 "source_stop_metadata.parquet", [|
                     "gtfs_stop_id", typeof<string>, false; "town", typeof<string>, false
                     "district", typeof<string>, true; "nearby_place", typeof<string>, true
-                    "country", typeof<string>, true; "coordinates_missing", typeof<bool>, false |]
+                    "country", typeof<string>, true; "coordinates_missing", typeof<bool>, false
+                    "coordinate_precision", typeof<string>, false
+                    "coordinate_source", typeof<string>, true |]
                 "source_call_metadata.parquet", [|
                     "gtfs_trip_id", typeof<string>, false; "stop_sequence", typeof<int>, false
                     "source_route_stop_id", typeof<int64>, false |]
@@ -121,7 +123,7 @@ type JdfBundleTests() =
                 |> Array.map (fun (fileName, schema) -> fileName, assertSchema first fileName schema)
                 |> Map
             parquet |> Map.iter (fun _ value ->
-                assertEqual "1" (string value.CustomMetadata.["obehy.schema_version"])
+                assertEqual "2" (string value.CustomMetadata.["obehy.schema_version"])
                 assertEqual "national-jdf" (string value.CustomMetadata.["obehy.source_id"])
                 assertEqual ($"sha256:{sha}") (string value.CustomMetadata.["obehy.snapshot_id"]))
 

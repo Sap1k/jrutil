@@ -24,7 +24,7 @@ open JrUtil
 let BundleVersion = 1
 
 [<Literal>]
-let ParquetSchemaVersion = 1
+let ParquetSchemaVersion = 2
 
 type SnapshotDescriptor = {
     sourceId: string
@@ -259,11 +259,21 @@ let private table fields rows =
 let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
     let stopLocations =
         batch.stopLocations
-        |> Seq.filter (fun location -> location.precision = JdfModel.StopPrecise)
-        |> Seq.map (fun location -> location.stopId, location)
+        |> Seq.groupBy (fun location -> location.stopId)
+        |> Seq.map (fun (stopId, locations) ->
+            stopId,
+            (locations
+             |> Seq.sortBy (fun location ->
+                 match location.precision with
+                 | JdfModel.StopPrecise -> 0
+                 | JdfModel.TownPrecise -> 1)
+             |> Seq.head))
         |> Map
     let retainedTripIds = feed.trips |> Seq.map (fun trip -> trip.id) |> Set
     let retainedRouteIds = feed.routes |> Seq.map (fun route -> route.id) |> Set
+    let retainedStopIds = feed.stops |> Seq.map (fun stop -> stop.id) |> Set
+    let stopLocationSources =
+        batch.stopLocationSources |> Seq.map (fun value -> value.stopId, value.source) |> Map
     let gtfsStopTimes = feed.stopTimes |> Seq.groupBy (fun call -> call.tripId) |> Map
 
     let routes =
@@ -280,16 +290,30 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
 
     let stopPlaces =
         batch.stops
+        |> Array.filter (fun stop ->
+            retainedStopIds.Contains(JdfToGtfs.jdfStopId stopIdsCis stop.id))
         |> Array.sortBy (fun stop -> stop.id)
         |> Array.map (fun stop ->
             let location = stopLocations |> Map.tryFind stop.id
+            let coordinatesMissing =
+                location
+                |> Option.map (fun value -> value.lat = 0m && value.lon = 0m)
+                |> Option.defaultValue true
+            let coordinatePrecision =
+                if coordinatesMissing then "missing"
+                else
+                    match location.Value.precision with
+                    | JdfModel.StopPrecise -> "stop"
+                    | JdfModel.TownPrecise -> "town"
             row [
                 "gtfs_stop_id", box (JdfToGtfs.jdfStopId stopIdsCis stop.id)
                 "town", box stop.town
                 "district", nullableObj stop.district
                 "nearby_place", nullableObj stop.nearbyPlace
                 "country", nullableObj stop.country
-                "coordinates_missing", box location.IsNone ])
+                "coordinates_missing", box coordinatesMissing
+                "coordinate_precision", box coordinatePrecision
+                "coordinate_source", nullableObj (stopLocationSources |> Map.tryFind stop.id) ])
 
     let calls =
         batch.tripStops
@@ -480,7 +504,8 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
         "source_stop_metadata.parquet", table [|
             stringField "gtfs_stop_id" false; stringField "town" false
             stringField "district" true; stringField "nearby_place" true
-            stringField "country" true; boolField "coordinates_missing" false |] stopPlaces
+            stringField "country" true; boolField "coordinates_missing" false
+            stringField "coordinate_precision" false; stringField "coordinate_source" true |] stopPlaces
         "source_call_metadata.parquet", table [|
             stringField "gtfs_trip_id" false; intField "stop_sequence" false
             int64Field "source_route_stop_id" false |] calls
@@ -704,8 +729,20 @@ let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
                 sourceObjectId = $"jdf:stop:{stopId}:post:id:{postId}"
                 message = $"Authoritative post has conflicting display numbers: {joinedNumbers}"
                 })
+    let missingStopCoordinates =
+        feed.stops
+        |> Seq.filter (fun stop -> stop.locationType = Some GtfsModel.Station)
+        |> Seq.choose (fun stop ->
+            match stop.lat, stop.lon with
+            | Some 0m, Some 0m -> Some {
+                severity = "warning"; code = "missing_stop_coordinates"
+                sourceObjectId = stop.id
+                message = "Referenced stop has no resolved coordinates and was serialized as 0,0"
+              }
+            | _ -> None)
     Seq.concat [filteredTrips; filteredEnrichments; unjoinableCallEnrichments; blankNotices
-                singletonRestrictions; conflictingRouteStops; missingLines; multiZones; conflictingPosts]
+                singletonRestrictions; conflictingRouteStops; missingLines; multiZones
+                conflictingPosts; missingStopCoordinates]
     |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
     |> Seq.toArray
 
@@ -728,6 +765,14 @@ let private writeDiagnostics path diagnostics =
 let private countTextRows path =
     File.ReadLines(path) |> Seq.skip 1 |> Seq.filter (fun line -> line <> "") |> Seq.length
 
+let private validateStopCoordinates (feed: GtfsModel.GtfsFeed) =
+    feed.stops
+    |> Seq.iter (fun stop ->
+        match stop.lat, stop.lon with
+        | Some lat, Some lon
+            when lat >= -90m && lat <= 90m && lon >= -180m && lon <= 180m -> ()
+        | _ -> invalidArg "feed" $"Stop {stop.id} has missing or out-of-range coordinates")
+
 let private fileEntries root parquetRows =
     Directory.GetFiles(root, "*", SearchOption.AllDirectories)
     |> Array.filter (fun path -> not (Path.GetFileName(path).Equals("manifest.json", StringComparison.Ordinal)))
@@ -742,6 +787,8 @@ let private fileEntries root parquetRows =
     |> Array.sortBy (fun entry -> entry.path)
 
 let private writeManifest path descriptor (converterVersion: string) stopIdsCis
+                          (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
+                          (internationalDecisions: JdfToGtfs.InternationalRouteDecision array)
                           (batch: JdfModel.JdfBatch) files =
     use stream = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)
     use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
@@ -772,6 +819,22 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteString("tool", "jrutil")
     writer.WriteString("version", converterVersion)
     writer.WriteBoolean("stop_ids_cis", stopIdsCis)
+    writer.WriteStartObject("international_route_filter")
+    writer.WriteString("policy", JdfToGtfs.internationalRoutePolicyName internationalPolicy)
+    writer.WriteNumber("non_integrated_maximum_trip_span_km", 120)
+    writer.WriteNumber("non_integrated_maximum_foreign_depth_km", 60)
+    writer.WriteNumber("integrated_maximum_trip_span_km", 200)
+    writer.WriteNumber("integrated_maximum_foreign_depth_km", 80)
+    writer.WriteNumber(
+        "retained_cross_border_route_distinctions",
+        internationalDecisions
+        |> Seq.filter (fun decision ->
+            decision.keep && decision.countries |> Array.exists ((<>) "CZ"))
+        |> Seq.length)
+    writer.WriteNumber(
+        "dropped_route_distinctions",
+        internationalDecisions |> Seq.filter (fun decision -> not decision.keep) |> Seq.length)
+    writer.WriteEndObject()
     writer.WriteEndObject()
     writer.WriteStartArray("files")
     for file in files do
@@ -784,7 +847,10 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteEndArray()
     writer.WriteEndObject()
 
-let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath outputPath =
+let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
+                          (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
+                          (internationalOverrides: JdfToGtfs.InternationalRouteOverride array)
+                          inputPath outputPath =
     if String.IsNullOrWhiteSpace(converterVersion) then invalidArg "converterVersion" "Converter version is required"
     Log.Information("Bundle phase: loading and validating snapshot descriptor")
     let descriptor = loadSnapshotDescriptor snapshotDescriptorPath
@@ -801,12 +867,24 @@ let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath out
     try
         withJdfInput inputPath (fun source ->
             Log.Information("Bundle phase: parsing merged JDF")
-            let batch = Jdf.jdfBatchDirParser () source
+            let sourceBatch = Jdf.jdfBatchDirParser () source
+            let sourceRouteKeys =
+                sourceBatch.routes
+                |> Seq.map (fun route -> route.id, route.idDistinction)
+                |> Set
+            JdfToGtfs.validateInternationalRouteOverrides
+                sourceRouteKeys internationalOverrides
+            let filterResult =
+                JdfToGtfs.applyInternationalRoutePolicy
+                    internationalPolicy internationalOverrides sourceBatch
+            JdfToGtfs.logInternationalRouteDecisions internationalPolicy filterResult.decisions
+            let batch = filterResult.batch
             Log.Information("Bundle phase: converting JDF to GTFS")
             let feed =
                 JdfToGtfs.getGtfsFeedForBundle stopIdsCis batch
                 |> Gtfs.deduplicateCalendar
                 |> Gtfs.fillStandardRequiredFields
+            validateStopCoordinates feed
             let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
             let extensionsPath = Path.Combine(temp, "extensions")
             Log.Information("Bundle phase: writing GTFS tables")
@@ -823,13 +901,43 @@ let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath out
                 writeParquet descriptor (Path.Combine(temp, name)) parquetTable
                 parquetRows <- parquetRows |> Map.add name parquetTable.rows.Count
             Log.Information("Bundle phase: creating diagnostics")
-            let bundleDiagnostics = diagnostics batch feed
+            let internationalDiagnostics =
+                filterResult.decisions
+                |> Seq.filter (fun decision -> not decision.keep)
+                |> Seq.map (fun decision ->
+                    let countries = String.Join(",", decision.countries)
+                    let span = decision.maximumTripSpanKm |> Option.map string |> Option.defaultValue "missing"
+                    let depth = decision.maximumForeignDepthKm |> Option.map string |> Option.defaultValue "missing"
+                    let overrideValue =
+                        match decision.overrideDecision with
+                        | Some JdfToGtfs.KeepRoute -> "keep"
+                        | Some JdfToGtfs.DropRoute -> "drop"
+                        | None -> "none"
+                    { severity = "warning"; code = "filtered_international_route"
+                      sourceObjectId = JdfToGtfs.jdfRouteId decision.routeId decision.routeDistinction
+                      message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; override={overrideValue}" })
+            let bundleDiagnostics =
+                Seq.append (diagnostics batch feed) internationalDiagnostics
+                |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
+                |> Seq.toArray
+            let missingCoordinateCount =
+                bundleDiagnostics
+                |> Seq.filter (fun diagnostic -> diagnostic.code = "missing_stop_coordinates")
+                |> Seq.length
+            if missingCoordinateCount > 0 then
+                Log.Warning("{MissingCoordinateCount} referenced stop places have unresolved coordinates and were serialized as 0,0",
+                            missingCoordinateCount)
             writeDiagnostics (Path.Combine(temp, "diagnostics.json")) bundleDiagnostics
             Log.Information("Bundle phase: hashing payloads and creating manifest")
             let files = fileEntries temp parquetRows
-            writeManifest (Path.Combine(temp, "manifest.json")) descriptor converterVersion stopIdsCis batch files)
+            writeManifest (Path.Combine(temp, "manifest.json")) descriptor converterVersion stopIdsCis
+                          internationalPolicy filterResult.decisions batch files)
         Log.Information("Bundle phase: activating completed bundle")
         Directory.Move(temp, outputFull)
         completed <- true
     finally
         if not completed && Directory.Exists(temp) then Directory.Delete(temp, true)
+
+let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath outputPath =
+    writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
+                          JdfToGtfs.KeepAll [||] inputPath outputPath

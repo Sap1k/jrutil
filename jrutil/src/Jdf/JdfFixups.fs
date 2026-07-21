@@ -6,8 +6,10 @@
 module JrUtil.JdfFixups
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open System.Text.RegularExpressions
+open System.Threading
 open NetTopologySuite.Geometries
 open Serilog
 open Serilog.Events
@@ -26,12 +28,85 @@ type JdfStopGeodata = {
     // The CRS is assumed to be ETRS89-Extended
     point: Point
     precision: GeodataPrecision
+    source: string option
 }
 type JdfStopToMatch = StopToMatch<JdfStopGeodata>
 
 /// Matches that are too spread out (radius > ...) aren't considered for
 /// matching
 let maxRadiusMetres = 1000.0
+
+let mutable private strictRegionMatchCount = 0L
+let mutable private borderRegionMatchCount = 0L
+let mutable private countryRejectCount = 0L
+let mutable private nonAdjacentRegionRejectCount = 0L
+let mutable private outsideBorderToleranceRejectCount = 0L
+
+let resetMatchDiagnostics () =
+    Interlocked.Exchange(&strictRegionMatchCount, 0L) |> ignore
+    Interlocked.Exchange(&borderRegionMatchCount, 0L) |> ignore
+    Interlocked.Exchange(&countryRejectCount, 0L) |> ignore
+    Interlocked.Exchange(&nonAdjacentRegionRejectCount, 0L) |> ignore
+    Interlocked.Exchange(&outsideBorderToleranceRejectCount, 0L) |> ignore
+
+let logMatchDiagnostics () =
+    Log.Information(
+        "Stop matcher geography summary: strict region matches {StrictRegionMatches}, border-tolerant matches {BorderRegionMatches}, country rejects {CountryRejects}, non-adjacent region rejects {NonAdjacentRegionRejects}, outside-border-tolerance rejects {OutsideBorderToleranceRejects}",
+        strictRegionMatchCount, borderRegionMatchCount, countryRejectCount,
+        nonAdjacentRegionRejectCount, outsideBorderToleranceRejectCount)
+
+let private czechRegionAdjacency =
+    Utils.memoizeVoidFunc <| fun () ->
+        let regions = czechRegionPolygons () |> Map.toArray
+        regions
+        |> Seq.collect (fun (leftCode, leftPolygon) ->
+            regions
+            |> Seq.choose (fun (rightCode, rightPolygon) ->
+                if leftCode < rightCode && leftPolygon.Distance(rightPolygon) <= 100.0
+                then Some (leftCode, rightCode)
+                else None))
+        |> Set
+
+let private regionsAdjacent left right =
+    let pair = if left < right then left, right else right, left
+    czechRegionAdjacency().Contains pair
+
+// OL occurs in current CIS JŘ exports, while the JDF/SPZ okres code and the
+// checked-in boundary data use OC for Olomouc. Treat it as an identity alias
+// during matching without rewriting the source JDF value.
+let private canonicalRegionCode = function
+    | "OL" -> "OC"
+    | code -> code
+
+let private borderToleranceCache =
+    ConcurrentDictionary<string * float * float, bool>()
+
+let private withinExpectedRegionBorder expected (point: Point) =
+    borderToleranceCache.GetOrAdd(
+        (expected, point.X, point.Y),
+        fun _ ->
+            match czechRegionPolygons() |> Map.tryFind expected with
+            | Some polygon -> polygon.Boundary.Distance(point) <= maxRadiusMetres
+            | None -> false)
+
+let private regionMatches expectedRegion (candidate: JdfStopGeodata) =
+    let expectedRegion = expectedRegion |> Option.map canonicalRegionCode
+    let candidateRegion = candidate.regionId |> Option.map canonicalRegionCode
+    match expectedRegion, candidateRegion with
+    | None, _ -> true
+    | Some expected, Some actual when expected = actual ->
+        Interlocked.Increment(&strictRegionMatchCount) |> ignore
+        true
+    | Some expected, Some actual when regionsAdjacent expected actual ->
+        if withinExpectedRegionBorder expected candidate.point then
+            Interlocked.Increment(&borderRegionMatchCount) |> ignore
+            true
+        else
+            Interlocked.Increment(&outsideBorderToleranceRejectCount) |> ignore
+            false
+    | Some _, _ ->
+        Interlocked.Increment(&nonAdjacentRegionRejectCount) |> ignore
+        false
 
 /// Some JDF batches in CIS JŘ public exports have the nearby town two-letter id
 /// appended to the town name like so: "Praha [AB]". This function will move it
@@ -96,15 +171,19 @@ let exactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
     matches
     |> Array.filter (fun m ->
         // Only take perfect matches
-        m.score = 1.0f
-        // If the stop has a region assigned, honour it
-        && match stop.regionId with
-           | Some r -> Some r = m.stop.data.regionId
-           | None -> true
-        // Same for the country
-        && match stop.country with
-           | Some c -> Some c = m.stop.data.country
-           | None -> true)
+        if m.score <> 1.0f then false else
+        // If the stop has a country assigned, honour it.
+        let countryMatches =
+            match stop.country with
+            | Some country -> Some country = m.stop.data.country
+            | None -> true
+        if not countryMatches then
+            Interlocked.Increment(&countryRejectCount) |> ignore
+            false
+        else
+            // Keep strict okres matching as the fast path, but tolerate an
+            // exact-name candidate immediately across an adjacent boundary.
+            regionMatches stop.regionId m.stop.data)
 
 let addRegionFromMatch (stop: Stop) match_ =
     match stop.regionId, match_ with
@@ -179,6 +258,13 @@ let topStopMatch (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
                            m.stop.data.precision = TownPrecise)
                     then TownPrecise
                     else StopPrecise
+                source =
+                    matches
+                    |> Seq.choose (fun m -> m.stop.data.source)
+                    |> Seq.distinct
+                    |> Seq.sort
+                    |> String.concat "+"
+                    |> function "" -> None | value -> Some value
             }
         }
         else
@@ -209,6 +295,7 @@ let matchCzTownByName (stop: Stop) =
                     country = Some "CZ"
                     point = (m.stop.data |> snd).Centroid
                     precision = TownPrecise
+                    source = Some "town:ruian"
                 }
             }
             score = 1.0f
@@ -249,6 +336,7 @@ let matchByTopTown (stop: Stop) mo =
                             wgs84Factory.CreatePoint(Coordinate(lon, lat))
                             |> pointWgs84ToEtrs89Ex
                         precision = TownPrecise
+                        source = Some "town:europe"
                     }
                 }
             | _ -> stop, None
@@ -747,22 +835,30 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
     augmentedStops |> Array.map snd
 
 let addStopLocations jdfBatch stopsWithMatches =
+    let matchedLocations =
+        stopsWithMatches
+        |> Array.choose (fun (s: Stop, mo) ->
+            mo |> Option.map (fun m ->
+                let wgs84Pt =
+                    transformPoint
+                        etrs89ExSrid wgs84Srid
+                        (wgs84ToEtrs89Ex.Inverse())
+                        m.data.point
+                {
+                    stopId = s.id
+                    lat = decimal wgs84Pt.Y
+                    lon = decimal wgs84Pt.X
+                    precision = m.data.precision
+                }, m.data.source))
     { jdfBatch with
-        stopLocations =
-            stopsWithMatches
-            |> Array.choose (fun (s: Stop, mo) ->
-                mo |> Option.map (fun m ->
-                    let wgs84Pt =
-                        transformPoint
-                            etrs89ExSrid wgs84Srid
-                            (wgs84ToEtrs89Ex.Inverse())
-                            m.data.point
-                    {
-                        stopId = s.id
-                        lat = decimal wgs84Pt.Y
-                        lon = decimal wgs84Pt.X
-                        precision = m.data.precision
-                    }))
+        stopLocations = matchedLocations |> Array.map fst
+        stopLocationSources =
+            matchedLocations
+            |> Array.choose (fun (location, source) ->
+                source |> Option.map (fun value -> {
+                    stopId = location.stopId
+                    source = value
+                }))
     }
 
 /// WARN: Expects tripsStops to be for one trip only and sorted by call order
