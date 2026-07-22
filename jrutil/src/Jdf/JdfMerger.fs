@@ -412,11 +412,13 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                              far from existing location: {Lat}, {Lon}",
                             stopId, sl.lat, sl.lon)
 
-            // Either this is a new location or an upgrade (town precise to
-            // stop precise)
+            let precisionRank = function
+                | StopPrecise -> 0
+                | Estimated -> 1
+
+            // Either this is a new location or a precision upgrade.
             if not hasOldSl
-               || (sl.precision = StopPrecise
-                   && oldSl.precision = TownPrecise)
+               || precisionRank sl.precision < precisionRank oldSl.precision
             then
                 stopLocationsByStop.[stopId] <- { sl with stopId = stopId }
                 match batchLocationSources |> Map.tryFind sl.stopId with

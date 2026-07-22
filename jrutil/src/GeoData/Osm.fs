@@ -107,7 +107,6 @@ let czOtherStopsForJdfMatch (stops: CzOtherStop seq) =
                 country = if region.IsSome then Some "CZ" else None
                 regionId = region
                 point = etrs89ExPt
-                precision = StopPrecise
                 source = Some "osm:czech-pbf"
             }
         })

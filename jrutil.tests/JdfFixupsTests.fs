@@ -4,6 +4,7 @@ namespace JrUtil.Tests
 
 open System.IO
 open Microsoft.VisualStudio.TestTools.UnitTesting
+open NodaTime
 
 open JrUtil
 open JrUtil.GeoData.Common
@@ -31,9 +32,14 @@ type JdfFixupsTests() =
                 { regionId = Some region
                   country = Some country
                   point = point
-                  precision = StopPrecise
                   source = None } }
           score = 1.0f }
+
+    let withSource source (match_: StopMatch<JdfStopGeodata>) =
+        { match_ with
+            stop =
+                { match_.stop with
+                    data = { match_.stop.data with source = Some source } } }
 
     let polygons = czechRegionPolygons () |> Map.toArray
 
@@ -116,30 +122,149 @@ type JdfFixupsTests() =
         |> assertEqual 1
 
     [<TestMethod>]
-    member _.``Post-merge reconciliation adds an exact missing location with provenance``() =
+    member _.``Checked exact match wins over an OSM exact match``() =
+        let region, polygon = polygons.[0]
+        let checkedPoint = polygon.Centroid
+        let osmPoint =
+            polygon.Factory.CreatePoint(
+                NetTopologySuite.Geometries.Coordinate(
+                    checkedPoint.X + 5000.0, checkedPoint.Y))
+        let selected =
+            topStopMatch
+                (sourceStop region "CZ")
+                [| candidate region "CZ" checkedPoint |> withSource "external:manual"
+                   candidate region "CZ" osmPoint |> withSource "osm:czech-pbf" |]
+            |> Option.get
+
+        assertEqual checkedPoint selected.data.point
+        assertEqual (Some "external:manual") selected.data.source
+
+    [<TestMethod>]
+    member _.``Impossible middle match is rejected and estimated by scheduled time``() =
         let fixturePath =
             Path.Combine(__SOURCE_DIRECTORY__, "data", "jdf", "obehy_extensions")
         let source = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
-        let stop = source.stops.[0]
-        let point =
-            stop.regionId
-            |> Option.map (fun region -> (czechRegionPolygons ()).[region].Centroid)
-            |> Option.defaultValue (czechRegionPolygons () |> Map.toSeq |> Seq.head |> snd |> fun p -> p.Centroid)
-        let external = [|
-            { name = Jdf.jdfStopNameString stop
-              data =
-                { regionId = stop.regionId; country = stop.country; point = point
-                  precision = StopPrecise; source = Some "external:manual" } }
+        let first = source.stops.[0]
+        let last = source.stops.[1]
+        let middle = { first with id = 300L; nearbyPlace = Some "middle" }
+        let notPassing = { first with id = 400L; nearbyPlace = Some "not passing" }
+        let template = source.tripStops.[0]
+        let timedCall stopId routeStopId minute =
+            { template with
+                stopId = stopId
+                routeStopId = routeStopId
+                arrivalTime = Some (StopTime(LocalTime(8, minute)))
+                departureTime = Some (StopTime(LocalTime(8, minute))) }
+        let calls = [|
+            timedCall first.id 1L 0
+            timedCall middle.id 2L 5
+            { timedCall notPassing.id 3L 6 with
+                arrivalTime = Some NotPassing
+                departureTime = Some NotPassing }
+            timedCall last.id 4L 10
         |]
-        use matcher = new StopMatcher<JdfStopGeodata>(external)
+        let factory = (czechRegionPolygons () |> Map.toSeq |> Seq.head |> snd).Factory
+        let point x = factory.CreatePoint(NetTopologySuite.Geometries.Coordinate(x, 0.0))
+        let matchAt stop point =
+            Some {
+                name = Jdf.jdfStopNameString stop
+                data =
+                    { regionId = stop.regionId; country = stop.country; point = point
+                      source = Some "external:test" }
+            }
+        let plausible =
+            [| first, matchAt first (point 0.0)
+               middle, matchAt middle (point 1_000_000.0)
+               notPassing, matchAt notPassing (point 8_000.0)
+               last, matchAt last (point 10_000.0) |]
+            |> rejectImplausibleMatches calls
+
+        assertEqual true (plausible.[0] |> snd |> Option.isSome)
+        assertEqual None (plausible.[1] |> snd)
+        assertEqual true (plausible.[2] |> snd |> Option.isSome)
+        assertEqual true (plausible.[3] |> snd |> Option.isSome)
+
         let batch = {
             source with
-                stops = [| stop |]
-                stopLocations = [||]
-                stopLocationSources = [||]
+                stops = [| first; middle; notPassing; last |]
+                tripStops = calls
         }
+        let estimated =
+            plausible
+            |> addStopLocations batch
+            |> estimateMissingStopLocations
+        let middleLocation =
+            estimated.stopLocations |> Array.find (fun value -> value.stopId = middle.id)
+        let firstLocation =
+            estimated.stopLocations |> Array.find (fun value -> value.stopId = first.id)
+        let lastLocation =
+            estimated.stopLocations |> Array.find (fun value -> value.stopId = last.id)
 
-        let reconciled = reconcileMissingStopLocations matcher batch
+        assertEqual Estimated middleLocation.precision
+        let expectedMidpoint = (firstLocation.lon + lastLocation.lon) / 2m
+        assertEqual true (abs (middleLocation.lon - expectedMidpoint) < 0.001m)
+        let source =
+            estimated.stopLocationSources
+            |> Array.find (fun value -> value.stopId = middle.id)
+        assertEqual "estimated:route-time" source.source
 
-        assertEqual stop.id (reconciled.stopLocations |> Array.exactlyOne).stopId
-        assertEqual "external:manual" (reconciled.stopLocationSources |> Array.exactlyOne).source
+    [<TestMethod>]
+    member _.``Unmatched route origin is offset north of its first known stop``() =
+        let fixturePath =
+            Path.Combine(__SOURCE_DIRECTORY__, "data", "jdf", "obehy_extensions")
+        let source = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
+        let origin = source.stops.[0]
+        let known = source.stops.[1]
+        let template = source.tripStops.[0]
+        let calls = [|
+            { template with
+                stopId = origin.id; routeStopId = 1L
+                arrivalTime = Some (StopTime(LocalTime(8, 0)))
+                departureTime = Some (StopTime(LocalTime(8, 0))) }
+            { template with
+                stopId = known.id; routeStopId = 2L
+                arrivalTime = Some (StopTime(LocalTime(8, 5)))
+                departureTime = Some (StopTime(LocalTime(8, 5))) }
+        |]
+        let knownLocation = {
+            stopId = known.id
+            lat = 50.0m
+            lon = 14.0m
+            precision = StopPrecise
+        }
+        let estimated =
+            { source with
+                stops = [| origin; known |]
+                tripStops = calls
+                stopLocations = [| knownLocation |]
+                stopLocationSources = [||] }
+            |> estimateMissingStopLocations
+        let originLocation =
+            estimated.stopLocations |> Array.find (fun value -> value.stopId = origin.id)
+
+        assertEqual Estimated originLocation.precision
+        assertEqual true (originLocation.lat > knownLocation.lat)
+        let locationSource =
+            estimated.stopLocationSources
+            |> Array.find (fun value -> value.stopId = origin.id)
+        assertEqual "estimated:route-end-north" locationSource.source
+
+    [<TestMethod>]
+    member _.``Batch with one distinct called stop is dropped completely``() =
+        let fixturePath =
+            Path.Combine(__SOURCE_DIRECTORY__, "data", "jdf", "obehy_extensions")
+        let source = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
+        let template = source.tripStops.[0]
+        let oneStopBatch = {
+            source with
+                tripStops = [|
+                    { template with stopId = source.stops.[0].id; routeStopId = 1L }
+                    { template with stopId = source.stops.[0].id; routeStopId = 2L }
+                |]
+        }
+        let dropped = dropDegenerateBatch oneStopBatch |> Option.get
+
+        assertEqual 0 dropped.routes.Length
+        assertEqual 0 dropped.stops.Length
+        assertEqual 0 dropped.trips.Length
+        assertEqual 0 dropped.tripStops.Length

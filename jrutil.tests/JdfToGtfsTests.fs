@@ -220,7 +220,7 @@ type JdfToGtfsTests() =
         czStopZones |> Array.iter (fun zone -> assertEqual None zone.idsSystemId)
 
     [<TestMethod>]
-    member _.``Town-level coordinates mark stop places and boarding points approximate``() =
+    member _.``Estimated coordinates mark stop places and boarding points with question mark``() =
         let source = batch ()
         let withLocations = {
             source with
@@ -229,7 +229,7 @@ type JdfToGtfsTests() =
                         stopId = 100L
                         lat = 50.0M
                         lon = 14.0M
-                        precision = JdfModel.TownPrecise
+                        precision = JdfModel.Estimated
                     }
                     {
                         stopId = 200L
@@ -247,12 +247,12 @@ type JdfToGtfsTests() =
         assertEqual true (stop100Names.Length > 1)
         stop100Names
         |> Array.iter (fun name ->
-            assertEqual true (name.EndsWith(" [APPROX]"))
-            assertEqual false (name.EndsWith(" [APPROX] [APPROX]")))
+            assertEqual true (name.EndsWith(" [?]"))
+            assertEqual false (name.EndsWith(" [?] [?]")))
         feed.stops
         |> Array.filter (fun stop -> stop.id.StartsWith("jdf:stop:200"))
         |> Array.iter (fun stop ->
-            assertEqual false (stop.name.EndsWith(" [APPROX]")))
+            assertEqual false (stop.name.EndsWith(" [?]")))
 
     [<TestMethod>]
     member _.``CIS stop mode and extension serialization are deterministic``() =
