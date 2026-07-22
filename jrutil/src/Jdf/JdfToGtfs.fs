@@ -184,7 +184,7 @@ let getStopName (jdfStop: JdfModel.Stop) =
     | (Some d, Some np) -> sprintf "%s,%s,%s" jdfStop.town d np
 
 let markApproximateStopName (name: string) =
-    let suffix = " [APPROX]"
+    let suffix = " [?]"
     if name.EndsWith(suffix, StringComparison.Ordinal) then name
     else name + suffix
 
@@ -310,7 +310,7 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 |> Seq.sortBy (fun sl ->
                     match sl.precision with
                     | JdfModel.StopPrecise -> 0
-                    | JdfModel.TownPrecise -> 1)
+                    | JdfModel.Estimated -> 1)
                 |> Seq.head
             stopId, location)
         |> Map
@@ -346,7 +346,7 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
             let stopName =
                 let name = getStopName jdfStop
                 match location with
-                | Some value when value.precision = JdfModel.TownPrecise ->
+                | Some value when value.precision <> JdfModel.StopPrecise ->
                     markApproximateStopName name
                 | _ -> name
             {

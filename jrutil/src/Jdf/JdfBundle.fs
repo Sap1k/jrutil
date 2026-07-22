@@ -24,7 +24,7 @@ open JrUtil
 let BundleVersion = 1
 
 [<Literal>]
-let ParquetSchemaVersion = 2
+let ParquetSchemaVersion = 3
 
 type SnapshotDescriptor = {
     sourceId: string
@@ -266,7 +266,7 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
              |> Seq.sortBy (fun location ->
                  match location.precision with
                  | JdfModel.StopPrecise -> 0
-                 | JdfModel.TownPrecise -> 1)
+                 | JdfModel.Estimated -> 1)
              |> Seq.head))
         |> Map
     let retainedTripIds = feed.trips |> Seq.map (fun trip -> trip.id) |> Set
@@ -304,7 +304,7 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
                 else
                     match location.Value.precision with
                     | JdfModel.StopPrecise -> "stop"
-                    | JdfModel.TownPrecise -> "town"
+                    | JdfModel.Estimated -> "estimated"
             row [
                 "gtfs_stop_id", box (JdfToGtfs.jdfStopId stopIdsCis stop.id)
                 "town", box stop.town

@@ -29,18 +29,12 @@ type OtherStopRow = {
     Lon: float
     Region: string option
     Country: string option
-    Precision: string option
     Source: string option
 }
 
 let otherStopRowsForJdfMatch (otherStopRows: OtherStopRow seq) =
     otherStopRows
     |> Seq.map (fun s ->
-        let precision =
-            match s.Precision |> Option.map (fun value -> value.Trim().ToUpperInvariant()) with
-            | None | Some "" | Some "S" -> StopPrecise
-            | Some "T" -> TownPrecise
-            | Some value -> invalidArg "precision" $"Unknown external geodata precision '{value}'"
         {
         name = s.Name
         data = {
@@ -48,7 +42,6 @@ let otherStopRowsForJdfMatch (otherStopRows: OtherStopRow seq) =
             country = s.Country
             point = pointWgs84ToEtrs89Ex
                  <| wgs84Factory.CreatePoint(Coordinate(s.Lon, s.Lat))
-            precision = precision
             source = s.Source
         }
     })
@@ -58,7 +51,7 @@ let otherStopsForJdfMatch (otherStops: OtherStops) =
     otherStops.Rows
     |> Seq.map (fun row -> {
         Name = row.Name; Lat = row.Lat; Lon = row.Lon
-        Region = row.Region; Country = row.Country; Precision = None
+        Region = row.Region; Country = row.Country
         Source = Some "external:legacy"
     })
     |> otherStopRowsForJdfMatch
@@ -92,8 +85,8 @@ let otherStopsFromPath path =
         CsvFile.Parse(File.ReadAllText(file), hasHeaders = false).Rows
         |> Seq.mapi (fun index row ->
             let columns = row.Columns
-            if columns.Length <> 5 && columns.Length <> 6 then
-                invalidArg "path" $"External geodata row must have five or six columns: {file} row {index + 1}"
+            if columns.Length <> 5 then
+                invalidArg "path" $"External geodata row must have five columns: {file} row {index + 1}"
             let lat = parseFloat file (index + 1) "latitude" columns.[1]
             let lon = parseFloat file (index + 1) "longitude" columns.[2]
             if not (Double.IsFinite(lat)) || lat < -90.0 || lat > 90.0
@@ -106,10 +99,9 @@ let otherStopsFromPath path =
                 Lon = lon
                 Region = optionalText columns.[3]
                 Country = optionalText columns.[4]
-                Precision = if columns.Length = 6 then optionalText columns.[5] else None
                 Source = Some $"external:{Path.GetFileNameWithoutExtension(file)}"
             }))
-    |> Seq.distinctBy (fun s -> s.Name, s.Lat, s.Lon, s.Region, s.Country, s.Precision)
+    |> Seq.distinctBy (fun s -> s.Name, s.Lat, s.Lon, s.Region, s.Country)
     |> Seq.toArray
 
 let otherStopsFromPathForJdfMatch path =

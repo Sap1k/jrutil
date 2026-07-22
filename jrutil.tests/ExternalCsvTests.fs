@@ -33,23 +33,28 @@ type ExternalCsvTests() =
             Directory.Delete(root, true)
 
     [<TestMethod>]
-    member this.``Loads optional town precision and defaults legacy rows to stop precision``() =
+    member this.``Loads stop rows with source provenance``() =
         let root = makeRoot ()
         try
             let path = Path.Combine(root, "legacy.csv")
             File.WriteAllText(
                 path,
                 "Stop precise,50.0,14.0,AB,CZ\n")
-            File.WriteAllText(
-                Path.Combine(root, "town.csv"),
-                "Town precise,49.0,15.0,BE,CZ,T\n")
 
             let matches = otherStopsFromPathForJdfMatch root
 
-            assertEqual JdfModel.StopPrecise matches.[0].data.precision
-            assertEqual JdfModel.TownPrecise matches.[1].data.precision
             assertEqual (Some "external:legacy") matches.[0].data.source
-            assertEqual (Some "external:town") matches.[1].data.source
+        finally
+            Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member this.``Rejects obsolete six-column town rows``() =
+        let root = makeRoot ()
+        try
+            File.WriteAllText(Path.Combine(root, "town.csv"), "Town,49.0,15.0,BE,CZ,T\n")
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                otherStopsFromPath root |> ignore)
+            |> ignore
         finally
             Directory.Delete(root, true)
 

@@ -7,6 +7,7 @@ module JrUtil.JdfFixups
 
 open System
 open System.Collections.Concurrent
+open System.Collections.Generic
 open System.IO
 open System.Text.RegularExpressions
 open System.Threading
@@ -27,7 +28,6 @@ type JdfStopGeodata = {
     country: string option
     // The CRS is assumed to be ETRS89-Extended
     point: Point
-    precision: GeodataPrecision
     source: string option
 }
 type JdfStopToMatch = StopToMatch<JdfStopGeodata>
@@ -249,48 +249,58 @@ let matchesCzTownByName town =
     |> Seq.exists (fun m -> m.score = 1.0f)
 
 let topStopMatch (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
-    let matches = exactMatches stop matches
-
-    if matches.Length = 0 then None
-    // Sanity check - if stops are close together, they need to be in the same
-    // region and country
-    else if matches
-            |> Array.map (fun m -> m.stop.data.regionId, m.stop.data.country)
-            |> set
-            |> Set.count > 1 then None
-    else
-        let points = matches |> Array.map (fun m -> m.stop.data.point)
-        let radius = pointsRadius points
-        if radius < maxRadiusMetres
-        then Some {
-            name = matches.[0].stop.name
-            data = {
-                regionId = matches.[0].stop.data.regionId
-                country = matches.[0].stop.data.country
-                point =
-                    etrs89ExFactory.CreateGeometryCollection(
-                        points |> Array.map (fun p -> p :> _))
-                        .Centroid
-                precision =
-                    if matches
-                       |> Seq.exists (fun m ->
-                           m.stop.data.precision = TownPrecise)
-                    then TownPrecise
-                    else StopPrecise
-                source =
-                    matches
-                    |> Seq.choose (fun m -> m.stop.data.source)
-                    |> Seq.distinct
-                    |> Seq.sort
-                    |> String.concat "+"
-                    |> function "" -> None | value -> Some value
-            }
-        }
+    let preciseMatches =
+        exactMatches stop matches
+    let checkedMatches =
+        preciseMatches
+        |> Array.filter (fun m ->
+            m.stop.data.source
+            |> Option.map (fun source ->
+                not (source.StartsWith("osm:", StringComparison.Ordinal)))
+            |> Option.defaultValue true)
+    let select candidates =
+        if candidates |> Array.isEmpty then None
+        // Sanity check - if stops are close together, they need to be in the
+        // same region and country.
+        else if candidates
+                |> Array.map (fun m -> m.stop.data.regionId, m.stop.data.country)
+                |> set
+                |> Set.count > 1 then None
         else
-            Log.Debug("Not considering match for stop {StopId} since \
-                      radius {Radius:n1} is too high",
-                      stop.id, radius)
-            None
+            let points = candidates |> Array.map (fun m -> m.stop.data.point)
+            let radius = pointsRadius points
+            if radius < maxRadiusMetres
+            then Some {
+                name = candidates.[0].stop.name
+                data = {
+                    regionId = candidates.[0].stop.data.regionId
+                    country = candidates.[0].stop.data.country
+                    point =
+                        etrs89ExFactory.CreateGeometryCollection(
+                            points |> Array.map (fun p -> p :> _))
+                            .Centroid
+                    source =
+                        candidates
+                        |> Seq.choose (fun m -> m.stop.data.source)
+                        |> Seq.distinct
+                        |> Seq.sort
+                        |> String.concat "+"
+                        |> function "" -> None | value -> Some value
+                }
+            }
+            else
+                Log.Debug("Not considering match for stop {StopId} since \
+                          radius {Radius:n1} is too high",
+                          stop.id, radius)
+                None
+
+    // Checked catalogues get the first chance, but an ambiguous checked set
+    // must not suppress an otherwise usable OSM fallback.
+    select checkedMatches
+    |> Option.orElseWith (fun () ->
+        preciseMatches
+        |> Array.filter (fun match_ -> not (checkedMatches |> Array.contains match_))
+        |> select)
 
 let matchConflictsWithEurCity (m: StopToMatch<JdfStopGeodata>) =
     // Some Czech towns share names with ones with other countries. Since we
@@ -302,63 +312,32 @@ let matchConflictsWithEurCity (m: StopToMatch<JdfStopGeodata>) =
     eurTownNameMatcher().matchStop(town)
     |> Seq.exists (fun tm -> tm.score = 1f)
 
-let matchCzTownByName (stop: Stop) =
+let matchingCzTownRegions (stop: Stop) =
     matchCzTownByNameRaw stop.town
     |> Array.filter (fun m -> m.score = 1f)
     |> Array.map (fun m ->
-        {
-            stop = {
-                name = m.stop.name
-                data = {
-                    regionId = Some (fst m.stop.data)
-                    country = Some "CZ"
-                    point = (m.stop.data |> snd).Centroid
-                    precision = TownPrecise
-                    source = Some "town:ruian"
-                }
-            }
-            score = 1.0f
-        })
+        m.stop.name, fst m.stop.data)
+    |> Array.distinct
 
-let matchByTopTown (stop: Stop) mo =
+let addGeographyFromTopTown (stop: Stop) mo =
     let czMatches () =
-        matchCzTownByName stop
-        |> Array.groupBy (fun m -> m.stop.name, m.stop.data.regionId)
-        |> Array.map snd
+        matchingCzTownRegions stop
 
     match stop.country, stop.regionId with
     | Some "CZ", None ->
-        stop,
         match czMatches () with
-        | [| ms |] -> Some (Array.head ms).stop
-        | _ -> None
+        | [| (_, regionId) |] ->
+            { stop with regionId = Some regionId }, mo
+        | _ -> stop, mo
     | None, None ->
         let eurTown =
             eurTownNameMatcher().matchStop(stop.town)
             |> Array.tryFind (fun m -> m.score = 1f)
             |> Option.map (fun m -> m.stop.data)
         match czMatches (), eurTown with
-        | [| ms |], None -> stop, Some (Array.head ms).stop
-        | [| |], Some (c, lato, lono) ->
-            match mo, lato, lono with
-            | Some _, _, _ -> stop, mo
-            | None, None, None ->
-                { stop with country = Some c }, None
-            | None, Some lat, Some lon ->
-                { stop with country = Some c },
-                Some {
-                    name = stop.town
-                    data = {
-                        regionId = None
-                        country = Some c
-                        point =
-                            wgs84Factory.CreatePoint(Coordinate(lon, lat))
-                            |> pointWgs84ToEtrs89Ex
-                        precision = TownPrecise
-                        source = Some "town:europe"
-                    }
-                }
-            | _ -> stop, None
+        | [| (_, regionId) |], None ->
+            { stop with regionId = Some regionId; country = Some "CZ" }, mo
+        | [| |], Some (country, _, _) -> { stop with country = Some country }, mo
         | _ -> stop, mo
     | _ -> stop, mo
 
@@ -582,9 +561,7 @@ let addSecondaryMatches
             // Check if all trips agree on this match
             | Some (Some pick as pickOpt) ->
                 if Seq.forall ((=) pickOpt) suggested then
-                    Log.Debug("Picked position for {StopId} by secondary match \
-                               ({Precision})",
-                              s.id, pick.data.precision)
+                    Log.Debug("Picked position for {StopId} by secondary match", s.id)
                     s, pickOpt, ams
                 else
                     Log.Debug("Trips disagreed on secondary match \
@@ -736,16 +713,40 @@ let matchStops stopMatcher tripsMatrix1 tripsMatrix2 stops =
         else s, tm, ms)
     |> addSecondaryMatches 1.0 tripsMatrix1
     |> addSecondaryMatches 1.0 tripsMatrix2
-    // Try matching stops without an existing match to an unambiguous town
-    // by name
+    // Town polygons may fill missing geography, but never coordinates.
     |> Array.map (fun (s, mo, ams) ->
         match mo with
         | None ->
-            let s2, mo2 = matchByTopTown s mo
+            let s2, mo2 = addGeographyFromTopTown s mo
             s2, mo2, ams
         | Some _ -> s, mo, ams)
 
 let routeDescTownNameRegex = Regex(@"MHD ([^:]*) linka|MHD ([^ :]*)|([^,:-]*) *[,:-]")
+
+let dropDegenerateBatch (jdfBatch: JdfBatch) =
+    let hasScheduledTime = function
+        | Some (StopTime _) -> true
+        | _ -> false
+    let calledStopIds =
+        jdfBatch.tripStops
+        |> Seq.filter (fun call ->
+            hasScheduledTime call.arrivalTime
+            || hasScheduledTime call.departureTime)
+        |> Seq.map (fun call -> call.stopId)
+        |> Set
+    if calledStopIds.Count >= 2 then None
+    else
+        Some {
+            jdfBatch with
+                stops = [||]; stopPosts = [||]; agencies = [||]
+                routes = [||]; routeIntegrations = [||]; routeStops = [||]
+                trips = [||]; tripGroups = [||]; tripStops = [||]
+                routeInfo = [||]; attributeRefs = [||]; serviceNotes = [||]
+                transfers = [||]; agencyAlternations = [||]
+                alternateRouteNames = [||]; reservationOptions = [||]
+                stopLocations = [||]; stopLocationSources = [||]
+        }
+
 let townNameFromRouteDesc (route: Route) =
     let townOpt =
         (routeDescTownNameRegex.Match(route.name).Groups
@@ -831,16 +832,6 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
 
     let augmentedStops =
         stopsWithAllMatches
-        // Before now we only considered stop-accurate matches,
-        // now add town-accurate matches to the mix.
-        |> Array.map (fun (s, mo, ams) ->
-            match mo with
-            | None -> s, mo, Array.concat [| ams; matchCzTownByName s |]
-            | Some _ -> s, mo, ams
-        )
-        // Try secondary matches again with towns
-        |> addSecondaryMatches 10.0 tripsMatrix1
-        |> addSecondaryMatches 10.0 tripsMatrix2
         // Write data from whatever matches we have into the stops
         |> Array.map (fun (s, mo, _) -> addRegionFromMatch s mo, mo)
         // Fill in gaps, if possible
@@ -863,7 +854,7 @@ let private stopLocationFromMatch (stop: Stop) (match_: JdfStopToMatch) =
         stopId = stop.id
         lat = decimal wgs84Pt.Y
         lon = decimal wgs84Pt.X
-        precision = match_.data.precision
+        precision = StopPrecise
     }, match_.data.source
 
 let private addMatchedLocations jdfBatch matchedLocations =
@@ -890,39 +881,207 @@ let addStopLocations jdfBatch stopsWithMatches =
     { jdfBatch with stopLocations = [||]; stopLocationSources = [||] }
     |> fun batch -> addMatchedLocations batch matchedLocations
 
-let reconcileMissingStopLocations (stopMatcher: StopMatcher<JdfStopGeodata>)
-                                  (jdfBatch: JdfBatch) =
-    let positionedStopIds = jdfBatch.stopLocations |> Seq.map (fun value -> value.stopId) |> Set
-    let matchedLocations =
-        jdfBatch.stops
-        |> Array.filter (fun stop -> not (positionedStopIds.Contains stop.id))
-        |> Array.choose (fun stop ->
-            let exact =
-                matchStopByName stopMatcher stop
-                |> Array.filter (fun match_ ->
-                    stopMatcher.checkExactMatch(
-                        stopNameToTokens (jdfStopNameString stop),
-                        stopNameToTokens match_.stop.name))
-                |> topStopMatch stop
-            let selected =
-                match exact with
-                | Some value -> Some value
-                | None ->
-                    // At this final normalized-stop stage there is no route
-                    // distance context left. A unique RUIAN town in the
-                    // expected okres is the conservative last fallback.
-                    matchCzTownByName stop
-                    |> topStopMatch stop
-            selected |> Option.map (stopLocationFromMatch stop))
-    if matchedLocations.Length > 0 then
-        let stopPrecise =
-            matchedLocations
-            |> Array.filter (fun (location, _) -> location.precision = StopPrecise)
-            |> Array.length
+let private tripStopClockMinutes (tripStop: TripStop) =
+    let getTime = function
+        | Some (StopTime value) -> Some value
+        | _ -> None
+    getTime tripStop.arrivalTime
+    |> Option.orElseWith (fun () -> getTime tripStop.departureTime)
+    |> Option.map (fun value ->
+        float (value.Hour * 60 + value.Minute) + float value.Second / 60.0)
+
+let private orderedTimedTrips (tripStops: TripStop array) =
+    tripStops
+    |> Array.groupBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
+    |> Array.map (fun ((_, _, tripId), calls) ->
+        let direction = if tripIsReverse tripId then -1L else 1L
+        let mutable dayOffset = 0.0
+        let mutable previous = None
+        calls
+        |> Array.sortBy (fun call -> call.routeStopId * direction)
+        |> Array.map (fun call ->
+            let normalizedTime =
+                tripStopClockMinutes call
+                |> Option.map (fun raw ->
+                    let mutable value = raw + dayOffset
+                    while previous |> Option.exists (fun old -> value < old - 720.0) do
+                        dayOffset <- dayOffset + 1440.0
+                        value <- raw + dayOffset
+                    previous <- Some value
+                    value)
+            call, normalizedTime))
+
+let rejectImplausibleMatches
+        (tripStops: TripStop array)
+        (stopsWithMatches: (Stop * JdfStopToMatch option) array) =
+    let matchesByStop =
+        stopsWithMatches
+        |> Array.choose (fun (stop, match_) ->
+            match_ |> Option.map (fun value -> stop.id, value))
+        |> Map
+    let conflicts = Dictionary<int64, HashSet<int64>>()
+    let supports = Dictionary<int64, HashSet<int64>>()
+    let addNeighbor (target: Dictionary<int64, HashSet<int64>>) left right =
+        let found, neighbors = target.TryGetValue(left)
+        let neighbors =
+            if found then neighbors
+            else
+                let value = HashSet<int64>()
+                target.[left] <- value
+                value
+        neighbors.Add(right) |> ignore
+    let addEdge target left right =
+        addNeighbor target left right
+        addNeighbor target right left
+
+    orderedTimedTrips tripStops
+    |> Array.iter (fun calls ->
+        calls
+        |> Array.choose (fun (call, time) ->
+            match time, matchesByStop |> Map.tryFind call.stopId with
+            | Some value, Some match_ -> Some (call.stopId, value, match_)
+            | _ -> None)
+        |> Array.pairwise
+        |> Array.iter (fun ((leftId, leftTime, left), (rightId, rightTime, right)) ->
+            let elapsedMinutes = rightTime - leftTime
+            if elapsedMinutes >= 0.0 then
+                let distanceKm = left.data.point.Distance(right.data.point) / 1000.0
+                // 2 km of local slack plus a deliberately generous 150 km/h.
+                // This catches impossible matches without policing timetables.
+                let maximumKm = 2.0 + elapsedMinutes * 2.5
+                if distanceKm > maximumKm then addEdge conflicts leftId rightId
+                else addEdge supports leftId rightId))
+
+    let neighborCount (source: Dictionary<int64, HashSet<int64>>) stopId =
+        match source.TryGetValue(stopId) with
+        | true, values -> values.Count
+        | _ -> 0
+    let rejected = HashSet<int64>()
+    for pair in conflicts do
+        if pair.Value.Count >= 2 then rejected.Add(pair.Key) |> ignore
+    for pair in conflicts do
+        for neighbor in pair.Value do
+            if not (rejected.Contains(pair.Key) || rejected.Contains(neighbor)) then
+                let leftSupport = neighborCount supports pair.Key
+                let rightSupport = neighborCount supports neighbor
+                if leftSupport > rightSupport then rejected.Add(neighbor) |> ignore
+                else if rightSupport > leftSupport then rejected.Add(pair.Key) |> ignore
+                else
+                    // With no contextual reason to trust either endpoint,
+                    // keeping both would preserve a known-impossible edge.
+                    rejected.Add(pair.Key) |> ignore
+                    rejected.Add(neighbor) |> ignore
+
+    if rejected.Count > 0 then
+        Log.Warning(
+            "Rejected {MatchCount} stop matches contradicted by scheduled travel time",
+            rejected.Count)
+    stopsWithMatches
+    |> Array.map (fun (stop, match_) ->
+        stop, if rejected.Contains(stop.id) then None else match_)
+
+let estimateMissingStopLocations (jdfBatch: JdfBatch) =
+    let positioned = jdfBatch.stopLocations |> Array.map (fun value -> value.stopId) |> Set
+    let pointsByStop =
+        jdfBatch.stopLocations
+        |> Array.map (fun location ->
+            location.stopId,
+            (wgs84Factory.CreatePoint(
+                Coordinate(float location.lon, float location.lat))
+             |> pointWgs84ToEtrs89Ex))
+        |> Map
+    let estimates = Dictionary<int64, ResizeArray<Point * string>>()
+    let addEstimate stopId point source =
+        let found, values = estimates.TryGetValue(stopId)
+        let values =
+            if found then values
+            else
+                let value = ResizeArray<Point * string>()
+                estimates.[stopId] <- value
+                value
+        values.Add(point, source)
+    let previousIndex predicate index =
+        seq { index - 1 .. -1 .. 0 } |> Seq.tryFind predicate
+    let nextIndex length predicate index =
+        seq { index + 1 .. length - 1 } |> Seq.tryFind predicate
+
+    orderedTimedTrips jdfBatch.tripStops
+    |> Array.iter (fun calls ->
+        let knownPoint index =
+            let call, _ = calls.[index]
+            pointsByStop |> Map.tryFind call.stopId
+        let knownTimedPoint index =
+            let _, time = calls.[index]
+            match knownPoint index, time with
+            | Some point, Some value -> Some (point, value)
+            | _ -> None
+        for index = 0 to calls.Length - 1 do
+            let call, callTime = calls.[index]
+            if not (positioned.Contains call.stopId) && callTime.IsSome then
+                // Untimed calls are passing/not-passing route points, not
+                // usable anchors. Continue to the nearest called, timed stop.
+                let previousKnown = previousIndex (knownTimedPoint >> Option.isSome) index
+                let nextKnown = nextIndex calls.Length (knownTimedPoint >> Option.isSome) index
+                match previousKnown, nextKnown with
+                | Some leftIndex, Some rightIndex ->
+                    let leftPoint, left = knownTimedPoint leftIndex |> Option.get
+                    let rightPoint, right = knownTimedPoint rightIndex |> Option.get
+                    match callTime with
+                    | Some current when right > left ->
+                        let ratio = Math.Clamp((current - left) / (right - left), 0.0, 1.0)
+                        let point = etrs89ExFactory.CreatePoint(
+                            Coordinate(
+                                leftPoint.X + (rightPoint.X - leftPoint.X) * ratio,
+                                leftPoint.Y + (rightPoint.Y - leftPoint.Y) * ratio))
+                        addEstimate call.stopId point "estimated:route-time"
+                    | _ -> ()
+                | None, Some anchorIndex ->
+                    let anchor, _ = knownTimedPoint anchorIndex |> Option.get
+                    let offset = 300.0 * float (anchorIndex - index)
+                    addEstimate call.stopId
+                        (etrs89ExFactory.CreatePoint(Coordinate(anchor.X, anchor.Y + offset)))
+                        "estimated:route-end-north"
+                | Some anchorIndex, None ->
+                    let anchor, _ = knownTimedPoint anchorIndex |> Option.get
+                    let offset = 300.0 * float (index - anchorIndex)
+                    addEstimate call.stopId
+                        (etrs89ExFactory.CreatePoint(Coordinate(anchor.X, anchor.Y + offset)))
+                        "estimated:route-end-north"
+                | None, None -> ())
+
+    let estimatedLocations =
+        estimates
+        |> Seq.map (fun pair ->
+            let selectedEstimates =
+                let timed =
+                    pair.Value
+                    |> Seq.filter (fun (_, source) -> source = "estimated:route-time")
+                    |> Seq.toArray
+                if timed.Length > 0 then timed else pair.Value |> Seq.toArray
+            let points = selectedEstimates |> Array.map fst
+            let source =
+                selectedEstimates
+                |> Array.map snd
+                |> Array.distinct
+                |> Array.sort
+                |> String.concat "+"
+            let point =
+                etrs89ExFactory.CreateGeometryCollection(
+                    points |> Array.map (fun value -> value :> Geometry))
+                    .Centroid
+                |> transformPoint etrs89ExSrid wgs84Srid (wgs84ToEtrs89Ex.Inverse())
+            {
+                stopId = pair.Key
+                lat = decimal point.Y
+                lon = decimal point.X
+                precision = Estimated
+            }, Some source)
+        |> Seq.toArray
+    if estimatedLocations.Length > 0 then
         Log.Information(
-            "Post-merge coordinate reconciliation added {LocationCount} locations ({StopPreciseCount} stop precise, {TownPreciseCount} town precise)",
-            matchedLocations.Length, stopPrecise, matchedLocations.Length - stopPrecise)
-    addMatchedLocations jdfBatch matchedLocations
+            "Estimated {LocationCount} missing stop locations from route timing",
+            estimatedLocations.Length)
+    addMatchedLocations jdfBatch estimatedLocations
 
 /// WARN: Expects tripsStops to be for one trip only and sorted by call order
 let checkMatchDistances
@@ -942,12 +1101,9 @@ let checkMatchDistances
     // I guess nobody checks them...
     let multTolerance = 2.0
     let preciseTolerance = 4m
-    let impreciseTolerance = 20m
-
     let mutable lastPos = None
     let mutable lastPosStopId = None
     let mutable lastPosKm = None
-    let mutable lastPrecision = None
     Utils.innerJoinOn (fun (ts: TripStop) -> ts.stopId)
                       (fun (s: Stop, m) -> s.id)
                       tripStops stopsWithMatches
@@ -958,12 +1114,7 @@ let checkMatchDistances
             | Some (lp: Point), Some lpsi, Some lkm, Some m, Some km ->
                 let dist = lp.Distance(m.data.point) / 1000.0
                 let kmDiff = abs (km - lkm)
-                let tolerance =
-                    if lastPrecision = Some StopPrecise
-                       && m.data.precision = StopPrecise
-                    then preciseTolerance
-                    else impreciseTolerance
-                if dist > float (kmDiff + tolerance) * multTolerance
+                if dist > float (kmDiff + preciseTolerance) * multTolerance
                 then Some <| Utils.logEvent
                       LogEventLevel.Warning
                       ("Distance between matches is too high"
@@ -979,7 +1130,6 @@ let checkMatchDistances
             lastPos <- Some m.data.point
             lastPosStopId <- Some stop.id
             lastPosKm <- Some km
-            lastPrecision <- Some m.data.precision
         | _ -> ()
 
         warning

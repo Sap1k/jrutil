@@ -123,7 +123,7 @@ type JdfBundleTests() =
                 |> Array.map (fun (fileName, schema) -> fileName, assertSchema first fileName schema)
                 |> Map
             parquet |> Map.iter (fun _ value ->
-                assertEqual "2" (string value.CustomMetadata.["obehy.schema_version"])
+                assertEqual "3" (string value.CustomMetadata.["obehy.schema_version"])
                 assertEqual "national-jdf" (string value.CustomMetadata.["obehy.source_id"])
                 assertEqual ($"sha256:{sha}") (string value.CustomMetadata.["obehy.snapshot_id"]))
 

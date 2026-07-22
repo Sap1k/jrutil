@@ -350,7 +350,7 @@ type ReservationOptions = {
 
 type GeodataPrecision =
     | [<StrValue("S")>] StopPrecise
-    | [<StrValue("T")>] TownPrecise
+    | [<StrValue("E")>] Estimated
 
 // JrUtil extension
 type StopLocation = {
