@@ -235,6 +235,30 @@ let rec findJdfBatches (path: string) =
         |> Seq.toList
     else []
 
+/// Discovers batch paths without opening ZIP archives. Callers that process
+/// many batches in parallel can then open each archive inside its bounded
+/// worker instead of retaining one file handle per discovered batch.
+let rec findJdfBatchPaths (path: string) =
+    if Path.GetFileName(path).Equals("VerzeJDF.txt", System.StringComparison.OrdinalIgnoreCase) then
+        [Path.GetDirectoryName(path)]
+    elif Path.GetExtension(path).Equals(".zip", System.StringComparison.OrdinalIgnoreCase) then
+        [path]
+    elif Directory.Exists(path) then
+        Seq.concat [
+            Directory.EnumerateFiles(path)
+            Directory.EnumerateDirectories(path)
+        ]
+        |> Seq.collect findJdfBatchPaths
+        |> Seq.toList
+    else []
+
+let parseJdfBatchPath parser (path: string) =
+    if Path.GetExtension(path).Equals(".zip", System.StringComparison.OrdinalIgnoreCase) then
+        use archive = ZipFile.OpenRead(path)
+        parser (ZipArchive archive)
+    else
+        parser (FsPath path)
+
 let jdfStopNameString (stop: Stop) =
     sprintf "%s,%s,%s"
             stop.town
@@ -249,7 +273,9 @@ let fileWriter name =
             use stream = File.Open(Path.Combine(path, name), FileMode.Create)
             serializer stream records
         | ZipArchive arch ->
-            use stream = arch.CreateEntry(name).Open()
+            let entry = arch.CreateEntry(name, CompressionLevel.NoCompression)
+            entry.LastWriteTime <- System.DateTimeOffset(1980, 1, 1, 0, 0, 0, System.TimeSpan.Zero)
+            use stream = entry.Open()
             serializer stream records
 
 let jdfBatchDirWriter () =

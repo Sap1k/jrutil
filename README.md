@@ -90,6 +90,28 @@ relative-path order and remove exact duplicate rows before constructing the
 stop matcher. Pass `--strict` to `merge-jdf` when a malformed input batch must
 fail the command instead of being logged and skipped.
 
+## Parallelism and memory budgets
+
+The multitool accepts `--jobs=<count|auto>` and
+`--memory-budget=<KiB|MiB|GiB|auto>`. Automatic mode leaves operating
+system headroom and derives a separate bounded worker count for each stage.
+`fix-jdf` processes independent batches concurrently, while `merge-jdf`
+parses batches concurrently and commits their results in stable input order.
+Use `--jobs=1` for a serial run or an explicit memory budget for repeatable
+capacity tests.
+
+`fix-jdf --batch-output=zip` writes one deterministic uncompressed ZIP per
+fixed input batch; the default remains the traditional directory layout.
+`--progress-events` adds `JRUTIL_PROGRESS` JSON lines for resolved worker
+plans, phase changes, and batch start/completion/failure events. Human logs
+remain available alongside the machine-readable stream.
+
+National bundle conversion uses pooled source values and streams GTFS stop
+times and row-grouped Parquet call metadata directly from compact source trip
+descriptors. It never retains a second national-sized stop-time or call table;
+the memory budget only bounds parallel batch work. Serialized output remains
+deterministic and byte-identical across memory budgets.
+
 ## Oběhy JDF conversion bundles
 
 `jdf-to-bundle` accepts either an extracted JDF directory or a ZIP and writes

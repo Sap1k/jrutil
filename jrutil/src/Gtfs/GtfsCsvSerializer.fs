@@ -11,6 +11,7 @@ open NodaTime
 
 open JrUtil.ReflectionUtils
 open JrUtil.UnionCodec
+open JrUtil.GtfsModel
 open JrUtil.GtfsModelMeta
 
 let rec getFormatter fieldType =
@@ -81,3 +82,63 @@ let getRowsSerializerWriter<'r> =
         for record in records do
             writer.Write(serializer record)
             writer.Write("\n")
+
+/// Stop times dominate national exports. Keep their exact generic-serializer
+/// wire format while avoiding reflection, projection records and the small
+/// arrays allocated for every field of every row.
+let writeStandardStopTimes (stream: Stream) (records: StopTime seq) =
+    use writer = new StreamWriter(stream)
+    writer.Write(getHeader typeof<StandardStopTime> |> String.concat ",")
+    writer.Write("\n")
+
+    let writeQuoted (value: string) =
+        writer.Write('"')
+        if not (isNull value) then
+            let mutable start = 0
+            let mutable quote = value.IndexOf('"')
+            while quote >= 0 do
+                writer.Write(value.AsSpan(start, quote - start))
+                writer.Write("\"\"")
+                start <- quote + 1
+                quote <- value.IndexOf('"', start)
+            writer.Write(value.AsSpan(start))
+        writer.Write('"')
+
+    let writeSeparator () = writer.Write(',')
+    let periodString (value: Period) =
+        let period = value.Normalize()
+        sprintf "%02d:%02d:%02d"
+            (period.Hours + int64 period.Days * 24L) period.Minutes period.Seconds
+    let serviceString = function
+        | RegularlyScheduled -> "0"
+        | NoService -> "1"
+        | PhoneBefore -> "2"
+        | CoordinationWithDriver -> "3"
+    let timepointString = function
+        | Approximate -> "0"
+        | Exact -> "1"
+
+    for record in records do
+        writeQuoted record.tripId
+        writeSeparator ()
+        writeQuoted (record.arrivalTime |> Option.map periodString |> Option.defaultValue "")
+        writeSeparator ()
+        writeQuoted (record.departureTime |> Option.map periodString |> Option.defaultValue "")
+        writeSeparator ()
+        writeQuoted record.stopId
+        writeSeparator ()
+        writeQuoted (record.stopSequence.ToString(CultureInfo.InvariantCulture))
+        writeSeparator ()
+        writeQuoted (record.headsign |> Option.defaultValue "")
+        writeSeparator ()
+        writeQuoted (record.pickupType |> Option.map serviceString |> Option.defaultValue "")
+        writeSeparator ()
+        writeQuoted (record.dropoffType |> Option.map serviceString |> Option.defaultValue "")
+        writeSeparator ()
+        writeQuoted (
+            record.shapeDistTraveled
+            |> Option.map (fun value -> value.ToString(CultureInfo.InvariantCulture))
+            |> Option.defaultValue "")
+        writeSeparator ()
+        writeQuoted (record.timepoint |> Option.map timepointString |> Option.defaultValue "")
+        writer.Write("\n")

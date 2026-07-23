@@ -3,6 +3,7 @@
 namespace JrUtil.Tests
 
 open System.IO
+open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open NodaTime
 
@@ -52,6 +53,25 @@ type JdfFixupsTests() =
                             yield leftCode, leftPolygon, rightCode, rightPolygon
             }
             |> Seq.head)
+
+    [<TestMethod>]
+    member _.``Reverse coordinate transform is safe under parallel fix workers``() =
+        let source =
+            wgs84Factory.CreatePoint(
+                NetTopologySuite.Geometries.Coordinate(14.4378, 50.0755))
+        let projected = pointWgs84ToEtrs89Ex source
+        let conversions =
+            [| 1..32 |]
+            |> Array.map (fun _ ->
+                Task.Run(fun () ->
+                    [| 1..128 |]
+                    |> Array.map (fun _ -> pointEtrs89ExToWgs84 projected)))
+            |> Task.WhenAll
+            |> fun task -> task.GetAwaiter().GetResult()
+            |> Array.collect id
+        for converted in conversions do
+            Assert.AreEqual(source.X, converted.X, 1e-6)
+            Assert.AreEqual(source.Y, converted.Y, 1e-6)
 
     [<TestMethod>]
     member _.``Historical OL code matches canonical OC strictly``() =

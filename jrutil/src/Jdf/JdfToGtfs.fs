@@ -4,6 +4,7 @@
 module JrUtil.JdfToGtfs
 
 open System
+open System.Collections.Generic
 open System.IO
 open System.Text.RegularExpressions
 open FSharp.Data
@@ -851,17 +852,13 @@ let logInternationalRouteDecisions (policy: InternationalRoutePolicy)
             internationalRoutePolicyName policy, retained, dropped)
 
 let getGtfsTrips (jdfBatch: JdfModel.JdfBatch) =
-    let lastStopPerTrip =
-        jdfBatch.tripStops
-        |> Seq.groupBy (fun ts -> ts.routeId, ts.routeDistinction, ts.tripId)
-        |> Seq.map (fun (k, tss) ->
-            let lastTs =
-                tss
-                |> Seq.maxBy (fun ts ->
-                    ts.routeStopId
-                    * (if Jdf.tripIsReverse ts.tripId then -1L else 1))
-            k, lastTs.stopId)
-        |> Map
+    let lastStopPerTrip = Dictionary<struct (string * int * int64), struct (int64 * int64)>()
+    for call in jdfBatch.tripStops do
+        let key = struct (call.routeId, call.routeDistinction, call.tripId)
+        let order = call.routeStopId * (if Jdf.tripIsReverse call.tripId then -1L else 1L)
+        match lastStopPerTrip.TryGetValue(key) with
+        | true, struct (oldOrder, _) when oldOrder >= order -> ()
+        | _ -> lastStopPerTrip.[key] <- struct (order, call.stopId)
     let stopById = jdfBatch.stops |> Seq.map (fun s -> s.id, s) |> Map
     jdfBatch.trips
     |> Seq.map (fun jdfTrip ->
@@ -875,8 +872,9 @@ let getGtfsTrips (jdfBatch: JdfModel.JdfBatch) =
             serviceId = id
             id = id
             headsign =
-                stopById.[lastStopPerTrip.[
-                    jdfTrip.routeId, jdfTrip.routeDistinction, jdfTrip.id]]
+                let struct (_, stopId) =
+                    lastStopPerTrip.[struct (jdfTrip.routeId, jdfTrip.routeDistinction, jdfTrip.id)]
+                stopById.[stopId]
                 |> getStopName
                 |> Some
             // This is kind of arbitrary
@@ -894,48 +892,129 @@ let getGtfsTrips (jdfBatch: JdfModel.JdfBatch) =
                       else GtfsModel.NoBicycles)
         }: GtfsModel.Trip))
 
-let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
-    let timeToPeriod (time: LocalTime) =
-        let secs = time.Hour * 3600 + time.Minute * 60 + time.Second
-        Period.FromSeconds(int64 secs)
+[<Flags>]
+type private StopTimeAttributeFlags =
+    | NoStopTimeFlags = 0
+    | RequestStopFlag = 1
+    | ConditionalServiceFlag = 2
+    | CommissionServiceFlag = 4
+    | ExitOnlyFlag = 8
+    | BoardingOnlyFlag = 16
 
-    let routeStopsByRoute =
-        jdfBatch.routeStops
-        |> Array.groupBy (fun rs -> rs.routeId, rs.routeDistinction)
-        |> Map
+let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
+                                     (jdfBatch: JdfModel.JdfBatch) =
+    let periods = Dictionary<int64, Period>()
+    let periodOptions = Dictionary<int64, Period option>()
+    let periodForSeconds seconds =
+        match periods.TryGetValue(seconds) with
+        | true, value -> value
+        | _ ->
+            let value = Period.FromSeconds(seconds)
+            periods.[seconds] <- value
+            value
 
-    let stopById =
-        jdfBatch.stops
-        |> Array.map (fun s -> s.id, s)
-        |> Map
+    let periodOptionForSeconds seconds =
+        match periodOptions.TryGetValue(seconds) with
+        | true, value -> value
+        | _ ->
+            let value = Some (periodForSeconds seconds)
+            periodOptions.[seconds] <- value
+            value
 
-    jdfBatch.tripStops
+    // F# options are reference objects. Reusing these values avoids retaining
+    // several fresh option wrappers for every stop-time row in national feeds.
+    let noService = Some GtfsModel.NoService
+    let regularService = Some GtfsModel.RegularlyScheduled
+    let coordinationWithDriver = Some GtfsModel.CoordinationWithDriver
+    let phoneBefore = Some GtfsModel.PhoneBefore
+    let exactTimepoint = Some GtfsModel.Exact
+
+    let unspecifiedStopIds = Dictionary<int64, string>()
+    let stopPostIds = Dictionary<struct (int64 * int64), string>()
+    let stopPostNumberIds = Dictionary<struct (int64 * string), string>()
+    let convertedStopId (call: JdfModel.TripStop) =
+        match call.stopPostId, call.stopPostNum |> Option.bind nonEmptyTrimmed with
+        | Some stopPostId, _ ->
+            let key = struct (call.stopId, stopPostId)
+            match stopPostIds.TryGetValue(key) with
+            | true, value -> value
+            | _ ->
+                let value = jdfStopPostId stopIdCis call.stopId stopPostId
+                stopPostIds.[key] <- value
+                value
+        | None, Some stopPostNumber ->
+            let key = struct (call.stopId, stopPostNumber)
+            match stopPostNumberIds.TryGetValue(key) with
+            | true, value -> value
+            | _ ->
+                let value = jdfStopPostNumId stopIdCis call.stopId stopPostNumber
+                stopPostNumberIds.[key] <- value
+                value
+        | None, None ->
+            match unspecifiedStopIds.TryGetValue(call.stopId) with
+            | true, value -> value
+            | _ ->
+                let value = jdfUnspecifiedStopId stopIdCis call.stopId
+                unspecifiedStopIds.[call.stopId] <- value
+                value
+
+    let attributeFlagsById = Dictionary<int, StopTimeAttributeFlags>()
+    for attribute in jdfBatch.attributeRefs do
+        let flag =
+            match attribute.value with
+            | JdfModel.RequestStop -> StopTimeAttributeFlags.RequestStopFlag
+            | JdfModel.ConditionalService -> StopTimeAttributeFlags.ConditionalServiceFlag
+            | JdfModel.CommisionServiceOnly -> StopTimeAttributeFlags.CommissionServiceFlag
+            | JdfModel.ExitOnly -> StopTimeAttributeFlags.ExitOnlyFlag
+            | JdfModel.BoardingOnly -> StopTimeAttributeFlags.BoardingOnlyFlag
+            | _ -> StopTimeAttributeFlags.NoStopTimeFlags
+        if flag <> StopTimeAttributeFlags.NoStopTimeFlags then
+            attributeFlagsById.[attribute.attributeId] <- flag
+
+    let flagsForAttributes (attributes: int option array) =
+        let mutable flags = StopTimeAttributeFlags.NoStopTimeFlags
+        for attributeId in attributes do
+            match attributeId with
+            | Some id ->
+                match attributeFlagsById.TryGetValue(id) with
+                | true, value -> flags <- flags ||| value
+                | _ -> ()
+            | None -> ()
+        flags
+
+    let stopFlagsById = Dictionary<int64, StopTimeAttributeFlags>()
+    for stop in jdfBatch.stops do
+        stopFlagsById.[stop.id] <- flagsForAttributes stop.attributes
+
+    let tripKey (call: JdfModel.TripStop) =
+        call.routeId, call.routeDistinction, call.tripId
+    let tripStopGroups =
+        if adjacentTripGroups then
+            jdfBatch.tripStops |> Utils.groupAdjacentBy tripKey
+        else
+            jdfBatch.tripStops
+            |> Seq.groupBy tripKey
+            |> Seq.map (fun (key, calls) -> key, calls |> Seq.toArray)
+
+    tripStopGroups
     // We have to deal with stop times for each trip separately,
     // because we have to count 23:59 -> 00:00 crossings
     // to even attempt to comply with GTFS and distinquish days
     // Not even this is enough, though. Imagine a trip that sets out
     // at 8:00 and, without any intermediate stops, arrives at 9:00
     // the next day.
-    |> Seq.groupBy
-        (fun ts -> (ts.routeId, ts.routeDistinction, ts.tripId))
-    |> Seq.collect (fun (_, jdfTripStops) ->
-        let jdfTripStops = Seq.toArray jdfTripStops
+    |> Seq.collect (fun ((routeId, routeDistinction, tripId), jdfTripStops) ->
         assert (jdfTripStops.Length >= 2)
         let isReverseTrip = jdfTripStops.[0].tripId % 2L = 0L
+        let gtfsTripId = jdfTripId routeId routeDistinction tripId
 
-        let mutable lastTimeDT = None
-        let mutable dayPeriod = Period.FromSeconds(0L)
+        let mutable lastTimeDT: LocalTime option = None
+        let mutable dayOffsetSeconds = 0L
 
         jdfTripStops
         |> Seq.sortBy (fun ts ->
             ts.routeStopId * (if isReverseTrip then -1L else 1L))
         |> Seq.mapi (fun i jdfTripStop ->
-            let jdfRouteStop =
-                routeStopsByRoute.[
-                    (jdfTripStop.routeId, jdfTripStop.routeDistinction)]
-                |> Array.find (fun rs ->
-                    rs.routeStopId = jdfTripStop.routeStopId)
-
             match jdfTripStop.departureTime with
             | Some JdfModel.Passing | Some JdfModel.NotPassing -> None
             // The JDF specification allows stops that aren't served to have a
@@ -952,16 +1031,19 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
                     )
 
                 let adjustTime dtOpt =
-                    dtOpt |> Option.map (fun dt ->
+                    match dtOpt with
+                    | None -> None
+                    | Some dt ->
                         match lastTimeDT with
                         | Some lt ->
                             if lt > dt
-                            then dayPeriod <- dayPeriod + Period.FromDays(1)
+                            then dayOffsetSeconds <- dayOffsetSeconds + 86400L
                         | None -> ()
                         lastTimeDT <- Some dt
-                        let ts = timeToPeriod dt
-                        ts + dayPeriod
-                    )
+                        let seconds =
+                            int64 (dt.Hour * 3600 + dt.Minute * 60 + dt.Second)
+                            + dayOffsetSeconds
+                        periodOptionForSeconds seconds
 
                 let arrTime =
                     tripStopTimeExtract jdfTripStop.arrivalTime
@@ -970,66 +1052,57 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
                     tripStopTimeExtract jdfTripStop.departureTime
                     |> adjustTime
 
-                let jdfStop = stopById |> Map.find jdfTripStop.stopId
-                let stopAttrs =
-                    Jdf.parseAttributes jdfBatch jdfStop.attributes
-                let attrs =
-                    Jdf.parseAttributes jdfBatch jdfTripStop.attributes
-                let combinedAttrs = Set.union stopAttrs attrs
-                let hasAttr attr = combinedAttrs |> Set.contains attr
+                let combinedFlags =
+                    stopFlagsById.[jdfTripStop.stopId]
+                    ||| flagsForAttributes jdfTripStop.attributes
+                let hasFlag flag = (combinedFlags &&& flag) <> StopTimeAttributeFlags.NoStopTimeFlags
 
                 let service =
-                    if hasAttr JdfModel.RequestStop then
-                        GtfsModel.CoordinationWithDriver
-                    else if hasAttr JdfModel.ConditionalService then
+                    if hasFlag StopTimeAttributeFlags.RequestStopFlag then
+                        coordinationWithDriver
+                    else if hasFlag StopTimeAttributeFlags.ConditionalServiceFlag then
                     // "ConditionalService" is a very broad attribute
                     // which basically says "look at the description to
                     // find out". GTFS doesn't have such an option,
                     // and PhoneBefore implies some human interaction.
                     // so that's my choice.
-                        GtfsModel.PhoneBefore
-                    else if hasAttr JdfModel.CommisionServiceOnly then
-                        GtfsModel.PhoneBefore
+                        phoneBefore
+                    else if hasFlag StopTimeAttributeFlags.CommissionServiceFlag then
+                        phoneBefore
                     else
-                        GtfsModel.RegularlyScheduled
+                        regularService
 
                 let stopTime: GtfsModel.StopTime = {
-                    tripId = jdfTripId jdfTripStop.routeId
-                                       jdfTripStop.routeDistinction
-                                       jdfTripStop.tripId
+                    tripId = gtfsTripId
                     arrivalTime = arrTime |> Option.orElse depTime
                     departureTime = depTime |> Option.orElse arrTime
-                    stopId =
-                        match jdfTripStop.stopPostId,
-                              jdfTripStop.stopPostNum |> Option.bind nonEmptyTrimmed with
-                        | Some sp, _ ->
-                            jdfStopPostId stopIdCis jdfTripStop.stopId sp
-                        | None, Some stopPostNum ->
-                            jdfStopPostNumId stopIdCis
-                                                 jdfTripStop.stopId
-                                                 stopPostNum
-                        | None, None ->
-                            jdfUnspecifiedStopId stopIdCis jdfTripStop.stopId
+                    stopId = convertedStopId jdfTripStop
                     stopSequence = i
                     headsign = None
                     pickupType =
-                        Some (if hasAttr JdfModel.ExitOnly
-                              then GtfsModel.NoService
-                              else service)
+                        if hasFlag StopTimeAttributeFlags.ExitOnlyFlag
+                        then noService
+                        else service
                     dropoffType =
-                        Some (if hasAttr JdfModel.BoardingOnly
-                              then GtfsModel.NoService
-                              else service)
+                        if hasFlag StopTimeAttributeFlags.BoardingOnlyFlag
+                        then noService
+                        else service
                     shapeDistTraveled = jdfTripStop.kilometer
                     // This will be dynamic when support for JDF's
                     // min/max times comes.
-                    timepoint = Some GtfsModel.Exact
+                    timepoint = exactTimepoint
                     stopZoneIds = None
                 }
                 Some stopTime
         )
         |> Seq.choose id
     )
+
+// Standalone conversion preserves support for unusual JDF files whose trip
+// calls are not contiguous. The merged national bundle has canonical adjacent
+// trip groups and uses the bounded implementation directly.
+let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
+    getGtfsStopTimesInternal false stopIdCis jdfBatch
 
 let getCzRoutes (publicLineNumbers: Map<string * int, string option>)
                 (jdfBatch: JdfModel.JdfBatch) =
@@ -1156,20 +1229,9 @@ let warnUnhandledServiceNotes (jdfBatch: JdfModel.JdfBatch) () =
     |> Seq.iter (fun sn ->
         Log.Warning("Unhandled JDF ServiceNote {Designation} {Note}", sn.designation, sn.note))
 
-// Some JDF feeds have only local IDs for stops, some have global IDs for the
-// whole CIS. Set stopIdsCis accordingly.
-let private getGtfsFeedInternal warnUnhandledNotes stopIdsCis
-                                (jdfBatch: JdfModel.JdfBatch) =
-    if warnUnhandledNotes then warnUnhandledServiceNotes jdfBatch ()
-
-    let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar jdfBatch
-    let publicLineNumbers = getPublicLineNumbers jdfBatch
-    let stopTimes =
-        getGtfsStopTimes stopIdsCis jdfBatch
-        |> Seq.filter (fun ts ->
-            tripsToDelete |> Set.contains ts.tripId |> not)
-        |> Seq.toArray
-    let referencedStopIds = stopTimes |> Seq.map (fun stopTime -> stopTime.stopId) |> Set
+let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
+                             tripsToDelete calendar calendarExceptions publicLineNumbers
+                             (referencedStopIds: Set<string>) stopTimes =
     let allStops = getGtfsStops stopIdsCis jdfBatch
     let requiredParentIds =
         allStops
@@ -1203,10 +1265,58 @@ let private getGtfsFeedInternal warnUnhandledNotes stopIdsCis
     }
     feed
 
+// Some JDF feeds have only local IDs for stops, some have global IDs for the
+// whole CIS. Set stopIdsCis accordingly.
+let private getGtfsFeedInternal warnUnhandledNotes adjacentTripGroups stopIdsCis
+                                (jdfBatch: JdfModel.JdfBatch) =
+    if warnUnhandledNotes then warnUnhandledServiceNotes jdfBatch ()
+
+    let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar jdfBatch
+    let publicLineNumbers = getPublicLineNumbers jdfBatch
+    let stopTimes =
+        getGtfsStopTimesInternal adjacentTripGroups stopIdsCis jdfBatch
+        |> Seq.filter (fun ts ->
+            tripsToDelete |> Set.contains ts.tripId |> not)
+        |> Seq.toArray
+    let referencedStopIds = stopTimes |> Seq.map (fun stopTime -> stopTime.stopId) |> Set
+    assembleGtfsFeed stopIdsCis jdfBatch tripsToDelete calendar calendarExceptions
+                     publicLineNumbers referencedStopIds stopTimes
+
+type internal BundleFeedPreparation = {
+    stopIdsCis: bool
+    batch: JdfModel.JdfBatch
+    tripsToDelete: Set<string>
+    calendar: GtfsModel.CalendarEntry array
+    calendarExceptions: GtfsModel.CalendarException array
+    publicLineNumbers: Map<string * int, string option>
+}
+
+let internal prepareGtfsFeedForStreamingBundle stopIdsCis (batch: JdfModel.JdfBatch) =
+    let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar batch
+    {
+        stopIdsCis = stopIdsCis
+        batch = batch
+        tripsToDelete = tripsToDelete
+        calendar = calendar
+        calendarExceptions = calendarExceptions
+        publicLineNumbers = getPublicLineNumbers batch
+    }
+
+let internal getStreamingBundleStopTimes preparation =
+    getGtfsStopTimesInternal true preparation.stopIdsCis preparation.batch
+    |> Seq.filter (fun stopTime ->
+        not (preparation.tripsToDelete.Contains stopTime.tripId))
+
+let internal finishStreamingBundleFeed preparation (referencedStopIds: Set<string>) =
+    assembleGtfsFeed
+        preparation.stopIdsCis preparation.batch preparation.tripsToDelete
+        preparation.calendar preparation.calendarExceptions preparation.publicLineNumbers
+        referencedStopIds [||]
+
 let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
-    getGtfsFeedInternal true stopIdsCis jdfBatch
+    getGtfsFeedInternal true false stopIdsCis jdfBatch
 
 // Bundle sidecars retain otherwise-unhandled textual service notes, so the
 // standalone conversion warning would be misleading while building a bundle.
 let getGtfsFeedForBundle stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
-    getGtfsFeedInternal false stopIdsCis jdfBatch
+    getGtfsFeedInternal false true stopIdsCis jdfBatch

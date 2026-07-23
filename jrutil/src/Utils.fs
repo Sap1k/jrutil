@@ -12,8 +12,10 @@ open System.Collections.Concurrent
 open System.Runtime.InteropServices
 open System.Runtime.Serialization.Formatters.Binary
 open System.Collections.Generic
+open System.Threading.Tasks
 open DocoptNet
 open Serilog
+open Serilog.Core
 open Serilog.Events
 open Serilog.Sinks.SystemConsole.Themes
 open Serilog.Formatting.Compact
@@ -87,13 +89,16 @@ let memoize f =
             result
 
 let memoizeVoidFunc f =
+    let gate = obj()
     let mutable cache = None
     fun () ->
-        cache
-        |> Option.defaultWith (fun () ->
-            let result = f()
-            cache <- Some result
-            result)
+        lock gate (fun () ->
+            match cache with
+            | Some value -> value
+            | None ->
+                let value = f()
+                cache <- Some value
+                value)
 
 let mutable persistentCachePath: string option = None
 
@@ -117,6 +122,56 @@ let chainCompare next prev =
 let fileLinesSeq filename = seq {
     use file = File.OpenText filename
     while not file.EndOfStream do yield file.ReadLine()
+}
+
+/// Groups a sequence whose equal keys are already contiguous. Unlike Seq.groupBy,
+/// this keeps only one group in memory, which is important for national call data.
+let groupAdjacentBy keySelector (inputs: 'a seq) = seq {
+    use enumerator = inputs.GetEnumerator()
+    if enumerator.MoveNext() then
+        let mutable currentKey = keySelector enumerator.Current
+        let mutable current = ResizeArray<'a>()
+        current.Add(enumerator.Current)
+        while enumerator.MoveNext() do
+            let key = keySelector enumerator.Current
+            if key = currentKey then
+                current.Add(enumerator.Current)
+            else
+                yield currentKey, current.ToArray()
+                currentKey <- key
+                current <- ResizeArray<'a>()
+                current.Add(enumerator.Current)
+        yield currentKey, current.ToArray()
+}
+
+/// Maintains a rolling bounded task window and yields results in input order.
+/// A slow input can delay later results, but never allows more than the
+/// requested number of parsed results to be retained.
+let mapParallelOrderedBatches<'a, 'b> degreeOfParallelism (func: 'a -> 'b) (inputs: 'a seq) = seq {
+    if degreeOfParallelism <= 0 then
+        invalidArg "degreeOfParallelism" "Parallelism must be positive"
+    if degreeOfParallelism = 1 then
+        for input in inputs do yield func input
+    else
+        use enumerator = inputs.GetEnumerator()
+        let tasks = Queue<Task<'b>>()
+        let enqueueNext () =
+            if enumerator.MoveNext() then
+                let input = enumerator.Current
+                tasks.Enqueue(Task.Run<'b>(fun () -> func input))
+                true
+            else false
+        while tasks.Count < degreeOfParallelism && enqueueNext () do ()
+        while tasks.Count > 0 do
+            let mutable task = tasks.Dequeue()
+            let mutable result = task.GetAwaiter().GetResult()
+            yield result
+            // Sequence state survives across the yield. Clear the completed task
+            // and its potentially large parsed result before replenishing the
+            // window so the bound applies to retained results as well as workers.
+            result <- Unchecked.defaultof<'b>
+            task <- null
+            enqueueNext () |> ignore
 }
 
 /// A custom parallel map that lets the user specify the number of processing
@@ -298,20 +353,46 @@ let findPathCaseInsensitive dirPath (filename: string) =
         failwithf "Multiple files found when looking for %s in %s (case insensitive)"
                   filename dirPath
 
+type private SynchronizedConsoleSink(inner: Serilog.ILogger) =
+    let syncRoot = obj()
+
+    interface ILogEventSink with
+        member _.Emit(logEvent) =
+            lock syncRoot (fun () ->
+                match logEvent.Properties.TryGetValue("JrUtilProgressEvent") with
+                | true, (:? ScalarValue as value) ->
+                    match value.Value with
+                    | :? string as line ->
+                        Console.Error.WriteLine(line)
+                        Console.Error.Flush()
+                    | _ -> inner.Write(logEvent)
+                | _ -> inner.Write(logEvent))
+
+    interface IDisposable with
+        member _.Dispose() =
+            match box inner with
+            | :? IDisposable as disposable -> disposable.Dispose()
+            | _ -> ()
+
 let setupLogging (logFile: string option) () =
     let mutable loggerFactory =
         LoggerConfiguration()
          .MinimumLevel.Debug()
          .Enrich.FromLogContext()
     if Environment.GetEnvironmentVariable("JRUTIL_LOG_TO_CONSOLE") <> "0" then
+        let consoleLogger =
+            LoggerConfiguration()
+             .MinimumLevel.Verbose()
+             .WriteTo.Console(
+                 standardErrorFromLevel = LogEventLevel.Verbose,
+                 applyThemeToRedirectedOutput = true,
+                 theme =
+                     if RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                         then SystemConsoleTheme.Literate :> ConsoleTheme
+                     else AnsiConsoleTheme.Literate :> ConsoleTheme)
+             .CreateLogger()
         loggerFactory <-
-            loggerFactory.WriteTo.Console(
-                standardErrorFromLevel = LogEventLevel.Verbose,
-                applyThemeToRedirectedOutput = true,
-                theme =
-                    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                        then SystemConsoleTheme.Literate :> ConsoleTheme
-                        else AnsiConsoleTheme.Literate :> ConsoleTheme)
+            loggerFactory.WriteTo.Sink(new SynchronizedConsoleSink(consoleLogger))
     logFile |> Option.iter (fun lf ->
         if lf.StartsWith("display:") then
             loggerFactory <- loggerFactory.WriteTo.File(lf.[8..])

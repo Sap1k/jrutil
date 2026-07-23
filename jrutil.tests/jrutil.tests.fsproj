@@ -9,6 +9,8 @@
 
   <ItemGroup>
     <Compile Include="Asserts.fs" />
+    <Compile Include="ExecutionTests.fs" />
+    <Compile Include="JdfParserTests.fs" />
     <Compile Include="BatchProcessingTests.fs" />
     <Compile Include="UndatedStopHistoryTests.fs" />
     <Compile Include="HolidayTests.fs" />

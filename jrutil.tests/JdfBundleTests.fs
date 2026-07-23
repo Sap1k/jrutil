@@ -54,7 +54,8 @@ type JdfBundleTests() =
             let first = Path.Combine(root, "first")
             let second = Path.Combine(root, "second")
             JdfBundle.writeBundle descriptorPath "test-commit" false fixturePath first
-            JdfBundle.writeBundle descriptorPath "test-commit" false fixturePath second
+            JdfBundle.writeBundleWithPolicyAndMemory true descriptorPath "test-commit" false
+                JdfToGtfs.KeepAll [||] fixturePath second
 
             let expectedFiles = [|
                 "source_route_metadata.parquet"; "source_stop_metadata.parquet"
@@ -70,6 +71,41 @@ type JdfBundleTests() =
                 let secondPath = Path.Combine(second, relative)
                 assertEqual true (File.Exists(firstPath))
                 CollectionAssert.AreEqual(File.ReadAllBytes(firstPath), File.ReadAllBytes(secondPath)))
+
+            let expectedHashes = Map [
+                "diagnostics.json", "7b36c983aa87e7df22e67eeeb98ff23a5ce526131d6fed3db5b1e7244e940190"
+                "extensions/cz_routes.txt", "c3ac8a6f4972d29e0d87b2bc3ba279602d8b4232d493ad674bc8e6fd13c408cb"
+                "extensions/cz_stop_zones.txt", "304d0c3ce890925d768f976d374e3e81590caf474255cd676089d9b8842ebd27"
+                "extensions/cz_stops.txt", "c02a53e8f9e9faef7dd7e1fd9ce8ad3f6d13cdc1829ececcb4805a7fbc33b7f2"
+                "extensions/cz_trips.txt", "c4466c146bc2cb03fe567cbc6d804cf8dbee92160ec079573b289d671f41d963"
+                "gtfs-intermediate/agency.txt", "26cceaa6f4ff55077dd5a4bb516c09f77686dfd41557ba1a98cd858543239b95"
+                "gtfs-intermediate/calendar_dates.txt", "aaa66bee57e81ca0cd63d4afe576f993aba0441428a79cf6fe5c58721e39421f"
+                "gtfs-intermediate/calendar.txt", "5a5f58ecf2157ade68d72eaa2b247515ffaf849cdb762a24b1df2ba9595b94c0"
+                "gtfs-intermediate/routes.txt", "a3b6ec8a99b071817d12032685c87de5f1b4f8f5e1f56637116b52d46b79581c"
+                "gtfs-intermediate/stop_times.txt", "a392c69c7d95c018fd7f2957a58245feff9ff75c95ba659ba810a07c6e8cbfeb"
+                "gtfs-intermediate/stops.txt", "922f56c4e4d801e0e3066f341032822d506b3b781032458e57b7ea127a8ff014"
+                "gtfs-intermediate/trips.txt", "dcf7b19da71d5700f3eeaaa9e2d7f1c5e86db7c8104f1713d46038a0eb5be16d"
+                "manifest.json", "a8259e12da777b5e8a73750be016c7f88eef28f265609673308dcd6f5e10a025"
+                "source_call_metadata.parquet", "d0371213210d39f967020dff5d62e719578d701f1a181ae0cf772735e9cbe278"
+                "source_notice_metadata.parquet", "6d0fdf465786ac87faab9b6e200541dde04915842d8b3a09e14dbb1b3918eff5"
+                "source_route_metadata.parquet", "c196fac4f8a4a2dbeb74db6ea423984b300018f0f2b65ceba72251e3c59db8fc"
+                "source_route_stop_zone_metadata.parquet", "482e8c310e995f1df813a4e9cc84412bbac6d2d21210852e82f8cf9d9a44cffd"
+                "source_stop_metadata.parquet", "3b2d09634dd92006d1ed736d6963c21e1eacd3af604bf72735146f6825e06243"
+                "source_transfer_metadata.parquet", "d02e1d71d127dbd48216c01b5c26c7ae45d8e2d26969ffbee0ce336e8974b26d"
+                "source_travel_restriction_metadata.parquet", "a2e1107359421b44d4f4f6d4d513dd65b559e86659804754e080826e4570fce6"
+            ]
+            let actualHashes =
+                Directory.GetFiles(first, "*", SearchOption.AllDirectories)
+                |> Seq.map (fun path ->
+                    let relative = Path.GetRelativePath(first, path).Replace('\\', '/')
+                    use stream = File.OpenRead(path)
+                    let hash =
+                        Security.Cryptography.SHA256.HashData(stream)
+                        |> Convert.ToHexString
+                        |> fun value -> value.ToLowerInvariant()
+                    relative, hash)
+                |> Map
+            assertEqual expectedHashes actualHashes
 
             let stopTimesHeader =
                 File.ReadLines(Path.Combine(first, "gtfs-intermediate", "stop_times.txt"))
@@ -248,6 +284,61 @@ type JdfBundleTests() =
                           |> Convert.ToHexString
                           |> fun value -> value.ToLowerInvariant()
                 assertEqual (entry.GetProperty("sha256").GetString()) sha)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Streamed call metadata retains ordinal trip ordering and GTFS sequences``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-bundle-call-order-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let source = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
+            let templateTrip =
+                source.trips
+                |> Array.find (fun trip -> trip.routeId = "586001" && trip.id = 1L)
+            let copiedCalls =
+                source.tripStops
+                |> Array.filter (fun call ->
+                    call.routeId = templateTrip.routeId
+                    && call.routeDistinction = templateTrip.routeDistinction
+                    && call.tripId = templateTrip.id)
+                |> Array.map (fun call -> { call with tripId = 11L })
+            let modified = {
+                source with
+                    trips = Array.append source.trips [| { templateTrip with id = 11L } |]
+                    tripStops = Array.append source.tripStops copiedCalls
+            }
+            let input = Path.Combine(root, "jdf")
+            Jdf.jdfBatchDirWriter () (Jdf.FsPath input) modified
+            let sha, bytes = JdfBundle.directoryTreeIdentity input
+            let descriptorPath = Path.Combine(root, "snapshot.json")
+            descriptor descriptorPath "directory-tree" sha bytes
+            let output = Path.Combine(root, "bundle")
+            JdfBundle.writeBundle descriptorPath "test-commit" false input output
+
+            let parquet = readParquet (Path.Combine(output, "source_call_metadata.parquet"))
+            let tripIds =
+                parquet.Data
+                |> Seq.map (fun row -> string row.["gtfs_trip_id"])
+                |> Seq.toArray
+            let sorted = Array.copy tripIds
+            Array.Sort(sorted, StringComparer.Ordinal)
+            assertEqual sorted tripIds
+            let copiedTripId = "jdf:trip:586001:1:11"
+            assertEqual true (tripIds |> Array.contains copiedTripId)
+
+            let gtfs = Gtfs.gtfsParseFolder () (Path.Combine(output, "gtfs-intermediate"))
+            let expectedSequences =
+                gtfs.stopTimes
+                |> Seq.filter (fun call -> call.tripId = copiedTripId)
+                |> Seq.map (fun call -> call.stopSequence)
+                |> Seq.toArray
+            let actualSequences =
+                parquet.Data
+                |> Seq.filter (fun row -> string row.["gtfs_trip_id"] = copiedTripId)
+                |> Seq.map (fun row -> Convert.ToInt32(row.["stop_sequence"]))
+                |> Seq.toArray
+            assertEqual expectedSequences actualSequences
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 

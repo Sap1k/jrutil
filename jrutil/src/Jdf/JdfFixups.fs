@@ -848,7 +848,7 @@ let private stopLocationFromMatch (stop: Stop) (match_: JdfStopToMatch) =
     let wgs84Pt =
         transformPoint
             etrs89ExSrid wgs84Srid
-            (wgs84ToEtrs89Ex.Inverse())
+            etrs89ExToWgs84
             match_.data.point
     {
         stopId = stop.id
@@ -1069,7 +1069,7 @@ let estimateMissingStopLocations (jdfBatch: JdfBatch) =
                 etrs89ExFactory.CreateGeometryCollection(
                     points |> Array.map (fun value -> value :> Geometry))
                     .Centroid
-                |> transformPoint etrs89ExSrid wgs84Srid (wgs84ToEtrs89Ex.Inverse())
+                |> transformPoint etrs89ExSrid wgs84Srid etrs89ExToWgs84
             {
                 stopId = pair.Key
                 lat = decimal point.Y
