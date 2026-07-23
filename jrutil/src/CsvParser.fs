@@ -4,6 +4,7 @@
 module JrUtil.CsvParser
 
 open System
+open System.Collections.Concurrent
 
 open System.Globalization
 open System.Reflection
@@ -71,8 +72,17 @@ let getRowParser<'r> (colParserFor: Type -> (string -> obj)) =
                      then let innerType  = colType.GetElementType()
                           colParserFor innerType
                      else colParserFor colType
+        let cache =
+            if colType = typeof<string>
+               || typeIsOption colType
+               || FSharpType.IsUnion(colType) then
+                Some (ConcurrentDictionary<string, obj>(StringComparer.Ordinal))
+            else None
         fun x ->
-            try parser x
+            try
+                match cache with
+                | Some values -> values.GetOrAdd(x, fun value -> parser value)
+                | None -> parser x
             with
             | _ as e ->
                 raise (CsvParseException
@@ -82,6 +92,12 @@ let getRowParser<'r> (colParserFor: Type -> (string -> obj)) =
         fields |> Array.map getFieldParser
     let elTypes = fields |> Array.map (fun f ->
         f.PropertyType.GetElementType())
+    let arrayPools =
+        fields
+        |> Array.map (fun field ->
+            if field.PropertyType.IsArray then
+                Some (ConcurrentDictionary<obj, obj>(HashIdentity.Structural))
+            else None)
 
     let recordConstructor = FSharpValue.PreComputeRecordConstructor(recordType)
     fun (cols: string array) ->
@@ -98,7 +114,7 @@ let getRowParser<'r> (colParserFor: Type -> (string -> obj)) =
                 let a = Array.CreateInstance(elTypes.[ri], sa.Len)
                 for i in 0..(sa.Len - 1) do
                     a.SetValue(colParsers.[ri] cols.[i + ci], i)
-                props.[ri] <- a
+                props.[ri] <- arrayPools.[ri].Value.GetOrAdd(a, a)
                 ri <- ri + 1
                 ci <- ci + sa.Len
         recordConstructor(props) |> unbox<'r>

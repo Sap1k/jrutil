@@ -79,6 +79,10 @@ let wgs84ToWebMercator =
 let wgs84ToEtrs89Ex =
     coordTransformFactory.CreateFromCoordinateSystems(wgs84, etrs89Ex)
      .MathTransform
+// ProjNet initializes a concatenated transform's inverse lazily and mutates
+// internal lists while doing so. Initialize it once during module startup;
+// calling Inverse() concurrently from fix-jdf workers is not thread-safe.
+let etrs89ExToWgs84 = wgs84ToEtrs89Ex.Inverse()
 
 let transformCoordinates (transform: MathTransform) =
     Array.map (fun (c: Coordinate) ->
@@ -120,7 +124,7 @@ let polygonWgs84ToEtrs89Ex p =
 let pointWgs84ToEtrs89Ex p =
     transformPoint wgs84Srid etrs89ExSrid wgs84ToEtrs89Ex p
 let pointEtrs89ExToWgs84 p =
-    transformPoint etrs89ExSrid wgs84Srid (wgs84ToEtrs89Ex.Inverse()) p
+    transformPoint etrs89ExSrid wgs84Srid etrs89ExToWgs84 p
 
 let pointsRadius (points: Point array) =
     let avgX = points |> Array.averageBy (fun p -> p.X)

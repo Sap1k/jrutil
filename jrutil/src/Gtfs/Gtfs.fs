@@ -9,14 +9,13 @@ open JrUtil.GtfsCsvSerializer
 open JrUtil.GtfsModel
 open JrUtil.GtfsParser
 
-let gtfsStandardTablesToFolder () =
+let gtfsStandardTablesExceptStopTimesToFolder () =
     // This is an attempt at speeding serialization up. In the end it didn't do
     // much, but this should be faster so I'm leaving it like this
     let agencySerializer = getRowsSerializerWriter<Agency>
     let stopSerializer = getRowsSerializerWriter<Stop>
     let routeSerializer = getRowsSerializerWriter<Route>
     let tripSerializer = getRowsSerializerWriter<Trip>
-    let stopTimeSerializer = getRowsSerializerWriter<StandardStopTime>
     let calendarEntrySerializer = getRowsSerializerWriter<CalendarEntry>
     let calendarExceptionSerializer = getRowsSerializerWriter<CalendarException>
     let feedInfoSerializer = getRowsSerializerWriter<FeedInfo>
@@ -32,22 +31,6 @@ let gtfsStandardTablesToFolder () =
         serializeTo "stops.txt" stopSerializer feed.stops
         serializeTo "routes.txt" routeSerializer feed.routes
         serializeTo "trips.txt" tripSerializer feed.trips
-        let standardStopTimes =
-            feed.stopTimes
-            |> Array.map (fun stopTime ->
-                {
-                    tripId = stopTime.tripId
-                    arrivalTime = stopTime.arrivalTime
-                    departureTime = stopTime.departureTime
-                    stopId = stopTime.stopId
-                    stopSequence = stopTime.stopSequence
-                    headsign = stopTime.headsign
-                    pickupType = stopTime.pickupType
-                    dropoffType = stopTime.dropoffType
-                    shapeDistTraveled = stopTime.shapeDistTraveled
-                    timepoint = stopTime.timepoint
-                }: StandardStopTime)
-        serializeTo "stop_times.txt" stopTimeSerializer standardStopTimes
         serializeToOpt "calendar.txt" calendarEntrySerializer feed.calendar
         serializeToOpt "calendar_dates.txt"
                        calendarExceptionSerializer
@@ -55,6 +38,20 @@ let gtfsStandardTablesToFolder () =
         match feed.feedInfo with
         | Some fi -> serializeTo "feed_info.txt" feedInfoSerializer [fi]
         | _ -> ()
+
+let gtfsStopTimesToFolder () =
+    fun path stopTimes ->
+        Directory.CreateDirectory(path) |> ignore
+        let filePath = Path.Combine(path, "stop_times.txt")
+        use file = File.Open(filePath, FileMode.Create)
+        writeStandardStopTimes file stopTimes
+
+let gtfsStandardTablesToFolder () =
+    let standardSerializer = gtfsStandardTablesExceptStopTimesToFolder ()
+    let stopTimeSerializer = gtfsStopTimesToFolder ()
+    fun path feed ->
+        standardSerializer path feed
+        stopTimeSerializer path feed.stopTimes
 
 let gtfsExtensionsToFolder () =
     let czRouteSerializer = getRowsSerializerWriter<CzRoute>

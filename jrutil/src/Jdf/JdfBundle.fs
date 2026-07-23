@@ -56,6 +56,14 @@ type private ParquetTable = {
     rows: IReadOnlyCollection<IDictionary<string, obj>>
 }
 
+[<Struct; NoComparison; NoEquality>]
+type private CallGroup = {
+    gtfsTripId: string
+    startIndex: int
+    count: int
+    direction: int64
+}
+
 let private requiredString (root: JsonElement) (name: string) =
     let mutable value = Unchecked.defaultof<JsonElement>
     if not (root.TryGetProperty(name, &value))
@@ -213,16 +221,36 @@ let private serviceNoteTypeName = function
     | JdfModel.ServiceOddWeeksFromTo -> "odd_weeks_from_to"
     | JdfModel.ServiceEvenWeeksFromTo -> "even_weeks_from_to"
 
-let private restrictionGroupCode = function
-    | JdfModel.TravelExclusion0 -> Some "§"
-    | JdfModel.TravelExclusion1 -> Some "A"
-    | JdfModel.TravelExclusion2 -> Some "B"
-    | JdfModel.TravelExclusion3 -> Some "C"
-    | _ -> None
+let private restrictionLookup (batch: JdfModel.JdfBatch) =
+    let result = Dictionary<int, int>()
+    for attribute in batch.attributeRefs do
+        let bit =
+            match attribute.value with
+            | JdfModel.TravelExclusion0 -> 1
+            | JdfModel.TravelExclusion1 -> 2
+            | JdfModel.TravelExclusion2 -> 4
+            | JdfModel.TravelExclusion3 -> 8
+            | _ -> 0
+        if bit <> 0 then result.[attribute.attributeId] <- bit
+    result
 
-let private restrictionGroups batch attributes =
-    Jdf.parseAttributes batch attributes
-    |> Seq.choose restrictionGroupCode
+let private restrictionMask (lookup: Dictionary<int, int>) (attributes: int option array) =
+    let mutable mask = 0
+    for attributeId in attributes do
+        match attributeId with
+        | Some id ->
+            match lookup.TryGetValue(id) with
+            | true, bit -> mask <- mask ||| bit
+            | _ -> ()
+        | None -> ()
+    mask
+
+let private restrictionGroupCodes mask = seq {
+    if mask &&& 1 <> 0 then yield "§"
+    if mask &&& 2 <> 0 then yield "A"
+    if mask &&& 4 <> 0 then yield "B"
+    if mask &&& 8 <> 0 then yield "C"
+}
 
 let private withOwnerOrdinals ownerKey values =
     values
@@ -253,10 +281,67 @@ let private routeStopSourceId routeId distinction sourceRouteStopId =
 let private table fields rows =
     { fields = fields; rows = rows |> Array.map (fun value -> value :> IDictionary<string, obj>) }
 
+let private callIsEmitted (call: JdfModel.TripStop) =
+    match call.departureTime with
+    | Some JdfModel.Passing | Some JdfModel.NotPassing -> false
+    | None when call.arrivalTime = None -> false
+    | _ -> true
+
+let private getEmittedTransferCalls (batch: JdfModel.JdfBatch)
+                                    (retainedTrips: HashSet<string>) =
+    let transferCallQueries = HashSet<struct (string * int64)>()
+    batch.transfers
+    |> Seq.iter (fun transfer ->
+        let gtfsTripId =
+            JdfToGtfs.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+        if retainedTrips.Contains(gtfsTripId) then
+            transferCallQueries.Add(struct (gtfsTripId, transfer.routeStopId)) |> ignore)
+    let emittedTransferCalls = HashSet<struct (string * int64)>()
+    batch.tripStops
+    |> Seq.iter (fun call ->
+        if callIsEmitted call then
+            let key =
+                struct (JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId,
+                        call.routeStopId)
+            if transferCallQueries.Contains(key) then emittedTransferCalls.Add(key) |> ignore)
+    emittedTransferCalls
+
+let private getRetainedCallGroups (batch: JdfModel.JdfBatch)
+                                  (retainedTrips: HashSet<string>) =
+    let calls = batch.tripStops
+    let groups = ResizeArray<CallGroup>()
+    let mutable startIndex = 0
+    while startIndex < calls.Length do
+        let first = calls.[startIndex]
+        let mutable endIndex = startIndex + 1
+        while endIndex < calls.Length
+              && calls.[endIndex].routeId = first.routeId
+              && calls.[endIndex].routeDistinction = first.routeDistinction
+              && calls.[endIndex].tripId = first.tripId do
+            endIndex <- endIndex + 1
+        let gtfsTripId =
+            JdfToGtfs.jdfTripId first.routeId first.routeDistinction first.tripId
+        if retainedTrips.Contains(gtfsTripId) then
+            groups.Add({
+                gtfsTripId = gtfsTripId
+                startIndex = startIndex
+                count = endIndex - startIndex
+                direction = if Jdf.tripIsReverse first.tripId then -1L else 1L
+            })
+        startIndex <- endIndex
+    let result = groups.ToArray()
+    Array.Sort(
+        result,
+        Comparer<CallGroup>.Create(fun left right ->
+            StringComparer.Ordinal.Compare(left.gtfsTripId, right.gtfsTripId)))
+    result
+
 // Parquet is deliberately limited to source facts that cannot be reconstructed
 // from standard GTFS plus the Oběhy extension tables. Snapshot identity belongs
 // in file metadata and manifest.json rather than being repeated on every row.
-let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
+let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
+                      (emittedTransferCalls: HashSet<struct (string * int64)>) =
+    let restrictionLookup = restrictionLookup batch
     let stopLocations =
         batch.stopLocations
         |> Seq.groupBy (fun location -> location.stopId)
@@ -274,7 +359,6 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
     let retainedStopIds = feed.stops |> Seq.map (fun stop -> stop.id) |> Set
     let stopLocationSources =
         batch.stopLocationSources |> Seq.map (fun value -> value.stopId, value.source) |> Map
-    let gtfsStopTimes = feed.stopTimes |> Seq.groupBy (fun call -> call.tripId) |> Map
 
     let routes =
         batch.routes
@@ -315,34 +399,6 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
                 "coordinate_precision", box coordinatePrecision
                 "coordinate_source", nullableObj (stopLocationSources |> Map.tryFind stop.id) ])
 
-    let calls =
-        batch.tripStops
-        |> Seq.groupBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
-        |> Seq.collect (fun ((routeId, distinction, tripId), sourceCalls) ->
-            let gtfsId = JdfToGtfs.jdfTripId routeId distinction tripId
-            if not (retainedTripIds.Contains gtfsId) then Seq.empty else
-            let direction = if Jdf.tripIsReverse tripId then -1L else 1L
-            let emittedSourceCalls =
-                sourceCalls
-                |> Seq.sortBy (fun call -> call.routeStopId * direction)
-                |> Seq.filter (fun call ->
-                    match call.departureTime with
-                    | Some JdfModel.Passing | Some JdfModel.NotPassing -> false
-                    | None when call.arrivalTime = None -> false
-                    | _ -> true)
-                |> Seq.toArray
-            let emittedGtfsCalls = gtfsStopTimes.[gtfsId] |> Seq.sortBy (fun call -> call.stopSequence) |> Seq.toArray
-            if emittedSourceCalls.Length <> emittedGtfsCalls.Length then
-                failwith $"Source/GTFS call count mismatch for {gtfsId}"
-            Seq.zip emittedSourceCalls emittedGtfsCalls
-            |> Seq.map (fun (sourceCall, gtfsCall) ->
-                row [
-                    "gtfs_trip_id", box gtfsId
-                    "stop_sequence", box gtfsCall.stopSequence
-                    "source_route_stop_id", box sourceCall.routeStopId ]))
-        |> Seq.sortBy (fun value -> string value.["gtfs_trip_id"], unbox<int> value.["stop_sequence"])
-        |> Seq.toArray
-
     let routeStopZones =
         batch.routeStops
         |> Seq.collect (fun routeStop ->
@@ -359,12 +415,6 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
             string value.["gtfs_route_id"], unbox<int64> value.["source_route_stop_id"],
             unbox<int> value.["zone_order"], string value.["zone_id"])
         |> Seq.toArray
-
-    let emittedCallKeys =
-        calls
-        |> Seq.map (fun value ->
-            (string value.["gtfs_trip_id"], unbox<int64> value.["source_route_stop_id"]), ())
-        |> Map
 
     let notices =
         let routeNotices =
@@ -435,7 +485,7 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
             let gtfsTripId =
                 JdfToGtfs.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
             if not (retainedTripIds.Contains gtfsTripId)
-               || not (emittedCallKeys.ContainsKey (gtfsTripId, transfer.routeStopId)) then None
+               || not (emittedTransferCalls.Contains(struct (gtfsTripId, transfer.routeStopId))) then None
             else Some (row [
                 "source_transfer_id", box (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)
                 "gtfs_trip_id", box gtfsTripId
@@ -460,7 +510,7 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
                 let gtfsRouteId =
                     JdfToGtfs.jdfRouteId routeStop.routeId routeStop.routeDistinction
                 if not (retainedRouteIds.Contains gtfsRouteId) then Seq.empty else
-                restrictionGroups batch routeStop.attributes
+                restrictionGroupCodes (restrictionMask restrictionLookup routeStop.attributes)
                 |> Seq.map (fun groupCode -> row [
                     "assignment_scope", box "route_stop"
                     "gtfs_route_id", box gtfsRouteId
@@ -473,8 +523,8 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
                 let gtfsTripId =
                     JdfToGtfs.jdfTripId tripStop.routeId tripStop.routeDistinction tripStop.tripId
                 if not (retainedTripIds.Contains gtfsTripId)
-                   || not (emittedCallKeys.ContainsKey (gtfsTripId, tripStop.routeStopId)) then Seq.empty
-                else restrictionGroups batch tripStop.attributes
+                   || not (callIsEmitted tripStop) then Seq.empty
+                else restrictionGroupCodes (restrictionMask restrictionLookup tripStop.attributes)
                      |> Seq.map (fun groupCode -> row [
                         "assignment_scope", box "trip_call"
                         "gtfs_route_id", null
@@ -506,9 +556,6 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
             stringField "district" true; stringField "nearby_place" true
             stringField "country" true; boolField "coordinates_missing" false
             stringField "coordinate_precision" false; stringField "coordinate_source" true |] stopPlaces
-        "source_call_metadata.parquet", table [|
-            stringField "gtfs_trip_id" false; intField "stop_sequence" false
-            int64Field "source_route_stop_id" false |] calls
         "source_route_stop_zone_metadata.parquet", table [|
             stringField "gtfs_route_id" false; int64Field "source_route_stop_id" false
             stringField "zone_id" false; intField "zone_order" false |] routeStopZones
@@ -546,18 +593,85 @@ let private writeParquet descriptor path table =
                                                     metadata, CancellationToken.None)
     } |> fun operation -> operation.GetAwaiter().GetResult()
 
-let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
-    let retainedTrips = feed.trips |> Seq.map (fun trip -> trip.id) |> Set
-    let emittedCallKeys =
-        batch.tripStops
-        |> Seq.choose (fun call ->
-            let gtfsTripId = JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
-            if not (retainedTrips.Contains gtfsTripId) then None else
-            match call.departureTime with
-            | Some JdfModel.Passing | Some JdfModel.NotPassing -> None
-            | None when call.arrivalTime = None -> None
-            | _ -> Some (gtfsTripId, call.routeStopId))
-        |> Set
+let private writeCallMetadataParquet descriptor path (batch: JdfModel.JdfBatch)
+                                     (retainedTrips: HashSet<string>) expectedRows =
+    let groups = getRetainedCallGroups batch retainedTrips
+    task {
+        let fields: DataField array = [|
+            field<string> "gtfs_trip_id" false
+            field<int> "stop_sequence" false
+            field<int64> "source_route_stop_id" false
+        |]
+        let schema = ParquetSchema(fields |> Array.map (fun value -> value :> Field))
+        let options = ParquetOptions(CompressionMethod = CompressionMethod.Snappy)
+        let metadata = Dictionary<string, string>()
+        metadata.Add("obehy.bundle_version", string BundleVersion)
+        metadata.Add("obehy.schema_version", string ParquetSchemaVersion)
+        metadata.Add("obehy.source_id", descriptor.sourceId)
+        metadata.Add("obehy.snapshot_id", $"sha256:{descriptor.payloadSha256}")
+        use stream = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)
+        use! writer =
+            ParquetWriter.CreateAsync(schema, stream, options, false, CancellationToken.None)
+        writer.CustomMetadata <- metadata
+
+        let rowGroupSize = 65536
+        let mutable tripIds = Array.zeroCreate<string> rowGroupSize
+        let mutable stopSequences = Array.zeroCreate<int> rowGroupSize
+        let mutable sourceRouteStopIds = Array.zeroCreate<int64> rowGroupSize
+        let mutable buffered = 0
+        let mutable rowCount = 0
+
+        let flush () = task {
+            let writtenTripIds =
+                if buffered = rowGroupSize then tripIds else tripIds |> Array.take buffered
+            let writtenStopSequences =
+                if buffered = rowGroupSize then stopSequences else stopSequences |> Array.take buffered
+            let writtenSourceRouteStopIds =
+                if buffered = rowGroupSize then sourceRouteStopIds
+                else sourceRouteStopIds |> Array.take buffered
+            use rowGroup = writer.CreateRowGroup()
+            do! rowGroup.WriteAsync(
+                    fields.[0], writtenTripIds :> IReadOnlyCollection<string>,
+                    Nullable<ReadOnlyMemory<int>>())
+            do! rowGroup.WriteAsync<int>(
+                    fields.[1], ReadOnlyMemory<int>(writtenStopSequences),
+                    Nullable<ReadOnlyMemory<int>>(), null, CancellationToken.None)
+            do! rowGroup.WriteAsync<int64>(
+                    fields.[2], ReadOnlyMemory<int64>(writtenSourceRouteStopIds),
+                    Nullable<ReadOnlyMemory<int>>(), null, CancellationToken.None)
+            tripIds <- Array.zeroCreate rowGroupSize
+            stopSequences <- Array.zeroCreate rowGroupSize
+            sourceRouteStopIds <- Array.zeroCreate rowGroupSize
+            buffered <- 0
+        }
+
+        for group in groups do
+            let calls = Array.zeroCreate<JdfModel.TripStop> group.count
+            Array.Copy(batch.tripStops, group.startIndex, calls, 0, group.count)
+            Array.Sort(
+                calls,
+                Comparer<JdfModel.TripStop>.Create(fun left right ->
+                    compare (left.routeStopId * group.direction)
+                            (right.routeStopId * group.direction)))
+            for stopSequence = 0 to calls.Length - 1 do
+                let call = calls.[stopSequence]
+                if callIsEmitted call then
+                    tripIds.[buffered] <- group.gtfsTripId
+                    stopSequences.[buffered] <- stopSequence
+                    sourceRouteStopIds.[buffered] <- call.routeStopId
+                    buffered <- buffered + 1
+                    rowCount <- rowCount + 1
+                    if buffered = rowGroupSize then do! flush ()
+        if buffered > 0 then do! flush ()
+        if rowCount <> expectedRows then
+            failwith $"Source/GTFS call count mismatch: expected {expectedRows}, got {rowCount}"
+        return rowCount
+    } |> fun operation -> operation.GetAwaiter().GetResult()
+
+let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
+                        (emittedTransferCalls: HashSet<struct (string * int64)>) =
+    let restrictionLookup = restrictionLookup batch
+    let retainedTrips = HashSet<string>(feed.trips |> Seq.map (fun trip -> trip.id))
     let filteredTrips =
         batch.trips
         |> Seq.choose (fun trip ->
@@ -595,7 +709,7 @@ let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
                 else None)
         let restrictions =
             batch.tripStops
-            |> Seq.filter (fun call -> restrictionGroups batch call.attributes |> Seq.isEmpty |> not)
+            |> Seq.filter (fun call -> restrictionMask restrictionLookup call.attributes <> 0)
             |> Seq.choose (fun call ->
                 let gtfsTripId = JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
                 if not (retainedTrips.Contains gtfsTripId) then
@@ -615,16 +729,16 @@ let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
                 let gtfsTripId =
                     JdfToGtfs.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
                 if retainedTrips.Contains gtfsTripId
-                   && not (emittedCallKeys.Contains (gtfsTripId, transfer.routeStopId)) then
+                   && not (emittedTransferCalls.Contains(struct (gtfsTripId, transfer.routeStopId))) then
                     Some (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)
                 else None)
         let restrictions =
             batch.tripStops
-            |> Seq.filter (fun call -> restrictionGroups batch call.attributes |> Seq.isEmpty |> not)
+            |> Seq.filter (fun call -> restrictionMask restrictionLookup call.attributes <> 0)
             |> Seq.choose (fun call ->
                 let gtfsTripId = JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
                 if retainedTrips.Contains gtfsTripId
-                   && not (emittedCallKeys.Contains (gtfsTripId, call.routeStopId)) then
+                   && not (callIsEmitted call) then
                     Some (restrictionId call.routeId call.routeDistinction call.tripId call.routeStopId)
                 else None)
         Seq.append transfers restrictions
@@ -662,16 +776,17 @@ let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
             |> Seq.map (fun stop -> (stop.routeId, stop.routeDistinction, stop.routeStopId), stop)
             |> Map
         batch.tripStops
-        |> Seq.groupBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
+        |> Utils.groupAdjacentBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
         |> Seq.collect (fun ((routeId, distinction, tripId), calls) ->
             let gtfsTripId = JdfToGtfs.jdfTripId routeId distinction tripId
             if not (retainedTrips.Contains gtfsTripId) then Seq.empty else
             calls
-            |> Seq.filter (fun call -> emittedCallKeys.Contains (gtfsTripId, call.routeStopId))
+            |> Seq.filter callIsEmitted
             |> Seq.collect (fun call ->
                 let routeStop = routeStops.[routeId, distinction, call.routeStopId]
-                Seq.append (restrictionGroups batch routeStop.attributes)
-                           (restrictionGroups batch call.attributes)
+                Seq.append
+                    (restrictionGroupCodes (restrictionMask restrictionLookup routeStop.attributes))
+                    (restrictionGroupCodes (restrictionMask restrictionLookup call.attributes))
                 |> Seq.distinct
                 |> Seq.map (fun groupCode -> groupCode, call.routeStopId))
             |> Seq.groupBy fst
@@ -847,10 +962,11 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteEndArray()
     writer.WriteEndObject()
 
-let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
-                          (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
-                          (internationalOverrides: JdfToGtfs.InternationalRouteOverride array)
-                          inputPath outputPath =
+let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
+                                      snapshotDescriptorPath converterVersion stopIdsCis
+                                      (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
+                                      (internationalOverrides: JdfToGtfs.InternationalRouteOverride array)
+                                      inputPath outputPath =
     if String.IsNullOrWhiteSpace(converterVersion) then invalidArg "converterVersion" "Converter version is required"
     Log.Information("Bundle phase: loading and validating snapshot descriptor")
     let descriptor = loadSnapshotDescriptor snapshotDescriptorPath
@@ -879,21 +995,43 @@ let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
                     internationalPolicy internationalOverrides sourceBatch
             JdfToGtfs.logInternationalRouteDecisions internationalPolicy filterResult.decisions
             let batch = filterResult.batch
-            Log.Information("Bundle phase: converting JDF to GTFS")
+            Log.Information("Bundle phase: preparing streaming JDF to GTFS conversion")
+            let preparation =
+                JdfToGtfs.prepareGtfsFeedForStreamingBundle stopIdsCis batch
+            let referencedStopIds = HashSet<string>(StringComparer.Ordinal)
+            let mutable stopTimeCount = 0
+            let stopTimes =
+                JdfToGtfs.getStreamingBundleStopTimes preparation
+                |> Seq.map (fun stopTime ->
+                    referencedStopIds.Add(stopTime.stopId) |> ignore
+                    stopTimeCount <- stopTimeCount + 1
+                    stopTime)
+            let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
+            let extensionsPath = Path.Combine(temp, "extensions")
+            Log.Information("Bundle phase: streaming GTFS stop times")
+            Gtfs.gtfsStopTimesToFolder () gtfsPath stopTimes
+            Log.Information("Bundle phase: preparing remaining GTFS relations")
             let feed =
-                JdfToGtfs.getGtfsFeedForBundle stopIdsCis batch
+                JdfToGtfs.finishStreamingBundleFeed preparation (referencedStopIds |> Set.ofSeq)
                 |> Gtfs.deduplicateCalendar
                 |> Gtfs.fillStandardRequiredFields
             validateStopCoordinates feed
-            let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
-            let extensionsPath = Path.Combine(temp, "extensions")
-            Log.Information("Bundle phase: writing GTFS tables")
-            Gtfs.gtfsStandardTablesToFolder () gtfsPath feed
+            Log.Information("Bundle phase: writing remaining GTFS tables")
+            Gtfs.gtfsStandardTablesExceptStopTimesToFolder () gtfsPath feed
             Log.Information("Bundle phase: writing GTFS extension tables")
             Gtfs.gtfsExtensionsToFolder () extensionsPath feed
+            let callTableName = "source_call_metadata.parquet"
+            Log.Information(
+                "Bundle phase: streaming compact call Parquet relation ({Rows} rows)",
+                stopTimeCount)
+            let retainedTrips = HashSet<string>(feed.trips |> Seq.map (fun trip -> trip.id))
+            let callRows =
+                writeCallMetadataParquet descriptor (Path.Combine(temp, callTableName))
+                                         batch retainedTrips stopTimeCount
+            let emittedTransferCalls = getEmittedTransferCalls batch retainedTrips
             Log.Information("Bundle phase: preparing Parquet relations")
-            let tables = getTables stopIdsCis batch feed
-            let mutable parquetRows = Map.empty
+            let tables = getTables stopIdsCis batch feed emittedTransferCalls
+            let mutable parquetRows = Map [callTableName, callRows]
             for index, (name, parquetTable) in tables |> Array.indexed do
                 Log.Information(
                     "Bundle phase: writing Parquet table {Index}/{Total}: {Table} ({Rows} rows)",
@@ -917,7 +1055,7 @@ let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
                       sourceObjectId = JdfToGtfs.jdfRouteId decision.routeId decision.routeDistinction
                       message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; override={overrideValue}" })
             let bundleDiagnostics =
-                Seq.append (diagnostics batch feed) internationalDiagnostics
+                Seq.append (diagnostics batch feed emittedTransferCalls) internationalDiagnostics
                 |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
                 |> Seq.toArray
             let missingCoordinateCount =
@@ -937,6 +1075,19 @@ let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
         completed <- true
     finally
         if not completed && Directory.Exists(temp) then Directory.Delete(temp, true)
+
+let writeBundleWithPolicyAndMemory releaseStopTimesAfterMaterialization
+                                   snapshotDescriptorPath converterVersion stopIdsCis
+                                   internationalPolicy internationalOverrides
+                                   inputPath outputPath =
+    writeBundleWithPolicyCore releaseStopTimesAfterMaterialization
+                              snapshotDescriptorPath converterVersion stopIdsCis
+                              internationalPolicy internationalOverrides inputPath outputPath
+
+let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
+                          internationalPolicy internationalOverrides inputPath outputPath =
+    writeBundleWithPolicyCore false snapshotDescriptorPath converterVersion stopIdsCis
+                              internationalPolicy internationalOverrides inputPath outputPath
 
 let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath outputPath =
     writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis

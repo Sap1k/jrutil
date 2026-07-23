@@ -8,6 +8,7 @@ module JrUtil.GeoData.StopMatcher
 
 open System
 open System.IO
+open System.Threading
 open Lucene.Net.Util
 open Lucene.Net.Store
 open Lucene.Net.Documents
@@ -80,12 +81,13 @@ type StopMatcher<'d>(stops: StopToMatch<'d> array,
         match defaultArg file None with
         | Some f -> Directory.Exists(f), FSDirectory.Open(f) :> Directory
         | None -> false, new RAMDirectory()
-    let analyzer = makeAnalyzer luceneVersion
-    let mutable cachedReader = None
+    let indexAnalyzer = makeAnalyzer luceneVersion
+    let queryAnalyzers = new ThreadLocal<Analyzer>((fun () -> makeAnalyzer luceneVersion), true)
+    let cachedReader = lazy (DirectoryReader.Open(directory))
     do if not isExisting then this.index()
 
     member this.index() =
-        let config = IndexWriterConfig(luceneVersion, analyzer)
+        let config = IndexWriterConfig(luceneVersion, indexAnalyzer)
         use writer = new IndexWriter(directory, config)
 
         for i, stop in stops |> Seq.indexed do
@@ -97,6 +99,7 @@ type StopMatcher<'d>(stops: StopToMatch<'d> array,
 
     member this.nameSimilarity(queryTokens: string array,
                                matchedTokens: string array) =
+        let analyzer = queryAnalyzers.Value
         let qtExpandedSet =
             queryTokens
             |> Seq.collect (fun t -> analyzeToTokens analyzer "name" t)
@@ -114,6 +117,7 @@ type StopMatcher<'d>(stops: StopToMatch<'d> array,
     /// Checks exact equality of two arrays of tokens, including order of words
     /// but considering synonyms
     member this.checkExactMatch(tok1: string array, tok2: string array) =
+        let analyzer = queryAnalyzers.Value
         let expand t = set <| analyzeToTokens analyzer "name" t
 
         tok1.Length = tok2.Length
@@ -122,12 +126,7 @@ type StopMatcher<'d>(stops: StopToMatch<'d> array,
         |> Seq.forall (fun (t1, t2) -> expand t1 = expand t2)
 
     member this.reader =
-        match cachedReader with
-        | Some r -> r
-        | None ->
-            let r = DirectoryReader.Open(directory)
-            cachedReader <- Some r
-            r
+        cachedReader.Value
 
     member this.matchStop(name, ?top) =
         let searcher = IndexSearcher(this.reader)
@@ -149,6 +148,8 @@ type StopMatcher<'d>(stops: StopToMatch<'d> array,
 
     interface IDisposable with
         member this.Dispose() =
-            cachedReader |> Option.iter (fun r -> r.Dispose())
-            analyzer.Dispose()
+            if cachedReader.IsValueCreated then cachedReader.Value.Dispose()
+            for analyzer in queryAnalyzers.Values do analyzer.Dispose()
+            queryAnalyzers.Dispose()
+            indexAnalyzer.Dispose()
             directory.Dispose()

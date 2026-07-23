@@ -37,22 +37,27 @@ let getJdfParser<'r> =
     fun (stream: Stream) -> seq {
         use reader = new StreamReader(stream, jdfEncoding)
         let buffer = Array.create (1024*1024) ' '
+        let recordTerminator = "\";\r\n"
         let mutable text = ""
         while not reader.EndOfStream do
             let len = reader.ReadBlock(buffer)
-            text <- text + String buffer.[0..len-1]
+            text <- String.Concat(text, String(buffer, 0, len))
             let mutable start = 0
-            for i in 0..text.Length-1 do
-                if text.[i..i+3] = "\";\r\n" then
-                    let line = text.[start..i-1]
-                    if line.[0] <> '"' then
-                        failwithf "JDF line did not start with quote"
-                    let line = line.[1..]
-                    start <- i+4
-                    
-                    if not <| String.IsNullOrWhiteSpace(line) then
-                        yield line.Split("\",\"") |> rowParser
-            text <- text.[start..]
+            let mutable terminator =
+                text.IndexOf(recordTerminator, start, StringComparison.Ordinal)
+            while terminator >= 0 do
+                let line = text.Substring(start, terminator - start)
+                if line.[0] <> '"' then
+                    failwithf "JDF line did not start with quote"
+                let line = line.Substring(1)
+                start <- terminator + recordTerminator.Length
+
+                if not <| String.IsNullOrWhiteSpace(line) then
+                    let cells = line.Split("\",\"")
+                    yield cells |> rowParser
+                terminator <-
+                    text.IndexOf(recordTerminator, start, StringComparison.Ordinal)
+            if start > 0 then text <- text.Substring(start)
     }
 
 let tryParseJdfTextFromZip parser (zip: ZipArchive) (filename: string) =

@@ -4,7 +4,9 @@ namespace JrUtil.Tests
 
 open System
 open System.IO
+open System.Globalization
 open Microsoft.VisualStudio.TestTools.UnitTesting
+open NodaTime
 
 open JrUtil
 open JrUtil.Tests.Asserts
@@ -19,6 +21,49 @@ type JdfToGtfsTests() =
 
     let route routeId (feed: GtfsModel.GtfsFeed) =
         feed.routes |> Array.find (fun item -> item.id = routeId)
+
+    [<TestMethod>]
+    member _.``Specialized stop-time writer is byte-identical to generic serialization``() =
+        let rows: GtfsModel.StopTime array = [|
+            {
+                tripId = "trip\"quoted"
+                arrivalTime = Some (Period.FromSeconds(25L * 3600L + 61L))
+                departureTime = None
+                stopId = "stop\"quoted"
+                stopSequence = 7
+                headsign = Some "head\"sign"
+                pickupType = Some GtfsModel.CoordinationWithDriver
+                dropoffType = Some GtfsModel.NoService
+                shapeDistTraveled = Some 12.50M
+                timepoint = Some GtfsModel.Exact
+                stopZoneIds = Some "ignored-extension"
+            }
+        |]
+        let projections: GtfsModel.StandardStopTime array =
+            rows
+            |> Array.map (fun value -> {
+                tripId = value.tripId
+                arrivalTime = value.arrivalTime
+                departureTime = value.departureTime
+                stopId = value.stopId
+                stopSequence = value.stopSequence
+                headsign = value.headsign
+                pickupType = value.pickupType
+                dropoffType = value.dropoffType
+                shapeDistTraveled = value.shapeDistTraveled
+                timepoint = value.timepoint
+            })
+        let oldCulture = CultureInfo.CurrentCulture
+        try
+            CultureInfo.CurrentCulture <- CultureInfo("cs-CZ")
+            use expected = new MemoryStream()
+            GtfsCsvSerializer.getRowsSerializerWriter<GtfsModel.StandardStopTime>
+                expected projections
+            use actual = new MemoryStream()
+            GtfsCsvSerializer.writeStandardStopTimes actual rows
+            CollectionAssert.AreEqual(expected.ToArray(), actual.ToArray())
+        finally
+            CultureInfo.CurrentCulture <- oldCulture
 
     [<TestMethod>]
     member _.``JDF writer creates a missing filesystem output directory``() =
@@ -86,6 +131,24 @@ type JdfToGtfsTests() =
             assertEqual true (routeIds.Contains item.routeId))
         feed.czTrips |> Option.get |> Array.iter (fun item ->
             assertEqual true (tripIds.Contains item.tripId))
+
+    [<TestMethod>]
+    member _.``Standalone stop-time conversion preserves unsorted JDF behavior``() =
+        let source = batch ()
+        let normalize (calls: GtfsModel.StopTime seq) =
+            calls
+            |> Seq.sortBy (fun call -> call.tripId, call.stopSequence, call.stopId)
+            |> Seq.map (fun call ->
+                call.tripId, call.stopSequence, call.stopId,
+                call.arrivalTime, call.departureTime)
+            |> Seq.toArray
+        let expected = JdfToGtfs.getGtfsStopTimes false source |> normalize
+        let unsorted = {
+            source with
+                tripStops = source.tripStops |> Array.sortBy (fun call -> call.routeStopId)
+        }
+        let actual = JdfToGtfs.getGtfsStopTimes false unsorted |> normalize
+        assertEqual expected actual
 
     [<TestMethod>]
     member _.``JDF routes receive default colors by transport mode``() =
