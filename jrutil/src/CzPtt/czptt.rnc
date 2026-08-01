@@ -100,6 +100,10 @@ CZPTTCISMessage =
 					element TrainActivityType {
 						xsd:string { pattern="[0-9A-Z]{4}" }
 					}
+				}*,
+				element NetworkSpecificParameter {
+					element Name { xsd:string }*,
+					element Value { xsd:string }*
 				}*
 			}+
 		},
@@ -107,7 +111,7 @@ CZPTTCISMessage =
 		element NetworkSpecificParameter {
 			element Name { xsd:string }*,
 			element Value { xsd:string }*
-		}?
+		}*
 	}
 
 CZCanceledPTTMessage =

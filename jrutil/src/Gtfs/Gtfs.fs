@@ -3,11 +3,17 @@
 
 module JrUtil.Gtfs
 
+open System
 open System.IO
 
 open JrUtil.GtfsCsvSerializer
 open JrUtil.GtfsModel
 open JrUtil.GtfsParser
+
+let markApproximateStopName (name: string) =
+    let suffix = " [?]"
+    if name.EndsWith(suffix, StringComparison.Ordinal) then name
+    else name + suffix
 
 let gtfsStandardTablesExceptStopTimesToFolder () =
     // This is an attempt at speeding serialization up. In the end it didn't do
@@ -19,6 +25,7 @@ let gtfsStandardTablesExceptStopTimesToFolder () =
     let calendarEntrySerializer = getRowsSerializerWriter<CalendarEntry>
     let calendarExceptionSerializer = getRowsSerializerWriter<CalendarException>
     let feedInfoSerializer = getRowsSerializerWriter<FeedInfo>
+    let transferSerializer = getRowsSerializerWriter<Transfer>
     fun path feed ->
         Directory.CreateDirectory(path) |> ignore
         let serializeTo name ser obj =
@@ -35,6 +42,7 @@ let gtfsStandardTablesExceptStopTimesToFolder () =
         serializeToOpt "calendar_dates.txt"
                        calendarExceptionSerializer
                        feed.calendarExceptions
+        serializeToOpt "transfers.txt" transferSerializer feed.transfers
         match feed.feedInfo with
         | Some fi -> serializeTo "feed_info.txt" feedInfoSerializer [fi]
         | _ -> ()
@@ -58,6 +66,7 @@ let gtfsExtensionsToFolder () =
     let czTripSerializer = getRowsSerializerWriter<CzTrip>
     let czStopSerializer = getRowsSerializerWriter<CzStop>
     let czStopZoneSerializer = getRowsSerializerWriter<CzStopZone>
+    let czTripStopZoneSerializer = getRowsSerializerWriter<CzTripStopZone>
     fun path feed ->
         Directory.CreateDirectory(path) |> ignore
         let serializeToOpt name ser obj =
@@ -69,6 +78,7 @@ let gtfsExtensionsToFolder () =
         serializeToOpt "cz_trips.txt" czTripSerializer feed.czTrips
         serializeToOpt "cz_stops.txt" czStopSerializer feed.czStops
         serializeToOpt "cz_stop_zones.txt" czStopZoneSerializer feed.czStopZones
+        serializeToOpt "cz_trip_stop_zones.txt" czTripStopZoneSerializer feed.czTripStopZones
 
 let gtfsFeedToFolder () =
     let standardSerializer = gtfsStandardTablesToFolder ()
@@ -97,10 +107,12 @@ let gtfsParseFolder () =
     let calendarParser = fileParserOpt "calendar.txt"
     let calendarExceptionsParser = fileParserOpt "calendar_dates.txt"
     let feedInfoParser = fileParserOpt "feed_info.txt"
+    let transfersParser = fileParserOpt "transfers.txt"
     let czRoutesParser = fileParserOpt "cz_routes.txt"
     let czTripsParser = fileParserOpt "cz_trips.txt"
     let czStopsParser = fileParserOpt "cz_stops.txt"
     let czStopZonesParser = fileParserOpt "cz_stop_zones.txt"
+    let czTripStopZonesParser = fileParserOpt "cz_trip_stop_zones.txt"
 
     fun path ->
         let feed: GtfsFeed = {
@@ -114,10 +126,12 @@ let gtfsParseFolder () =
             feedInfo =
                 feedInfoParser path
                 |> Option.map (fun fi -> fi.[0])
+            transfers = transfersParser path
             czRoutes = czRoutesParser path
             czTrips = czTripsParser path
             czStops = czStopsParser path
             czStopZones = czStopZonesParser path
+            czTripStopZones = czTripStopZonesParser path
         }
         feed
 

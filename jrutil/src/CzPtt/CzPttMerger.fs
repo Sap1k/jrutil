@@ -3,7 +3,12 @@
 
 module JrUtil.CzPttMerge
 
+open System
 open System.Collections.Generic
+open System.IO
+open System.Security.Cryptography
+open System.Text
+open System.Xml.Serialization
 
 open JrUtil.CzPtt
 open Serilog
@@ -17,18 +22,33 @@ type CzPttMerger() =
 
     // Indexed by PAID
     member val Messages = Dictionary<string, CzPttXml.CzpttcisMessage>()
+    member val UnknownCancellationTargets = Dictionary<string, int>()
+
+    member private _.Fingerprint(msg: CzPttXml.CzpttcisMessage) =
+        let serializer = XmlSerializer(typeof<CzPttXml.CzpttcisMessage>)
+        use writer = new StringWriter()
+        serializer.Serialize(writer, msg)
+        SHA256.HashData(Encoding.UTF8.GetBytes(writer.ToString()))
+        |> Convert.ToHexString
 
     member this.Add(msg: CzPttXml.CzpttcisMessage) =
         let paid = getPaidStr msg.Identifiers
         if this.Messages.ContainsKey(paid) then
-            Log.Error("Tried to add duplicate message: {PAID}", paid)
+            if this.Fingerprint(this.Messages.[paid]) = this.Fingerprint(msg) then
+                Log.Information("Ignoring byte-equivalent duplicate message: {PAID}", paid)
+            else
+                raise (CzPttInvalidException(
+                    $"Conflicting timetable messages share PA identity {paid}"))
         else
             this.Messages[paid] <- msg
 
     member this.Cancel(cancelMsg: CzPttXml.CzCanceledPttMessage) =
         let paid = getPaidStr cancelMsg.PlannedTransportIdentifiers
         if not <| this.Messages.ContainsKey(paid) then
-            Log.Error("Tried to cancel non-existing message: {PAID}", paid)
+            this.UnknownCancellationTargets.[paid] <-
+                (match this.UnknownCancellationTargets.TryGetValue(paid) with
+                 | true, count -> count + 1
+                 | _ -> 1)
         else
             let msg = this.Messages[paid]
             let msgBitmap = parseCalendar msg.CzpttInformation.PlannedCalendar
@@ -52,15 +72,17 @@ type CzPttMerger() =
         | Cancellation c -> this.Cancel(c)
 
     member this.ProcessAll(msgs: (string * CzpttMessage) seq) =
-        // We need to process the timetables first, before we can cancel them
-        let msgs =
-            msgs
-            |> Seq.sortBy (fun (_, m) ->
-                match m with Timetable _ -> 0 | Cancellation _ -> 1)
         for name, msg in msgs do
             use _logCtx = LogContext.PushProperty("CzPttFile", name)
             Log.Information("Merging CZPTT file {CzPttFile}", name)
             try
                 this.Process(msg)
             with
+            | :? CzPttInvalidException -> reraise()
             | e -> Log.Error(e, "Error while merging {CzPttFile}", name)
+        if this.UnknownCancellationTargets.Count > 0 then
+            let total =
+                this.UnknownCancellationTargets.Values |> Seq.sum
+            Log.Warning(
+                "{Count} cancellations targeted {DistinctCount} unknown PA identities",
+                total, this.UnknownCancellationTargets.Count)
