@@ -46,6 +46,7 @@
     <Compile Include="src/CzPtt/CzPtt.fs" />
     <Compile Include="src/CzPtt/CzPttMerger.fs" />
     <Compile Include="src/CzPtt/CzPttToGtfs.fs" />
+    <Compile Include="src/CzPtt/CzPttBundle.fs" />
     <Compile Include="src/RealTime/RealTimeModel.fs" />
     <Compile Include="src/RealTime/RealTimeSql.fs" />
     <Compile Include="src/UndatedTimes.fs" />

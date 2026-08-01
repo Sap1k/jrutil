@@ -93,7 +93,7 @@
         <xs:element ref="Identifiers"/>
         <xs:element ref="CZPTTCreation"/>
         <xs:element ref="CZPTTInformation"/>
-        <xs:element minOccurs="0" ref="NetworkSpecificParameter"/>
+        <xs:element minOccurs="0" maxOccurs="unbounded" ref="NetworkSpecificParameter"/>
       </xs:sequence>
     </xs:complexType>
   </xs:element>
@@ -125,6 +125,7 @@
         <xs:element minOccurs="0" ref="CommercialTrafficType"/>
         <xs:element minOccurs="0" ref="OperationalTrainNumber"/>
         <xs:element minOccurs="0" maxOccurs="unbounded" ref="TrainActivity"/>
+        <xs:element minOccurs="0" maxOccurs="unbounded" ref="NetworkSpecificParameter"/>
       </xs:sequence>
     </xs:complexType>
   </xs:element>

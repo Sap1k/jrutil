@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CZPTTCISMessage>
+  <Identifiers>
+    <PlannedTransportIdentifiers>
+      <ObjectType>TR</ObjectType>
+      <Company>54</Company>
+      <Core>000000001234</Core>
+      <Variant>00</Variant>
+      <TimetableYear>2026</TimetableYear>
+    </PlannedTransportIdentifiers>
+    <PlannedTransportIdentifiers>
+      <ObjectType>PA</ObjectType>
+      <Company>54</Company>
+      <Core>000000001234</Core>
+      <Variant>00</Variant>
+      <TimetableYear>2026</TimetableYear>
+    </PlannedTransportIdentifiers>
+  </Identifiers>
+  <CZPTTCreation>2025-12-01T00:00:00</CZPTTCreation>
+  <CZPTTInformation>
+    <PlannedCalendar>
+      <BitmapDays>1</BitmapDays>
+      <ValidityPeriod>
+        <StartDateTime>2025-12-14T00:00:00</StartDateTime>
+        <EndDateTime>2025-12-14T00:00:00</EndDateTime>
+      </ValidityPeriod>
+    </PlannedCalendar>
+    <CZPTTLocation>
+      <Location>
+        <CountryCodeISO>CZ</CountryCodeISO>
+        <LocationPrimaryCode>57076</LocationPrimaryCode>
+        <PrimaryLocationName>Praha hlavní nádraží</PrimaryLocationName>
+      </Location>
+      <TimingAtLocation>
+        <Timing TimingQualifierCode="ALD">
+          <Time>08:00:00.0000000+01:00</Time>
+          <Offset>0</Offset>
+        </Timing>
+      </TimingAtLocation>
+      <ResponsibleRU>54</ResponsibleRU>
+      <OperationalTrainNumber>01234</OperationalTrainNumber>
+      <TrainActivity><TrainActivityType>0001</TrainActivityType></TrainActivity>
+      <NetworkSpecificParameter>
+        <Name>CZPassengerServiceNumber</Name>
+        <Value>101</Value>
+      </NetworkSpecificParameter>
+    </CZPTTLocation>
+    <CZPTTLocation>
+      <Location>
+        <CountryCodeISO>CZ</CountryCodeISO>
+        <LocationPrimaryCode>57050</LocationPrimaryCode>
+        <PrimaryLocationName>Praha-Běchovice výhybna</PrimaryLocationName>
+      </Location>
+      <TimingAtLocation>
+        <Timing TimingQualifierCode="ALA">
+          <Time>08:08:00.0000000+01:00</Time>
+          <Offset>0</Offset>
+        </Timing>
+      </TimingAtLocation>
+      <ResponsibleRU>54</ResponsibleRU>
+      <OperationalTrainNumber>01234</OperationalTrainNumber>
+    </CZPTTLocation>
+    <CZPTTLocation>
+      <Location>
+        <CountryCodeISO>CZ</CountryCodeISO>
+        <LocationPrimaryCode>57016</LocationPrimaryCode>
+        <PrimaryLocationName>Kolín</PrimaryLocationName>
+      </Location>
+      <TimingAtLocation>
+        <Timing TimingQualifierCode="ALA">
+          <Time>08:30:00.0000000+01:00</Time>
+          <Offset>0</Offset>
+        </Timing>
+      </TimingAtLocation>
+      <ResponsibleRU>54</ResponsibleRU>
+      <OperationalTrainNumber>01234</OperationalTrainNumber>
+      <TrainActivity><TrainActivityType>0001</TrainActivityType></TrainActivity>
+    </CZPTTLocation>
+  </CZPTTInformation>
+</CZPTTCISMessage>

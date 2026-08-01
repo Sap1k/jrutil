@@ -131,10 +131,13 @@ let timetableIdentifier (czptt: CzPttXml.CzpttcisMessage) idt =
     czptt.Identifiers |> Array.find (fun ti -> ti.ObjectType = idt)
 
 let identifierStr (ident: CzPttXml.TransportIdentifier) =
-    sprintf "%s:%s:%s" ident.TimetableYear ident.Core ident.Variant
+    sprintf "%O:%s:%s:%s:%s"
+        ident.ObjectType ident.Company ident.Core ident.Variant ident.TimetableYear
 
 let locationActivities (loc: CzPttXml.CzpttLocation) =
     loc.TrainActivity
+    |> nullOpt
+    |> Option.defaultValue [||]
     |> Seq.map (fun ta -> ta.TrainActivityType |> parseUnion<TrainActivity>)
 
 let locationTrainType (loc: CzPttXml.CzpttLocation) =
@@ -143,7 +146,4 @@ let locationTrainType (loc: CzPttXml.CzpttLocation) =
     |> Option.map (fun tt -> tt.ToString() |> parseUnion<TrainType>)
 
 let isPublicLocation (loc: CzPttXml.CzpttLocation) =
-    (loc.TrainActivity |> nullOpt |> Option.defaultValue [||]).Length > 0
-    && not (locationActivities loc |> Seq.contains InternalStop)
-    && not (locationActivities loc |> Seq.contains UnpublishedStop)
-    && locationTrainType loc = Some PassengerPublic
+    locationActivities loc |> Seq.contains Stops

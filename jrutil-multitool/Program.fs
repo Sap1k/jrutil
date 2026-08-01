@@ -22,6 +22,7 @@ Usage:
     jrutil-multitool.exe jdf-to-gtfs [options] <JDF-in-dir> <GTFS-out-dir>
     jrutil-multitool.exe jdf-to-bundle [options] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
+    jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
@@ -42,6 +43,12 @@ Options:
     -j --jobs=VALUE             Worker count or auto (default: auto)
     --memory-budget=VALUE       RAM budget such as 10GiB or auto (default: auto)
     --batch-output=VALUE        fix-jdf output: directory or zip (default: directory)
+    --catalog-snapshot=FILE     Offline KADR catalog snapshot JSON for CZPTT
+    --operational-points=VALUE  CZPTT internal points: gtfs (default) or sidecar
+    --sr70=FILE                 SR70 CSV snapshot for CZPTT point coordinates
+    --sr70-name20=FILE          Companion SR70 Název20 CSV for fallback route names
+    --osm-pbf=FILE              Shared regional OSM PBF for CZPTT coordinate gaps
+    --osm-aliases=FILE          Reviewed CZPTT identity-to-OSM-object aliases
     --progress-events           Emit versioned JRUTIL_PROGRESS JSON lines
 
 Passing - to an input path parameter will make most jrutil commands read
@@ -169,6 +176,34 @@ let main (args: string array) =
                    |> Option.defaultValue []))
 
         let stopCoordsByIdPath = optArgValue args "--stop-coords-by-id"
+        let sr70Path = optArgValue args "--sr70"
+        let osmPath = optArgValue args "--osm-pbf"
+        let osmAliasesPath = optArgValue args "--osm-aliases"
+        let sr70Name20Path =
+            optArgValue args "--sr70-name20"
+            |> Option.orElseWith (fun () ->
+                sr70Path
+                |> Option.map (fun path ->
+                    Path.Combine(
+                        Path.GetDirectoryName(Path.GetFullPath(path)),
+                        "SR70_Nazev20.csv")))
+        sr70Path
+        |> Option.iter (fun path ->
+            if not (File.Exists(path)) then
+                invalidArg "--sr70" $"SR70 snapshot does not exist: {path}")
+        sr70Name20Path
+        |> Option.iter (fun path ->
+            if not (File.Exists(path)) then
+                invalidArg "--sr70-name20"
+                    $"SR70 Název20 companion snapshot does not exist: {path}")
+        osmPath
+        |> Option.iter (fun path ->
+            if not (File.Exists(path)) then
+                invalidArg "--osm-pbf" $"OSM snapshot does not exist: {path}")
+        osmAliasesPath
+        |> Option.iter (fun path ->
+            if not (File.Exists(path)) then
+                invalidArg "--osm-aliases" $"OSM alias file does not exist: {path}")
         let internationalRoutePolicy =
             optArgValue args "--international-route-policy"
             |> Option.defaultValue "keep-all"
@@ -232,17 +267,99 @@ let main (args: string array) =
                 with e ->
                     Log.Error(e, "Error while processing {Batch}", inpath)
             )
+        else if argFlagSet args "czptt-to-bundle" then
+            try
+                let catalog =
+                    CzPttToGtfs.loadCatalogSnapshot(
+                        argValue args "--catalog-snapshot")
+                let operationalPointMode =
+                    match optArgValue args "--operational-points"
+                          |> Option.defaultValue "gtfs" with
+                    | "gtfs" -> CzPttToGtfs.Gtfs
+                    | "sidecar" -> CzPttToGtfs.Sidecar
+                    | value ->
+                        invalidArg "--operational-points"
+                            $"Expected gtfs or sidecar, got {value}"
+                let inputPath = argValue args "<CzPtt-in-file>"
+                let outputPath = argValue args "<bundle-out-dir>"
+                if Directory.Exists(outputPath) then
+                    invalidArg "<bundle-out-dir>" "Output path must not exist"
+                Directory.CreateDirectory(outputPath) |> ignore
+                let bundleProgress name state =
+                    phase "convert" name state
+                let result =
+                    CzPttBundle.writeSidecarsWithProgress
+                        catalog operationalPointMode inputPath outputPath
+                        sr70Path sr70Name20Path osmPath osmAliasesPath bundleProgress
+                phase "convert" "write-gtfs" "started"
+                result.feed
+                |> Gtfs.deduplicateCalendar
+                |> Gtfs.fillStandardRequiredFields
+                |> Gtfs.gtfsFeedToFolder ()
+                    (Path.Combine(outputPath, "gtfs-intermediate"))
+                let extensionsPath = Path.Combine(outputPath, "extensions")
+                Directory.CreateDirectory(extensionsPath) |> ignore
+                for fileName in
+                    [| "cz_routes.txt"; "cz_trips.txt"; "cz_trip_stop_zones.txt" |] do
+                    let source =
+                        Path.Combine(outputPath, "gtfs-intermediate", fileName)
+                    if File.Exists(source) then
+                        File.Move(source, Path.Combine(extensionsPath, fileName))
+                phase "convert" "write-gtfs" "completed"
+                phase "convert" "write-diagnostics" "started"
+                let diagnostics = Dictionary<string, obj>()
+                diagnostics.["schema_version"] <- box 1
+                diagnostics.["bundle_format"] <- box "czptt-v1"
+                diagnostics.["operational_points"] <-
+                    box (
+                        match operationalPointMode with
+                        | CzPttToGtfs.Gtfs -> "gtfs"
+                        | CzPttToGtfs.Sidecar -> "sidecar")
+                diagnostics.["accepted_pa_count"] <- box result.acceptedPaIds.Length
+                diagnostics.["rejected_journeys"] <- box result.rejectedJourneys
+                diagnostics.["cancelled_pa_ids"] <- box result.cancelledPaIds
+                diagnostics.["sidecar_boundary_approximations"] <-
+                    box result.sidecarBoundaryApproximations
+                diagnostics.["ids_diagnostics"] <- box result.idsDiagnostics
+                diagnostics.["merge_diagnostics"] <- box result.mergeDiagnostics
+                diagnostics.["coordinate_diagnostics"] <-
+                    box result.coordinateDiagnostics
+                File.WriteAllText(
+                    Path.Combine(outputPath, "diagnostics.json"),
+                    JsonSerializer.Serialize(
+                        diagnostics,
+                        JsonSerializerOptions(WriteIndented = true)) + "\n")
+                phase "convert" "write-diagnostics" "completed"
+                CzPttBundle.writeManifest outputPath
+                Log.Information("Finished!")
+            with e ->
+                exitCode <- 1
+                Log.Error(e, "CZPTT bundle conversion failed")
         else if argFlagSet args "czptt-to-gtfs" then
             let gtfsSer = Gtfs.gtfsFeedToFolder ()
             try
+                let catalog =
+                    optArgValue args "--catalog-snapshot"
+                    |> Option.map CzPttToGtfs.loadCatalogSnapshot
+                    |> Option.defaultValue CzPttToGtfs.emptyCatalog
+                let operationalPointMode =
+                    match optArgValue args "--operational-points"
+                          |> Option.defaultValue "gtfs" with
+                    | "gtfs" -> CzPttToGtfs.Gtfs
+                    | "sidecar" -> CzPttToGtfs.Sidecar
+                    | value ->
+                        invalidArg "--operational-points"
+                            $"Expected gtfs or sidecar, got {value}"
                 CzPtt.parseAll (argValue args "<CzPtt-in-file>")
-                |> CzPttToGtfs.gtfsFeedMerged
+                |> CzPttToGtfs.gtfsFeedMergedWithOptions
+                    catalog operationalPointMode
                 |> Gtfs.deduplicateCalendar
                 |> gtfsWithCoords stopCoordsByIdPath
                 |> Gtfs.fillStandardRequiredFields
                 |> gtfsSer (argValue args "<GTFS-out-dir>")
                 Log.Information("Finished!")
             with e ->
+                exitCode <- 1
                 Log.Error(e, "Error while processing CzPtt")
         else if argFlagSet args "fix-jdf" then
             let inDir = argValues args "<JDF-in-dir>" |> Seq.head

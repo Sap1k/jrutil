@@ -148,6 +148,9 @@ namespace CzPttXml
         
         [System.Xml.Serialization.XmlIgnoreAttribute()]
         private TransportIdentifier[] _identifiers;
+
+        [System.Xml.Serialization.XmlIgnoreAttribute()]
+        private NetworkSpecificParameter[] _networkSpecificParameter;
         
         [System.ComponentModel.DataAnnotations.RequiredAttribute(AllowEmptyStrings=true)]
         [System.Xml.Serialization.XmlArrayAttribute("Identifiers")]
@@ -170,6 +173,7 @@ namespace CzPttXml
         public CzpttcisMessage()
         {
             this._identifiers = System.Array.Empty<TransportIdentifier>();
+            this._networkSpecificParameter = System.Array.Empty<NetworkSpecificParameter>();
         }
         
         [System.ComponentModel.DataAnnotations.RequiredAttribute(AllowEmptyStrings=true)]
@@ -181,7 +185,17 @@ namespace CzPttXml
         public CzpttInformation CzpttInformation { get; set; }
         
         [System.Xml.Serialization.XmlElementAttribute("NetworkSpecificParameter")]
-        public NetworkSpecificParameter NetworkSpecificParameter { get; set; }
+        public NetworkSpecificParameter[] NetworkSpecificParameter
+        {
+            get
+            {
+                return _networkSpecificParameter;
+            }
+            set
+            {
+                _networkSpecificParameter = value;
+            }
+        }
     }
     
     [System.CodeDom.Compiler.GeneratedCodeAttribute("XmlSchemaClassGenerator", "3.0.1270.0")]
@@ -343,6 +357,9 @@ namespace CzPttXml
         
         [System.Xml.Serialization.XmlIgnoreAttribute()]
         private TrainActivity[] _trainActivity;
+
+        [System.Xml.Serialization.XmlIgnoreAttribute()]
+        private NetworkSpecificParameter[] _networkSpecificParameter;
         
         [System.Xml.Serialization.XmlElementAttribute("TrainActivity")]
         public TrainActivity[] TrainActivity
@@ -369,6 +386,19 @@ namespace CzPttXml
                             && (this.TrainActivity.Length != 0));
             }
         }
+
+        [System.Xml.Serialization.XmlElementAttribute("NetworkSpecificParameter")]
+        public NetworkSpecificParameter[] NetworkSpecificParameter
+        {
+            get
+            {
+                return _networkSpecificParameter;
+            }
+            set
+            {
+                _networkSpecificParameter = value;
+            }
+        }
         
         /// <summary>
         /// <para xml:lang="en">Initializes a new instance of the <see cref="CzpttLocation" /> class.</para>
@@ -376,6 +406,7 @@ namespace CzPttXml
         public CzpttLocation()
         {
             this._trainActivity = System.Array.Empty<TrainActivity>();
+            this._networkSpecificParameter = System.Array.Empty<NetworkSpecificParameter>();
         }
     }
     

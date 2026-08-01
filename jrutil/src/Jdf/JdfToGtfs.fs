@@ -184,11 +184,6 @@ let getStopName (jdfStop: JdfModel.Stop) =
     | (None, Some np) -> sprintf "%s,,%s" jdfStop.town np
     | (Some d, Some np) -> sprintf "%s,%s,%s" jdfStop.town d np
 
-let markApproximateStopName (name: string) =
-    let suffix = " [?]"
-    if name.EndsWith(suffix, StringComparison.Ordinal) then name
-    else name + suffix
-
 let nonEmptyTrimmed (value: string) =
     if String.IsNullOrWhiteSpace(value) then None
     else Some (value.Trim())
@@ -348,7 +343,7 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 let name = getStopName jdfStop
                 match location with
                 | Some value when value.precision <> JdfModel.StopPrecise ->
-                    markApproximateStopName name
+                    Gtfs.markApproximateStopName name
                 | _ -> name
             {
                 id = jdfStopId stopIdsCis jdfStop.id
@@ -1252,6 +1247,7 @@ let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
         calendar = Some calendar
         calendarExceptions = Some calendarExceptions
         feedInfo = None
+        transfers = None
         czRoutes = Some (getCzRoutes publicLineNumbers jdfBatch)
         czTrips = Some (getCzTrips tripsToDelete jdfBatch)
         czStops =
@@ -1262,6 +1258,7 @@ let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
             getCzStopZones stopIdsCis jdfBatch
             |> Array.filter (fun zone -> retainedStopIds.Contains zone.stopPlaceId)
             |> Some
+        czTripStopZones = None
     }
     feed
 

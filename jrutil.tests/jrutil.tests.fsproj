@@ -22,6 +22,7 @@
     <Compile Include="JdfToGtfsTests.fs" />
     <Compile Include="InternationalRouteFilterTests.fs" />
     <Compile Include="JdfBundleTests.fs" />
+    <Compile Include="CzPttToGtfsTests.fs" />
     <Compile Include="EntryPoint.fs" />
   </ItemGroup>
 
