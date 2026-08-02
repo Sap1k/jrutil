@@ -6,6 +6,7 @@ module JrUtil.JdfToGtfs
 open System
 open System.Collections.Generic
 open System.IO
+open System.Security.Cryptography
 open System.Text.RegularExpressions
 open FSharp.Data
 open NodaTime
@@ -40,12 +41,84 @@ type InternationalRouteDecision = {
     maximumForeignDepthKm: decimal option
     integrated: bool
     overrideDecision: InternationalRouteOverrideDecision option
+    retainedDomesticTrips: int
+    qualifyingCrossBorderTrips: int
+    rejectedCrossBorderTrips: int
+    foreignOnlyTrips: int
 }
 
 type InternationalRouteFilterResult = {
     batch: JdfModel.JdfBatch
     decisions: InternationalRouteDecision array
 }
+
+type TransportModeRule = {
+    agencyId: string
+    routeIdFrom: int
+    routeIdTo: int
+    publicLineFrom: int
+    publicLineTo: int
+    expectedMode: JdfModel.TransportMode
+    effectiveMode: JdfModel.TransportMode
+    reason: string
+}
+
+type TransportModeRuleSet = {
+    sha256: string option
+    rules: TransportModeRule array
+}
+
+type TransportModeDecision = {
+    routeId: string
+    routeDistinction: int
+    corrected: bool
+    message: string
+    effectiveMode: JdfModel.TransportMode
+}
+
+let emptyTransportModeRules = { sha256 = None; rules = [||] }
+
+let private parseTransportMode argument = function
+    | "A" -> JdfModel.Bus
+    | "E" -> JdfModel.Tram
+    | "T" -> JdfModel.Trolleybus
+    | "L" -> JdfModel.CableCar
+    | "M" -> JdfModel.Metro
+    | "P" -> JdfModel.Ferry
+    | value -> invalidArg argument $"Unknown JDF transport mode: {value}"
+
+let loadTransportModeRules (path: string) =
+    let expected = [| "agency_id"; "route_id_from"; "route_id_to"; "public_line_from";
+                      "public_line_to"; "expected_mode"; "effective_mode"; "reason" |]
+    let bytes = File.ReadAllBytes(path)
+    let csv: CsvFile = CsvFile.Parse(System.Text.Encoding.UTF8.GetString(bytes), hasHeaders = true)
+    if csv.Headers <> Some expected then
+        let expectedHeader = String.Join(",", expected)
+        invalidArg "transportModeRules" $"Transport mode rule CSV must have header {expectedHeader}"
+    let integer (field: string) (value: string) =
+        match Int32.TryParse(value.Trim()) with
+        | true, parsed -> parsed
+        | _ -> invalidArg "transportModeRules" $"Invalid {field}: {value}"
+    let rules =
+        csv.Rows
+        |> Seq.map (fun row ->
+            let reason = row.[7].Trim()
+            if String.IsNullOrWhiteSpace(row.[0]) || String.IsNullOrWhiteSpace(reason) then
+                invalidArg "transportModeRules" "Rule agency_id and reason are required"
+            let rule = {
+                agencyId = row.[0].Trim()
+                routeIdFrom = integer "route_id_from" row.[1]
+                routeIdTo = integer "route_id_to" row.[2]
+                publicLineFrom = integer "public_line_from" row.[3]
+                publicLineTo = integer "public_line_to" row.[4]
+                expectedMode = parseTransportMode "transportModeRules" (row.[5].Trim())
+                effectiveMode = parseTransportMode "transportModeRules" (row.[6].Trim())
+                reason = reason }
+            if rule.routeIdFrom > rule.routeIdTo || rule.publicLineFrom > rule.publicLineTo then
+                invalidArg "transportModeRules" "Rule ranges must be ascending"
+            rule)
+        |> Seq.toArray
+    { sha256 = Some (Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()); rules = rules }
 
 let internationalRoutePolicyName = function
     | KeepAll -> "keep-all"
@@ -150,8 +223,9 @@ let getGtfsRouteType (jdfRoute: JdfModel.Route) =
     | (JdfModel.Bus, JdfModel.InternationalNoNational) // International coach
     | (JdfModel.Bus, JdfModel.InternationalOrNational) -> "201"
     | (JdfModel.Bus, JdfModel.ExtraDistrict)
-    | (JdfModel.Bus, JdfModel.Regional) -> "701" // Regional bus
+    | (JdfModel.Bus, JdfModel.Regional)
     | (JdfModel.Bus, JdfModel.ExtraRegional)
+    | (JdfModel.Bus, JdfModel.RegionalInternational) -> "701" // Regional bus
     | (JdfModel.Bus, JdfModel.LongDistanceNational) -> "202" // National coach
     | (JdfModel.Tram, _) -> "900" // Tram
     | (JdfModel.CableCar, _) -> "1701" // Cable car
@@ -164,7 +238,14 @@ let getGtfsRouteColors (publicLineNumber: string option)
     let colors background text = Some background, Some text
     let colorsWithWhiteText background = colors background "ffffff"
     match jdfRoute.transportMode with
-    | JdfModel.Bus -> colorsWithWhiteText "0076a3"
+    | JdfModel.Bus ->
+        match jdfRoute.routeType with
+        | JdfModel.International
+        | JdfModel.InternationalNoNational
+        | JdfModel.InternationalOrNational
+        | JdfModel.LongDistanceNational -> colorsWithWhiteText "004f71"
+        | JdfModel.RegionalInternational -> colorsWithWhiteText "00695c"
+        | _ -> colorsWithWhiteText "0076a3"
     | JdfModel.Tram -> colorsWithWhiteText "7a0200"
     | JdfModel.CableCar -> colors "c8d021" "1c1745"
     | JdfModel.Trolleybus -> colorsWithWhiteText "80166f"
@@ -243,6 +324,40 @@ let getPublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
                 None
         key, publicLineNumber)
     |> Map
+
+let applyTransportModeRules (ruleSet: TransportModeRuleSet) (batch: JdfModel.JdfBatch) =
+    let publicLines = getPublicLineNumbers batch
+    let decisions = ResizeArray<TransportModeDecision>()
+    let routes =
+        batch.routes
+        |> Array.map (fun route ->
+            let numericRoute = match Int32.TryParse(route.id) with true, value -> Some value | _ -> None
+            let publicLine =
+                publicLines.[route.id, route.idDistinction]
+                |> Option.bind (fun value -> match Int32.TryParse(value) with true, parsed -> Some parsed | _ -> None)
+            let candidates =
+                ruleSet.rules
+                |> Array.filter (fun rule ->
+                    rule.agencyId = route.agencyId
+                    && numericRoute |> Option.exists (fun value -> value >= rule.routeIdFrom && value <= rule.routeIdTo))
+            let matched =
+                candidates
+                |> Array.tryFind (fun rule ->
+                    route.transportMode = rule.expectedMode
+                    && publicLine |> Option.exists (fun value -> value >= rule.publicLineFrom && value <= rule.publicLineTo))
+            match matched with
+            | Some rule ->
+                decisions.Add {
+                    routeId = route.id; routeDistinction = route.idDistinction; corrected = true
+                    message = rule.reason; effectiveMode = rule.effectiveMode }
+                { route with transportMode = rule.effectiveMode }
+            | None when candidates.Length > 0 ->
+                decisions.Add {
+                    routeId = route.id; routeDistinction = route.idDistinction; corrected = false
+                    message = "reviewed rule guard mismatch"; effectiveMode = route.transportMode }
+                route
+            | None -> route)
+    { batch with routes = routes }, decisions.ToArray()
 
 let derivedStopPosts (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.tripStops
@@ -650,6 +765,12 @@ let validateInternationalRouteOverrides sourceRouteKeys
             invalidArg "internationalRouteOverrides"
                 $"Override refers to unknown route {item.routeId}/{item.routeDistinction}")
 
+type private InternationalTripDisposition =
+    | DomesticTrip
+    | QualifyingCrossBorderTrip of span: decimal * depth: decimal
+    | RejectedCrossBorderTrip of reason: string * span: decimal option * depth: decimal option
+    | ForeignOnlyTrip
+
 let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
                                   (overrides: InternationalRouteOverride array)
                                   (batch: JdfModel.JdfBatch) =
@@ -665,6 +786,11 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
             if tripsToDelete.Contains gtfsId then None
             else Some (trip.routeId, trip.routeDistinction, trip.id))
         |> Set
+    let activeTripsByRoute =
+        activeTripKeys
+        |> Seq.groupBy (fun (routeId, routeDistinction, _) -> routeId, routeDistinction)
+        |> Seq.map (fun (routeKey, trips) -> routeKey, trips |> Seq.toArray)
+        |> Map
     let stopCountries =
         batch.stops
         |> Seq.map (fun stop ->
@@ -676,12 +802,13 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
                 | _ -> None
             stop.id, country)
         |> Map
-    let callsByRoute =
+    let callsByTrip =
         batch.tripStops
         |> Seq.filter (fun call ->
             activeTripKeys.Contains(call.routeId, call.routeDistinction, call.tripId)
             && callIsEmitted call)
-        |> Seq.groupBy (fun call -> call.routeId, call.routeDistinction)
+        |> Seq.groupBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
+        |> Seq.map (fun (key, calls) -> key, calls |> Seq.toArray)
         |> Map
     let integratedRoutes =
         batch.routeIntegrations
@@ -693,9 +820,55 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
         |> Map
     let adjacentCountries = set ["A"; "D"; "PL"; "SK"]
 
+    let classifyTrip integrated (calls: JdfModel.TripStop array) =
+        let countriesWithUnknown =
+            calls
+            |> Array.map (fun call -> stopCountries |> Map.tryFind call.stopId |> Option.flatten)
+        let countries = countriesWithUnknown |> Array.choose id |> Set.ofArray
+        let hasCzech = countries.Contains "CZ"
+        let foreign = countries.Remove "CZ"
+        if foreign.IsEmpty then
+            if hasCzech && not (countriesWithUnknown |> Array.exists Option.isNone) then DomesticTrip
+            else RejectedCrossBorderTrip("unknown_stop_country", None, None)
+        elif not hasCzech then ForeignOnlyTrip
+        elif countriesWithUnknown |> Array.exists Option.isNone then
+            RejectedCrossBorderTrip("unknown_stop_country", None, None)
+        elif not (Set.isSubset foreign adjacentCountries) then
+            RejectedCrossBorderTrip("non_adjacent_country", None, None)
+        elif calls |> Array.exists (fun call -> call.kilometer.IsNone) then
+            RejectedCrossBorderTrip("missing_timetable_kilometres", None, None)
+        else
+            let czechKm =
+                calls
+                |> Array.choose (fun call ->
+                    if stopCountries.[call.stopId] = Some "CZ" then call.kilometer else None)
+            let foreignKm =
+                calls
+                |> Array.choose (fun call ->
+                    if stopCountries.[call.stopId] <> Some "CZ" then call.kilometer else None)
+            let allKm = calls |> Array.choose (fun call -> call.kilometer)
+            let span = Array.max allKm - Array.min allKm
+            let depth =
+                foreignKm
+                |> Array.map (fun km -> czechKm |> Array.map (fun czech -> abs (km - czech)) |> Array.min)
+                |> Array.max
+            let spanLimit, depthLimit = if integrated then 200m, 80m else 120m, 60m
+            if span > spanLimit then
+                RejectedCrossBorderTrip("trip_span_exceeds_limit", Some span, Some depth)
+            elif depth > depthLimit then
+                RejectedCrossBorderTrip("foreign_depth_exceeds_limit", Some span, Some depth)
+            else QualifyingCrossBorderTrip(span, depth)
+
     let classify (route: JdfModel.Route) =
         let routeKey = route.id, route.idDistinction
-        let calls = callsByRoute |> Map.tryFind routeKey |> Option.defaultValue Seq.empty |> Seq.toArray
+        let routeTrips =
+            activeTripsByRoute
+            |> Map.tryFind routeKey
+            |> Option.defaultValue [||]
+            |> Seq.map (fun key -> key, classifyTrip (integratedRoutes.Contains routeKey)
+                                            (callsByTrip |> Map.tryFind key |> Option.defaultValue [||]))
+            |> Seq.toArray
+        let calls = routeTrips |> Seq.collect (fun (key, _) -> callsByTrip |> Map.tryFind key |> Option.defaultValue [||]) |> Seq.toArray
         let countriesWithUnknown =
             calls
             |> Seq.map (fun call -> stopCountries |> Map.tryFind call.stopId |> Option.flatten)
@@ -705,92 +878,75 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
         let integrated = integratedRoutes.Contains routeKey
         let isPotentiallyInternational =
             not foreignCountries.IsEmpty || routeIsDeclaredInternational route
+        let domesticCount = routeTrips |> Array.sumBy (fun (_, value) -> if value = DomesticTrip then 1 else 0)
+        let qualifying = routeTrips |> Array.choose (fun (_, value) -> match value with QualifyingCrossBorderTrip(span, depth) -> Some(span, depth) | _ -> None)
+        let rejectedCount = routeTrips |> Array.sumBy (fun (_, value) -> match value with RejectedCrossBorderTrip _ -> 1 | _ -> 0)
+        let rejectionReasons =
+            routeTrips
+            |> Array.choose (fun (_, value) -> match value with RejectedCrossBorderTrip(reason, _, _) -> Some reason | _ -> None)
+            |> Array.distinct
+        let foreignOnlyCount = routeTrips |> Array.sumBy (fun (_, value) -> if value = ForeignOnlyTrip then 1 else 0)
+        let maximumSpan = if qualifying.Length = 0 then None else Some (qualifying |> Array.map fst |> Array.max)
+        let maximumDepth = if qualifying.Length = 0 then None else Some (qualifying |> Array.map snd |> Array.max)
+        let calculatedKeep = not isPotentiallyInternational || qualifying.Length > 0
+        let calculatedReason =
+            if not isPotentiallyInternational then "domestic"
+            elif qualifying.Length > 0 then "regional_adjacent"
+            elif foreignCountries.IsEmpty then "international_metadata_without_foreign_geography"
+            elif foreignOnlyCount > 0 && rejectedCount = 0 then "foreign_only_trip"
+            elif rejectionReasons.Length = 1 then rejectionReasons.[0]
+            else "no_qualifying_cross_border_trip"
+        let decision =
+            match overridesByRoute |> Map.tryFind routeKey with
+            | Some (routeOverride: InternationalRouteOverride) ->
+                { routeId = route.id; routeDistinction = route.idDistinction
+                  keep = routeOverride.decision = KeepRoute
+                  reason = $"override: {routeOverride.reason}"
+                  countries = countries; maximumTripSpanKm = maximumSpan
+                  maximumForeignDepthKm = maximumDepth; integrated = integrated
+                  overrideDecision = Some routeOverride.decision
+                  retainedDomesticTrips = domesticCount
+                  qualifyingCrossBorderTrips = qualifying.Length
+                  rejectedCrossBorderTrips = rejectedCount
+                  foreignOnlyTrips = foreignOnlyCount }
+            | None ->
+                { routeId = route.id; routeDistinction = route.idDistinction
+                  keep = calculatedKeep; reason = calculatedReason
+                  countries = countries; maximumTripSpanKm = maximumSpan
+                  maximumForeignDepthKm = maximumDepth; integrated = integrated
+                  overrideDecision = None
+                  retainedDomesticTrips = domesticCount
+                  qualifyingCrossBorderTrips = qualifying.Length
+                  rejectedCrossBorderTrips = rejectedCount
+                  foreignOnlyTrips = foreignOnlyCount }
+        routeKey, routeTrips, decision
 
-        let calculated =
-            if not isPotentiallyInternational then
-                true, "domestic", None, None
-            elif foreignCountries.IsEmpty then
-                false, "international_metadata_without_foreign_geography", None, None
-            elif countriesWithUnknown |> Array.exists Option.isNone then
-                false, "unknown_stop_country", None, None
-            elif not (Set.isSubset foreignCountries adjacentCountries) then
-                false, "non_adjacent_country", None, None
-            else
-                let internationalTrips =
-                    calls
-                    |> Seq.groupBy (fun call -> call.tripId)
-                    |> Seq.map (fun (_, tripCalls) -> tripCalls |> Seq.toArray)
-                    |> Seq.filter (fun tripCalls ->
-                        tripCalls
-                        |> Seq.exists (fun call -> stopCountries.[call.stopId] <> Some "CZ"))
-                    |> Seq.toArray
-                let foreignOnly =
-                    internationalTrips
-                    |> Array.exists (fun tripCalls ->
-                        tripCalls
-                        |> Array.exists (fun call -> stopCountries.[call.stopId] = Some "CZ")
-                        |> not)
-                let missingKilometres =
-                    internationalTrips
-                    |> Array.exists (Array.exists (fun call -> call.kilometer.IsNone))
-                if foreignOnly then false, "foreign_only_trip", None, None
-                elif missingKilometres || internationalTrips.Length = 0 then
-                    false, "missing_timetable_kilometres", None, None
-                else
-                    let metrics =
-                        internationalTrips
-                        |> Array.map (fun tripCalls ->
-                            let czechKm =
-                                tripCalls
-                                |> Array.choose (fun call ->
-                                    if stopCountries.[call.stopId] = Some "CZ" then call.kilometer else None)
-                            let foreignKm =
-                                tripCalls
-                                |> Array.choose (fun call ->
-                                    if stopCountries.[call.stopId] <> Some "CZ" then call.kilometer else None)
-                            let allKm = tripCalls |> Array.choose (fun call -> call.kilometer)
-                            let span = Array.max allKm - Array.min allKm
-                            let depth =
-                                foreignKm
-                                |> Array.maxBy (fun km -> czechKm |> Array.map (fun czech -> abs (km - czech)) |> Array.min)
-                                |> fun km -> czechKm |> Array.map (fun czech -> abs (km - czech)) |> Array.min
-                            span, depth)
-                    let maximumSpan = metrics |> Array.map fst |> Array.max
-                    let maximumDepth = metrics |> Array.map snd |> Array.max
-                    let spanLimit, depthLimit =
-                        if integrated then 200m, 80m else 120m, 60m
-                    if maximumSpan > spanLimit then
-                        false, "trip_span_exceeds_limit", Some maximumSpan, Some maximumDepth
-                    elif maximumDepth > depthLimit then
-                        false, "foreign_depth_exceeds_limit", Some maximumSpan, Some maximumDepth
-                    else true, "regional_adjacent", Some maximumSpan, Some maximumDepth
-
-        let calculatedKeep, calculatedReason, maximumSpan, maximumDepth = calculated
-        match overridesByRoute |> Map.tryFind routeKey with
-        | Some (routeOverride: InternationalRouteOverride) ->
-            { routeId = route.id; routeDistinction = route.idDistinction
-              keep = routeOverride.decision = KeepRoute
-              reason = $"override: {routeOverride.reason}"
-              countries = countries; maximumTripSpanKm = maximumSpan
-              maximumForeignDepthKm = maximumDepth; integrated = integrated
-              overrideDecision = Some routeOverride.decision }
-        | None ->
-            { routeId = route.id; routeDistinction = route.idDistinction
-              keep = calculatedKeep; reason = calculatedReason
-              countries = countries; maximumTripSpanKm = maximumSpan
-              maximumForeignDepthKm = maximumDepth; integrated = integrated
-              overrideDecision = None }
-
-    let decisions = batch.routes |> Array.map classify
+    let classifications = batch.routes |> Array.map classify
+    let decisions = classifications |> Array.map (fun (_, _, decision) -> decision)
+    let decisionsByRoute =
+        decisions
+        |> Seq.map (fun decision -> (decision.routeId, decision.routeDistinction), decision)
+        |> Map
     let keptRouteKeys =
         decisions
         |> Seq.filter (fun decision -> decision.keep)
         |> Seq.map (fun decision -> decision.routeId, decision.routeDistinction)
         |> Set
     let routeKept routeId routeDistinction = keptRouteKeys.Contains(routeId, routeDistinction)
-    let keptTrips =
-        batch.trips
-        |> Array.filter (fun trip -> routeKept trip.routeId trip.routeDistinction)
+    let dispositionByTrip = classifications |> Seq.collect (fun (_, trips, _) -> trips) |> Map
+    let overridesByKeptRoute =
+        decisions |> Seq.choose (fun d -> d.overrideDecision |> Option.map (fun value -> (d.routeId, d.routeDistinction), value)) |> Map
+    let tripAllowed (trip: JdfModel.Trip) =
+        let routeKey = trip.routeId, trip.routeDistinction
+        if not (routeKept trip.routeId trip.routeDistinction) then false
+        elif not (activeTripKeys.Contains(trip.routeId, trip.routeDistinction, trip.id)) then true
+        else
+            match overridesByKeptRoute |> Map.tryFind routeKey, dispositionByTrip.[trip.routeId, trip.routeDistinction, trip.id] with
+            | Some KeepRoute, ForeignOnlyTrip -> false
+            | Some KeepRoute, _ -> true
+            | _, DomesticTrip | _, QualifyingCrossBorderTrip _ -> true
+            | _ -> false
+    let keptTrips = batch.trips |> Array.filter tripAllowed
     let keptTripKeys =
         keptTrips
         |> Seq.map (fun trip -> trip.routeId, trip.routeDistinction, trip.id)
@@ -819,7 +975,14 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
             stops = batch.stops |> Array.filter (fun stop -> retainedStopIds.Contains stop.id)
             stopPosts = batch.stopPosts |> Array.filter (fun stop -> retainedStopIds.Contains stop.stopId)
             agencies = batch.agencies |> Array.filter (fun agency -> retainedAgencies.Contains(agency.id, agency.idDistinction))
-            routes = batch.routes |> Array.filter (fun route -> routeKept route.id route.idDistinction)
+            routes =
+                batch.routes
+                |> Array.filter (fun route -> routeKept route.id route.idDistinction)
+                |> Array.map (fun route ->
+                    let decision = decisionsByRoute.[route.id, route.idDistinction]
+                    if decision.qualifyingCrossBorderTrips > 0 then
+                        { route with routeType = JdfModel.RegionalInternational }
+                    else route)
             routeIntegrations = batch.routeIntegrations |> Array.filter (fun value -> routeKept value.routeId value.routeDistinction)
             routeStops = routeStops
             trips = keptTrips

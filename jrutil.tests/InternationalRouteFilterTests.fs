@@ -151,6 +151,38 @@ type InternationalRouteFilterTests() =
         assertEqual "domestic" decision.reason
 
     [<TestMethod>]
+    member _.``001398 regional trip survives while its foreign-only continuation is pruned``() =
+        let routeId = "001398"
+        let original = syntheticRoute "D" 50m 20m false International false
+        let source = {
+            original with
+                routes = original.routes |> Array.map (fun value -> { value with id = routeId })
+                routeStops = original.routeStops |> Array.map (fun value -> { value with routeId = routeId })
+                trips = original.trips |> Array.map (fun value -> { value with routeId = routeId })
+                tripStops = original.tripStops |> Array.map (fun value -> { value with routeId = routeId })
+                serviceNotes = original.serviceNotes |> Array.map (fun value -> { value with routeId = routeId })
+        }
+        let foreignTrip = { source.trips.[0] with id = 2L }
+        let foreignCalls =
+            source.tripStops
+            |> Array.map (fun call -> { call with tripId = 2L; stopId = 300L })
+        let mixed = {
+            source with
+                trips = Array.append source.trips [| foreignTrip |]
+                tripStops = Array.append source.tripStops foreignCalls
+        }
+
+        let result = classify mixed [||]
+        let decision = result.decisions |> Array.exactlyOne
+
+        assertEqual true decision.keep
+        assertEqual routeId decision.routeId
+        assertEqual 1 decision.qualifyingCrossBorderTrips
+        assertEqual 1 decision.foreignOnlyTrips
+        assertEqual [| 1L |] (result.batch.trips |> Array.map (fun trip -> trip.id))
+        assertEqual RegionalInternational (result.batch.routes |> Array.exactlyOne).routeType
+
+    [<TestMethod>]
     member _.``Foreign calls on a trip without retained service dates are ignored``() =
         let source = fixture ()
         let domestic = syntheticRoute "CZ" 20m 10m false Regional false

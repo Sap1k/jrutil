@@ -40,6 +40,7 @@ Options:
     --converter-version=VALUE     Exact JrUtil fork version or commit for provenance
     --international-route-policy=VALUE  keep-all (default) or regional-adjacent
     --international-route-overrides=FILE  Optional route keep/drop override CSV
+    --transport-mode-rules=FILE  Reviewed JDF effective transport-mode rule CSV
     -j --jobs=VALUE             Worker count or auto (default: auto)
     --memory-budget=VALUE       RAM budget such as 10GiB or auto (default: auto)
     --batch-output=VALUE        fix-jdf output: directory or zip (default: directory)
@@ -212,6 +213,10 @@ let main (args: string array) =
             optArgValue args "--international-route-overrides"
             |> Option.map JdfToGtfs.loadInternationalRouteOverrides
             |> Option.defaultValue [||]
+        let transportModeRules =
+            optArgValue args "--transport-mode-rules"
+            |> Option.map JdfToGtfs.loadTransportModeRules
+            |> Option.defaultValue JdfToGtfs.emptyTransportModeRules
         if internationalRoutePolicy = JdfToGtfs.KeepAll
            && internationalRouteOverrides.Length > 0 then
             invalidArg "--international-route-overrides"
@@ -219,12 +224,13 @@ let main (args: string array) =
         let mutable exitCode = 0
         if argFlagSet args "jdf-to-bundle" then
             try
-                JdfBundle.writeBundleWithPolicy
+                JdfBundle.writeBundleWithPolicyAndRules
                     (argValue args "--snapshot-descriptor")
                     (argValue args "--converter-version")
                     (argFlagSet args "--stop-ids-cis")
                     internationalRoutePolicy
                     internationalRouteOverrides
+                    transportModeRules
                     (argValue args "<JDF-input>")
                     (argValue args "<bundle-out-dir>")
                 Log.Information("Finished!")
@@ -254,8 +260,18 @@ let main (args: string array) =
                     JdfToGtfs.logInternationalRouteDecisions
                         internationalRoutePolicy filterResult.decisions
                     Log.Information("Converting to GTFS")
+                    let effectiveBatch, transportModeDecisions =
+                        JdfToGtfs.applyTransportModeRules transportModeRules filterResult.batch
+                    transportModeDecisions
+                    |> Array.iter (fun decision ->
+                        if decision.corrected then
+                            Log.Information("Corrected JDF route {Route}/{Distinction} transport mode: {Reason}",
+                                            decision.routeId, decision.routeDistinction, decision.message)
+                        else
+                            Log.Warning("JDF route {Route}/{Distinction} transport-mode rule mismatch",
+                                        decision.routeId, decision.routeDistinction))
                     let gtfs =
-                        JdfToGtfs.getGtfsFeed stopIdsCis filterResult.batch
+                        JdfToGtfs.getGtfsFeed stopIdsCis effectiveBatch
                         |> Gtfs.deduplicateCalendar
                         |> gtfsWithCoords stopCoordsByIdPath
 

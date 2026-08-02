@@ -159,6 +159,21 @@ type JdfToGtfsTests() =
 
         assertEqual (Some "0076a3", Some "ffffff")
                     (colors JdfModel.Bus None)
+        let classifiedBusColors routeType =
+            { sourceRoute with transportMode = JdfModel.Bus; routeType = routeType }
+            |> JdfToGtfs.getGtfsRouteColors None
+        assertEqual (Some "004f71", Some "ffffff")
+                    (classifiedBusColors JdfModel.International)
+        assertEqual (Some "004f71", Some "ffffff")
+                    (classifiedBusColors JdfModel.InternationalNoNational)
+        assertEqual (Some "004f71", Some "ffffff")
+                    (classifiedBusColors JdfModel.InternationalOrNational)
+        assertEqual (Some "004f71", Some "ffffff")
+                    (classifiedBusColors JdfModel.LongDistanceNational)
+        assertEqual (Some "00695c", Some "ffffff")
+                    (classifiedBusColors JdfModel.RegionalInternational)
+        assertEqual (Some "0076a3", Some "ffffff")
+                    (classifiedBusColors JdfModel.Regional)
         assertEqual (Some "7a0200", Some "ffffff")
                     (colors JdfModel.Tram None)
         assertEqual (Some "80166f", Some "ffffff")
@@ -175,6 +190,54 @@ type JdfToGtfsTests() =
                     (colors JdfModel.Metro (Some "D"))
         assertEqual (Some "00b3cb", Some "1c1745")
                     (colors JdfModel.Ferry None)
+
+    [<TestMethod>]
+    member _.``Extended bus types reserve coach for long-distance routes``() =
+        let route = (batch ()).routes.[0]
+        let routeType value = { route with routeType = value } |> JdfToGtfs.getGtfsRouteType
+        assertEqual "704" (routeType JdfModel.City)
+        assertEqual "704" (routeType JdfModel.CityAndAdjacent)
+        assertEqual "701" (routeType JdfModel.Regional)
+        assertEqual "701" (routeType JdfModel.ExtraDistrict)
+        assertEqual "701" (routeType JdfModel.ExtraRegional)
+        assertEqual "701" (routeType JdfModel.RegionalInternational)
+        assertEqual "202" (routeType JdfModel.LongDistanceNational)
+
+    [<TestMethod>]
+    member _.``Reviewed transport mode rule requires every guard``() =
+        let source = batch ()
+        let route = { source.routes.[0] with id = "915001"; agencyId = "61974757"; transportMode = JdfModel.Bus }
+        let rule: JdfToGtfs.TransportModeRule = {
+            agencyId = "61974757"; routeIdFrom = 915001; routeIdTo = 915019
+            publicLineFrom = 1; publicLineTo = 19; expectedMode = JdfModel.Bus
+            effectiveMode = JdfModel.Tram; reason = "reviewed Ostrava tram family" }
+        let corrected, decisions =
+            JdfToGtfs.applyTransportModeRules { sha256 = None; rules = [| rule |] }
+                { source with routes = [| route |]; routeIntegrations = [||] }
+        assertEqual JdfModel.Tram corrected.routes.[0].transportMode
+        assertEqual true (decisions |> Array.exactlyOne).corrected
+
+        let unchanged, mismatch =
+            JdfToGtfs.applyTransportModeRules { sha256 = None; rules = [| rule |] }
+                { source with routes = [| { route with transportMode = JdfModel.Trolleybus } |]; routeIntegrations = [||] }
+        assertEqual JdfModel.Trolleybus unchanged.routes.[0].transportMode
+        assertEqual false (mismatch |> Array.exactlyOne).corrected
+
+    [<TestMethod>]
+    member _.``Transport mode rule CSV is validated and checksummed``() =
+        let path = Path.Combine(Path.GetTempPath(), $"transport-mode-rules-{Guid.NewGuid():N}.csv")
+        try
+            File.WriteAllText(path,
+                "agency_id,route_id_from,route_id_to,public_line_from,public_line_to,expected_mode,effective_mode,reason\n"
+                + "61974757,915001,915019,1,19,A,E,Reviewed Ostrava tram family\n")
+            let loaded = JdfToGtfs.loadTransportModeRules path
+            let rule = loaded.rules |> Array.exactlyOne
+            assertEqual true loaded.sha256.IsSome
+            assertEqual "61974757" rule.agencyId
+            assertEqual JdfModel.Bus rule.expectedMode
+            assertEqual JdfModel.Tram rule.effectiveMode
+        finally
+            if File.Exists(path) then File.Delete(path)
 
     [<TestMethod>]
     member _.``Ambiguous or malformed public line identity is not guessed``() =

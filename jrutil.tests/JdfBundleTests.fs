@@ -85,10 +85,10 @@ type JdfBundleTests() =
                 "gtfs-intermediate/stop_times.txt", "a392c69c7d95c018fd7f2957a58245feff9ff75c95ba659ba810a07c6e8cbfeb"
                 "gtfs-intermediate/stops.txt", "922f56c4e4d801e0e3066f341032822d506b3b781032458e57b7ea127a8ff014"
                 "gtfs-intermediate/trips.txt", "dcf7b19da71d5700f3eeaaa9e2d7f1c5e86db7c8104f1713d46038a0eb5be16d"
-                "manifest.json", "a8259e12da777b5e8a73750be016c7f88eef28f265609673308dcd6f5e10a025"
+                "manifest.json", "c01bd571a1b160520ca2a54e5bf5f6047ad6cfc63f5cf6da9705d26478febb5c"
                 "source_call_metadata.parquet", "d0371213210d39f967020dff5d62e719578d701f1a181ae0cf772735e9cbe278"
                 "source_notice_metadata.parquet", "6d0fdf465786ac87faab9b6e200541dde04915842d8b3a09e14dbb1b3918eff5"
-                "source_route_metadata.parquet", "c196fac4f8a4a2dbeb74db6ea423984b300018f0f2b65ceba72251e3c59db8fc"
+                "source_route_metadata.parquet", "1275e718834fcc3faa10ce927931ba9ad64efad311f87f1c04a2fbe76c8c6de7"
                 "source_route_stop_zone_metadata.parquet", "482e8c310e995f1df813a4e9cc84412bbac6d2d21210852e82f8cf9d9a44cffd"
                 "source_stop_metadata.parquet", "3b2d09634dd92006d1ed736d6963c21e1eacd3af604bf72735146f6825e06243"
                 "source_transfer_metadata.parquet", "d02e1d71d127dbd48216c01b5c26c7ae45d8e2d26969ffbee0ce336e8974b26d"
@@ -120,6 +120,8 @@ type JdfBundleTests() =
                     "gtfs_route_id", typeof<string>, false; "source_route_id", typeof<string>, false
                     "route_distinction", typeof<int>, false; "source_agency_id", typeof<string>, false
                     "source_agency_distinction", typeof<int>, false
+                    "source_transport_mode", typeof<string>, false
+                    "effective_transport_mode", typeof<string>, false
                     "valid_from", typeof<string>, false; "valid_to", typeof<string>, false |]
                 "source_stop_metadata.parquet", [|
                     "gtfs_stop_id", typeof<string>, false; "town", typeof<string>, false
