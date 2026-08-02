@@ -339,7 +339,16 @@ let private getRetainedCallGroups (batch: JdfModel.JdfBatch)
 // Parquet is deliberately limited to source facts that cannot be reconstructed
 // from standard GTFS plus the Oběhy extension tables. Snapshot identity belongs
 // in file metadata and manifest.json rather than being repeated on every row.
-let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
+let private transportModeCode = function
+    | JdfModel.Bus -> "A"
+    | JdfModel.Tram -> "E"
+    | JdfModel.Trolleybus -> "T"
+    | JdfModel.CableCar -> "L"
+    | JdfModel.Metro -> "M"
+    | JdfModel.Ferry -> "P"
+
+let private getTables stopIdsCis (sourceTransportModes: Map<string * int, JdfModel.TransportMode>)
+                      (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
                       (emittedTransferCalls: HashSet<struct (string * int64)>) =
     let restrictionLookup = restrictionLookup batch
     let stopLocations =
@@ -369,6 +378,8 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
             "route_distinction", box route.idDistinction
             "source_agency_id", box route.agencyId
             "source_agency_distinction", box route.agencyDistinction
+            "source_transport_mode", box (sourceTransportModes.[route.id, route.idDistinction] |> transportModeCode)
+            "effective_transport_mode", box (transportModeCode route.transportMode)
             "valid_from", box (localDateString route.timetableValidFrom)
             "valid_to", box (localDateString route.timetableValidTo) ])
 
@@ -549,7 +560,8 @@ let private getTables stopIdsCis (batch: JdfModel.JdfBatch) (feed: GtfsModel.Gtf
         "source_route_metadata.parquet", table [|
             stringField "gtfs_route_id" false; stringField "source_route_id" false
             intField "route_distinction" false; stringField "source_agency_id" false
-            intField "source_agency_distinction" false; stringField "valid_from" false
+            intField "source_agency_distinction" false; stringField "source_transport_mode" false
+            stringField "effective_transport_mode" false; stringField "valid_from" false
             stringField "valid_to" false |] routes
         "source_stop_metadata.parquet", table [|
             stringField "gtfs_stop_id" false; stringField "town" false
@@ -904,7 +916,9 @@ let private fileEntries root parquetRows =
 let private writeManifest path descriptor (converterVersion: string) stopIdsCis
                           (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
                           (internationalDecisions: JdfToGtfs.InternationalRouteDecision array)
-                          (batch: JdfModel.JdfBatch) files =
+                          (transportModeRules: JdfToGtfs.TransportModeRuleSet)
+                          (transportModeDecisions: JdfToGtfs.TransportModeDecision array)
+                          (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) files =
     use stream = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)
     use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
     writer.WriteStartObject()
@@ -949,6 +963,23 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteNumber(
         "dropped_route_distinctions",
         internationalDecisions |> Seq.filter (fun decision -> not decision.keep) |> Seq.length)
+    writer.WriteNumber("retained_domestic_trips", internationalDecisions |> Seq.sumBy (fun d -> d.retainedDomesticTrips))
+    writer.WriteNumber("qualifying_cross_border_trips", internationalDecisions |> Seq.sumBy (fun d -> d.qualifyingCrossBorderTrips))
+    writer.WriteNumber("rejected_cross_border_trips", internationalDecisions |> Seq.sumBy (fun d -> d.rejectedCrossBorderTrips))
+    writer.WriteNumber("foreign_only_trips_pruned", internationalDecisions |> Seq.sumBy (fun d -> d.foreignOnlyTrips))
+    writer.WriteEndObject()
+    writer.WriteStartObject("transport_mode_corrections")
+    match transportModeRules.sha256 with Some value -> writer.WriteString("rules_sha256", value) | None -> writer.WriteNull("rules_sha256")
+    writer.WriteNumber("corrected_routes", transportModeDecisions |> Seq.filter (fun d -> d.corrected) |> Seq.length)
+    writer.WriteNumber("guard_mismatches", transportModeDecisions |> Seq.filter (fun d -> not d.corrected) |> Seq.length)
+    writer.WriteStartObject("by_effective_mode")
+    for mode, values in transportModeDecisions |> Seq.filter (fun d -> d.corrected) |> Seq.groupBy (fun d -> string d.effectiveMode) |> Seq.sortBy fst do
+        writer.WriteNumber(mode, values |> Seq.length)
+    writer.WriteEndObject()
+    writer.WriteEndObject()
+    writer.WriteStartObject("route_type_distribution")
+    for routeType, values in feed.routes |> Seq.groupBy (fun route -> route.routeType) |> Seq.sortBy fst do
+        writer.WriteNumber(routeType, values |> Seq.length)
     writer.WriteEndObject()
     writer.WriteEndObject()
     writer.WriteStartArray("files")
@@ -966,6 +997,7 @@ let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
                                       snapshotDescriptorPath converterVersion stopIdsCis
                                       (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
                                       (internationalOverrides: JdfToGtfs.InternationalRouteOverride array)
+                                      (transportModeRules: JdfToGtfs.TransportModeRuleSet)
                                       inputPath outputPath =
     if String.IsNullOrWhiteSpace(converterVersion) then invalidArg "converterVersion" "Converter version is required"
     Log.Information("Bundle phase: loading and validating snapshot descriptor")
@@ -984,17 +1016,23 @@ let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
         withJdfInput inputPath (fun source ->
             Log.Information("Bundle phase: parsing merged JDF")
             let sourceBatch = Jdf.jdfBatchDirParser () source
+            Log.Information("Bundle phase: applying international trip policy")
             let sourceRouteKeys =
                 sourceBatch.routes
                 |> Seq.map (fun route -> route.id, route.idDistinction)
                 |> Set
+            let sourceTransportModes =
+                sourceBatch.routes
+                |> Seq.map (fun route -> (route.id, route.idDistinction), route.transportMode)
+                |> Map
             JdfToGtfs.validateInternationalRouteOverrides
                 sourceRouteKeys internationalOverrides
             let filterResult =
                 JdfToGtfs.applyInternationalRoutePolicy
                     internationalPolicy internationalOverrides sourceBatch
             JdfToGtfs.logInternationalRouteDecisions internationalPolicy filterResult.decisions
-            let batch = filterResult.batch
+            let batch, transportModeDecisions =
+                JdfToGtfs.applyTransportModeRules transportModeRules filterResult.batch
             Log.Information("Bundle phase: preparing streaming JDF to GTFS conversion")
             let preparation =
                 JdfToGtfs.prepareGtfsFeedForStreamingBundle stopIdsCis batch
@@ -1030,7 +1068,7 @@ let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
                                          batch retainedTrips stopTimeCount
             let emittedTransferCalls = getEmittedTransferCalls batch retainedTrips
             Log.Information("Bundle phase: preparing Parquet relations")
-            let tables = getTables stopIdsCis batch feed emittedTransferCalls
+            let tables = getTables stopIdsCis sourceTransportModes batch feed emittedTransferCalls
             let mutable parquetRows = Map [callTableName, callRows]
             for index, (name, parquetTable) in tables |> Array.indexed do
                 Log.Information(
@@ -1041,7 +1079,8 @@ let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
             Log.Information("Bundle phase: creating diagnostics")
             let internationalDiagnostics =
                 filterResult.decisions
-                |> Seq.filter (fun decision -> not decision.keep)
+                |> Seq.filter (fun decision ->
+                    not decision.keep || decision.rejectedCrossBorderTrips > 0 || decision.foreignOnlyTrips > 0)
                 |> Seq.map (fun decision ->
                     let countries = String.Join(",", decision.countries)
                     let span = decision.maximumTripSpanKm |> Option.map string |> Option.defaultValue "missing"
@@ -1051,11 +1090,21 @@ let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
                         | Some JdfToGtfs.KeepRoute -> "keep"
                         | Some JdfToGtfs.DropRoute -> "drop"
                         | None -> "none"
-                    { severity = "warning"; code = "filtered_international_route"
+                    { severity = "warning"
+                      code = if decision.keep then "filtered_international_trips" else "filtered_international_route"
                       sourceObjectId = JdfToGtfs.jdfRouteId decision.routeId decision.routeDistinction
-                      message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; override={overrideValue}" })
+                      message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; override={overrideValue}; domestic={decision.retainedDomesticTrips}; qualifying_cross_border={decision.qualifyingCrossBorderTrips}; rejected_cross_border={decision.rejectedCrossBorderTrips}; foreign_only={decision.foreignOnlyTrips}" })
+            let transportModeDiagnostics =
+                transportModeDecisions
+                |> Seq.map (fun decision ->
+                    { severity = if decision.corrected then "info" else "warning"
+                      code = if decision.corrected then "corrected_transport_mode" else "transport_mode_rule_mismatch"
+                      sourceObjectId = JdfToGtfs.jdfRouteId decision.routeId decision.routeDistinction
+                      message = $"{decision.message}; effective_mode={decision.effectiveMode}" })
             let bundleDiagnostics =
-                Seq.append (diagnostics batch feed emittedTransferCalls) internationalDiagnostics
+                Seq.concat [ diagnostics batch feed emittedTransferCalls :> seq<_>
+                             internationalDiagnostics
+                             transportModeDiagnostics ]
                 |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
                 |> Seq.toArray
             let missingCoordinateCount =
@@ -1069,7 +1118,8 @@ let private writeBundleWithPolicyCore _releaseStopTimesAfterMaterialization
             Log.Information("Bundle phase: hashing payloads and creating manifest")
             let files = fileEntries temp parquetRows
             writeManifest (Path.Combine(temp, "manifest.json")) descriptor converterVersion stopIdsCis
-                          internationalPolicy filterResult.decisions batch files)
+                          internationalPolicy filterResult.decisions transportModeRules
+                          transportModeDecisions batch feed files)
         Log.Information("Bundle phase: activating completed bundle")
         Directory.Move(temp, outputFull)
         completed <- true
@@ -1082,12 +1132,21 @@ let writeBundleWithPolicyAndMemory releaseStopTimesAfterMaterialization
                                    inputPath outputPath =
     writeBundleWithPolicyCore releaseStopTimesAfterMaterialization
                               snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides inputPath outputPath
+                              internationalPolicy internationalOverrides JdfToGtfs.emptyTransportModeRules
+                              inputPath outputPath
 
 let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
                           internationalPolicy internationalOverrides inputPath outputPath =
     writeBundleWithPolicyCore false snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides inputPath outputPath
+                              internationalPolicy internationalOverrides JdfToGtfs.emptyTransportModeRules
+                              inputPath outputPath
+
+let writeBundleWithPolicyAndRules snapshotDescriptorPath converterVersion stopIdsCis
+                                  internationalPolicy internationalOverrides transportModeRules
+                                  inputPath outputPath =
+    writeBundleWithPolicyCore false snapshotDescriptorPath converterVersion stopIdsCis
+                              internationalPolicy internationalOverrides transportModeRules
+                              inputPath outputPath
 
 let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath outputPath =
     writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis

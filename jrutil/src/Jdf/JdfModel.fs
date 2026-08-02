@@ -160,6 +160,9 @@ type RouteType =
     | [<StrValue("W")>] ExtraDistrict // From JDF 1.8
     | [<StrValue("Z")>] ExtraRegional // TODO: Better naming?
     | [<StrValue("D")>] LongDistanceNational
+    // Effective classification produced after per-trip international filtering;
+    // it is never parsed from source JDF.
+    | RegionalInternational
 
 type TransportMode =
     | [<StrValue("A")>] Bus
