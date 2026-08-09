@@ -154,6 +154,7 @@ type FeedInfo = {
     [<CsvFieldName("feed_start_date")>] startDate: LocalDate option
     [<CsvFieldName("feed_end_date")>] endDate: LocalDate option
     [<CsvFieldName("feed_version")>] version: string option
+    [<CsvFieldName("feed_contact_email")>] contactEmail: string option
 }
 
 type Transfer = {

@@ -1387,6 +1387,30 @@ let warnUnhandledServiceNotes (jdfBatch: JdfModel.JdfBatch) () =
     |> Seq.iter (fun sn ->
         Log.Warning("Unhandled JDF ServiceNote {Designation} {Note}", sn.designation, sn.note))
 
+let private feedInfo (jdfVersion: JdfModel.JdfVersion)
+                     (calendar: GtfsModel.CalendarEntry array)
+                     (calendarExceptions: GtfsModel.CalendarException array) =
+    let addedDates =
+        calendarExceptions
+        |> Array.choose (fun exceptionDate ->
+            if exceptionDate.exceptionType = GtfsModel.ServiceAdded
+            then Some exceptionDate.date else None)
+    let starts =
+        Array.append (calendar |> Array.map (fun entry -> entry.startDate)) addedDates
+    let ends =
+        Array.append (calendar |> Array.map (fun entry -> entry.endDate)) addedDates
+    let startDate = if starts.Length = 0 then None else Some (Array.min starts)
+    let endDate = if ends.Length = 0 then None else Some (Array.max ends)
+    let versionParts = [
+        Some (sprintf "jdf-%s" jdfVersion.version)
+        jdfVersion.batchId |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        jdfVersion.creationDate
+        |> Option.map (fun date ->
+            sprintf "%04d%02d%02d" date.Year date.Month date.Day)
+    ]
+    let version = versionParts |> List.choose id |> String.concat ":" |> Some
+    Gtfs.obehyFeedInfo version startDate endDate
+
 let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
                              tripsToDelete calendar calendarExceptions publicLineNumbers
                              (referencedStopIds: Set<string>) stopTimes =
@@ -1409,7 +1433,7 @@ let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
         stopTimes = stopTimes
         calendar = Some calendar
         calendarExceptions = Some calendarExceptions
-        feedInfo = None
+        feedInfo = Some (feedInfo jdfBatch.version calendar calendarExceptions)
         transfers = None
         czRoutes = Some (getCzRoutes publicLineNumbers jdfBatch)
         czTrips = Some (getCzTrips tripsToDelete jdfBatch)

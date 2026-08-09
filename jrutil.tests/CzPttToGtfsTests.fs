@@ -330,6 +330,44 @@ type CzPttToGtfsTests() =
         Assert.AreEqual(None, feed.czRoutes.Value.[0].publicLineNumber)
 
     [<TestMethod>]
+    member _.``Mapped route names are right-trimmed and feed contact is serialized``() =
+        let trailingCatalog = {
+            catalog with
+                lines =
+                    catalog.lines
+                    |> Array.map (fun line ->
+                        if line.code = "101"
+                        then { line with name = "  Praha  –  Kolín  " }
+                        else line)
+        }
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57016" "Kolín" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+        let feed =
+            (CzPttToGtfs.convert trailingCatalog CzPttToGtfs.Gtfs [ value ]).feed
+        Assert.AreEqual(Some "  Praha  –  Kolín", feed.routes.[0].longName)
+        let info = feed.feedInfo.Value
+        Assert.AreEqual("Oběhy project (via JrUtil)", info.publisherName)
+        Assert.AreEqual("https://obehy.cz", info.publisherUrl)
+        Assert.AreEqual(Some "czptt:20251201T000000", info.version)
+        Assert.AreEqual(Some "admin@obehy.cz", info.contactEmail)
+
+        let root =
+            Path.Combine(Path.GetTempPath(), $"jrutil-czptt-feed-info-{Guid.NewGuid():N}")
+        try
+            Gtfs.gtfsFeedToFolder () root feed
+            let lines = File.ReadAllLines(Path.Combine(root, "feed_info.txt"))
+            Assert.IsTrue(lines.[0].Contains("feed_contact_email"))
+            Assert.IsTrue(lines.[1].Contains("\"czptt:20251201T000000\""))
+            Assert.IsTrue(lines.[1].Contains("\"admin@obehy.cz\""))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Category changes split linked trips with the real terminus``() =
         let value =
             message [
@@ -742,6 +780,23 @@ type CzPttToGtfsTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``Headsign remains the terminus when an intermediate point has the same name``() =
+        let value =
+            message [
+                location "10001" "Origin" "08:00:00" ["0001"] None []
+                location "10002" "Shared station" "08:10:00" ["0001"] None []
+                location "10003" "Shared station" "08:20:00" ["0001"] None []
+            ] []
+        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        Assert.AreEqual(Some "Shared station", feed.trips.[0].headsign)
+        let stopNames =
+            feed.stopTimes
+            |> Array.map (fun call ->
+                feed.stops |> Array.find (fun stop -> stop.id = call.stopId) |> fun stop -> stop.name)
+        Assert.AreEqual("Shared station", stopNames.[1])
+        Assert.AreEqual("Shared station", stopNames.[2])
+
+    [<TestMethod>]
     member _.``Ambiguous Nazev20 prefixes fall back to source names``() =
         let root =
             Path.Combine(Path.GetTempPath(), $"jrutil-czptt-name20-amb-{Guid.NewGuid():N}")
@@ -1011,6 +1066,26 @@ type CzPttToGtfsTests() =
         Assert.AreEqual(0, result.feed.trips.Length)
         Assert.AreEqual(0, result.operationalCalls.Length)
         Assert.AreEqual("no activity 0001 passenger call", result.rejectedJourneys.[0].reason)
+
+    [<TestMethod>]
+    member _.``PA with one selected GTFS call is rejected completely``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+            ] []
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(0, result.feed.routes.Length)
+        Assert.AreEqual(0, result.feed.trips.Length)
+        Assert.AreEqual(0, result.feed.stopTimes.Length)
+        Assert.AreEqual(0, result.feed.calendarExceptions.Value.Length)
+        Assert.AreEqual(0, result.feed.transfers.Value.Length)
+        Assert.AreEqual(0, result.feed.czTrips.Value.Length)
+        Assert.AreEqual(0, result.operationalCalls.Length)
+        Assert.AreEqual(0, result.acceptedPaIds.Length)
+        Assert.AreEqual(1, result.rejectedJourneys.Length)
+        Assert.AreEqual(
+            "fewer than two selected GTFS calls",
+            result.rejectedJourneys.[0].reason)
 
     [<TestMethod>]
     member _.``CZInconsistentTime root parameter rejects the complete PA``() =
