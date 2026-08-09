@@ -21,6 +21,20 @@ type OperationalPointMode =
     | Gtfs
     | Sidecar
 
+type BlockMode =
+    | Blocks
+    | NoBlocks
+
+type ConversionOptions = {
+    operationalPointMode: OperationalPointMode
+    blockMode: BlockMode
+}
+
+let defaultConversionOptions = {
+    operationalPointMode = Gtfs
+    blockMode = Blocks
+}
+
 type CatalogLine = {
     code: string
     mark: string
@@ -90,6 +104,13 @@ type CoordinateCountrySummary = {
     stopCount: int
 }
 
+type BoundaryAdjustment = {
+    paId: string
+    sourceSequence: int
+    appliedSequence: int option
+    reason: string
+}
+
 type CoordinateResolutionDiagnostic = {
     sourceLocationId: string
     countryCode: string
@@ -130,6 +151,7 @@ type ConversionResult = {
     cancelledPaIds: string array
     acceptedPaIds: string array
     sidecarBoundaryApproximations: string array
+    boundaryAdjustments: BoundaryAdjustment array
     idsDiagnostics: string array
     mergeDiagnostics: string array
     coordinateDiagnostics: CoordinateDiagnostics
@@ -156,22 +178,20 @@ type private Segment = {
     category: string
 }
 
-type private FallbackDisplayCandidate = {
-    routeId: string
-    paId: string
-    serviceDays: int
-    originIdentity: string * string
-    destinationIdentity: string * string
-    originName: string
-    destinationName: string
-}
-
 let emptyCatalog = {
     lines = [||]
     companies = [||]
     ids = [||]
     trainTypes = [||]
     commercialTrainTypes = [||]
+}
+
+type private Journey = {
+    index: int
+    calls: NormalizedCall array
+    parts: Segment array
+    responsibleRus: string array
+    routeType: string
 }
 
 let emptyPointNames: PointNameIndex = Map.empty
@@ -479,6 +499,97 @@ let private chronologyError (message: CzPttXml.CzpttcisMessage)
 let hasPublicLocations (message: CzPttXml.CzpttcisMessage) =
     message.CzpttInformation.CzpttLocation |> Array.exists isPublicLocation
 
+let private distinctInOrder values =
+    let seen = Collections.Generic.HashSet<_>()
+    values |> Seq.filter seen.Add |> Seq.toArray
+
+let private projectPassengerServiceBoundaries
+        (message: CzPttXml.CzpttcisMessage)
+        (calls: NormalizedCall array) =
+    if calls.Length < 2 then calls, [||]
+    else
+        let passengerIndexes =
+            calls
+            |> Array.filter (fun call -> call.passenger)
+            |> Array.map (fun call -> call.sourceIndex)
+        let ruTransitions =
+            [| for index in 1 .. calls.Length - 1 do
+                   if calls.[index - 1].responsibleRu <> calls.[index].responsibleRu then
+                       yield index |]
+        let serviceKey (call: NormalizedCall) =
+            call.lineCode, call.routeType, call.category
+        let events = ResizeArray<int * int * (string option * string * string)>()
+        let adjustments = ResizeArray<BoundaryAdjustment>()
+        for sourceIndex in 1 .. calls.Length - 1 do
+            let previousKey = serviceKey calls.[sourceIndex - 1]
+            let currentKey = serviceKey calls.[sourceIndex]
+            if previousKey <> currentKey then
+                let target =
+                    if calls.[sourceIndex].passenger then Some sourceIndex
+                    else
+                        passengerIndexes
+                        |> Array.tryFind (fun index -> index > sourceIndex)
+                        |> Option.map (fun nextPassenger ->
+                            let previousPassenger =
+                                passengerIndexes
+                                |> Array.filter (fun index -> index < sourceIndex)
+                                |> Array.tryLast
+                                |> Option.defaultValue -1
+                            ruTransitions
+                            |> Array.filter (fun index ->
+                                index > previousPassenger && index <= nextPassenger)
+                            |> Array.sortBy (fun index ->
+                                abs (index - sourceIndex), index)
+                            |> Array.tryHead
+                            |> Option.defaultValue nextPassenger)
+                match target with
+                | Some appliedIndex ->
+                    events.Add(appliedIndex, sourceIndex, currentKey)
+                    if appliedIndex <> sourceIndex then
+                        adjustments.Add {
+                            paId = paId message
+                            sourceSequence = sourceIndex + 1
+                            appliedSequence = Some (appliedIndex + 1)
+                            reason =
+                                if ruTransitions |> Array.contains appliedIndex
+                                then "coalesced-with-operator-boundary"
+                                else "deferred-to-next-passenger-call"
+                        }
+                | None ->
+                    adjustments.Add {
+                        paId = paId message
+                        sourceSequence = sourceIndex + 1
+                        appliedSequence = None
+                        reason = "ignored-after-final-passenger-call"
+                    }
+        let eventsByTarget =
+            events
+            |> Seq.groupBy (fun (target, _, _) -> target)
+            |> Seq.map (fun (target, values) ->
+                target,
+                values
+                |> Seq.maxBy (fun (_, source, _) -> source)
+                |> fun (_, _, value) -> value)
+            |> Map
+        let initialLine, initialRouteType, initialCategory = serviceKey calls.[0]
+        let mutable lineCode = initialLine
+        let mutable routeType = initialRouteType
+        let mutable category = initialCategory
+        let projected =
+            calls
+            |> Array.mapi (fun index call ->
+                match Map.tryFind index eventsByTarget with
+                | Some (line, route, trainCategory) ->
+                    lineCode <- line
+                    routeType <- route
+                    category <- trainCategory
+                | None -> ()
+                { call with
+                    lineCode = lineCode
+                    routeType = routeType
+                    category = category })
+        projected, adjustments.ToArray()
+
 let private selectedCalls (mode: OperationalPointMode)
                           (calls: NormalizedCall array) =
     let passengerIndexes =
@@ -535,18 +646,8 @@ let private segments (calls: NormalizedCall array) =
         let result = ResizeArray<Segment>()
         for index in 1 .. calls.Length - 1 do
             let currentKey = key calls.[index]
-            let previousLine, _, _, _ = segmentKey
-            let currentLine, _, _, _ = currentKey
-            let lineExpires =
-                match previousLine, currentLine with
-                | Some _, None -> true
-                | _ -> false
-            if currentKey <> segmentKey
-               && (index < calls.Length - 1 || lineExpires) then
-                let boundary =
-                    match previousLine, currentLine with
-                    | Some _, None -> index - 1
-                    | _ -> index
+            if currentKey <> segmentKey && index < calls.Length - 1 then
+                let boundary = index
                 let segmentCalls = calls.[start..boundary]
                 let line, ru, routeType, category = segmentKey
                 if segmentCalls.Length > 1 then
@@ -572,6 +673,45 @@ let private segments (calls: NormalizedCall array) =
         }
         result.ToArray()
 
+let private routeTypePriority value =
+    match value with
+    | "102" -> 0
+    | "105" -> 1
+    | "103" -> 2
+    | "106" -> 3
+    | _ -> 4
+
+let private journeys blockMode (calls: NormalizedCall array)
+                     (journeySegments: Segment array) =
+    match blockMode with
+    | Blocks ->
+        journeySegments
+        |> Array.map (fun segment -> {
+            index = segment.index
+            calls = segment.calls
+            parts = [| segment |]
+            responsibleRus = [| segment.responsibleRu |]
+            routeType = segment.routeType
+        })
+    | NoBlocks when calls.Length > 0 ->
+        let representative =
+            calls
+            |> Array.mapi (fun index call ->
+                routeTypePriority call.routeType, index, call)
+            |> Array.minBy (fun (priority, index, _) -> priority, index)
+            |> fun (_, _, call) -> call
+        [| {
+            index = 0
+            calls = calls
+            parts = journeySegments
+            responsibleRus =
+                calls
+                |> Seq.map (fun call -> call.responsibleRu)
+                |> distinctInOrder
+            routeType = representative.routeType
+        } |]
+    | NoBlocks -> [||]
+
 let private pointIdentity (call: NormalizedCall) =
     call.location.Location.CountryCodeIso,
     call.location.Location.LocationPrimaryCode
@@ -592,169 +732,33 @@ let private stopId (call: NormalizedCall) =
     | Some subsidiary ->
         $"{parent}:platform:{idComponent subsidiary.LocationSubsidiaryCode.Value}"
 
-let private stopName (call: NormalizedCall) =
-    call.location.Location.PrimaryLocationName
-    |> nullOpt
-    |> Option.defaultValue ""
+let private stopName (pointNames: PointNameIndex) (call: NormalizedCall) =
+    pointNames
+    |> Map.tryFind (pointIdentity call)
+    |> Option.defaultWith (fun () ->
+        call.location.Location.PrimaryLocationName
+        |> nullOpt
+        |> Option.defaultValue "")
 
-let private pointDisplayName (call: NormalizedCall) =
-    stopName call
+let private pointDisplayName pointNames (call: NormalizedCall) =
+    stopName pointNames call
     |> Option.ofObj
     |> Option.filter (String.IsNullOrWhiteSpace >> not)
     |> Option.defaultValue (
         let country, code = pointIdentity call
         $"{country} {code}")
 
-let private normalizedSpaces (value: string) =
-    Regex.Replace(value.Trim(), @"\s+", " ")
-
-let private knownMunicipalityRoots =
-    [
-        "CZ", "PRAHA", "Praha"
-        "CZ", "BRNO", "Brno"
-        "CZ", "OSTRAVA", "Ostrava"
-        "CZ", "PLZEŇ", "Plzeň"
-        "CZ", "OLOMOUC", "Olomouc"
-        "CZ", "LIBEREC", "Liberec"
-        "CZ", "ÚSTÍ N.L.", "Ústí nad Labem"
-        "CZ", "ÚSTÍ NAD LABEM", "Ústí nad Labem"
-        "CZ", "HRADEC KRÁLOVÉ", "Hradec Králové"
-        "CZ", "PARDUBICE", "Pardubice"
-        "CZ", "Č.BUDĚJOVICE", "České Budějovice"
-        "CZ", "ČESKÉ BUDĚJOVICE", "České Budějovice"
-        "CZ", "KARLOVY VARY", "Karlovy Vary"
-        "CZ", "MLADÁ BOLESLAV", "Mladá Boleslav"
-        "CZ", "DĚČÍN", "Děčín"
-        "CZ", "OPAVA", "Opava"
-        "CZ", "HAVÍŘOV", "Havířov"
-        "CZ", "KARVINÁ", "Karviná"
-        "CZ", "NYMBURK", "Nymburk"
-        "CZ", "PROSTĚJOV", "Prostějov"
-        "CZ", "PŘEROV", "Přerov"
-        "CZ", "KLADNO", "Kladno"
-        "CZ", "ZLÍN", "Zlín"
-        "CZ", "JIHLAVA", "Jihlava"
-        "CZ", "MOST", "Most"
-        "CZ", "TEPLICE", "Teplice"
-        "CZ", "BOHUMÍN", "Bohumín"
-        "AT", "WIEN", "Wien"
-        "AT", "LINZ", "Linz"
-        "AT", "SALZBURG", "Salzburg"
-        "AT", "GRAZ", "Graz"
-        "AT", "GMÜND", "Gmünd"
-        "DE", "DRESDEN", "Dresden"
-        "DE", "LEIPZIG", "Leipzig"
-        "DE", "NÜRNBERG", "Nürnberg"
-        "DE", "MÜNCHEN", "München"
-        "DE", "ZITTAU", "Zittau"
-        "DE", "BAD SCHANDAU", "Bad Schandau"
-        "PL", "WROCŁAW", "Wrocław"
-        "PL", "KATOWICE", "Katowice"
-        "PL", "GŁUCHOŁAZY", "Głuchołazy"
-        "PL", "CIESZYN", "Cieszyn"
-        "SK", "BRATISLAVA", "Bratislava"
-        "SK", "ŽILINA", "Žilina"
-        "SK", "KOŠICE", "Košice"
-        "SK", "ČADCA", "Čadca"
-    ]
-
-let private municipalityPointName (call: NormalizedCall) =
-    let source = pointDisplayName call |> normalizedSpaces
-    let country = call.location.Location.CountryCodeIso.ToUpperInvariant()
-    let upper = source.ToUpperInvariant()
-    let hasRootBoundary length =
-        upper.Length = length
-        || (upper.Length > length
-            && (Char.IsWhiteSpace(upper.[length])
-                || upper.[length] = '-'
-                || upper.[length] = ','))
-    knownMunicipalityRoots
-    |> List.tryPick (fun (expectedCountry, prefix, display) ->
-        if country = expectedCountry
-           && upper.StartsWith(prefix, StringComparison.Ordinal)
-           && hasRootBoundary prefix.Length
-        then Some display
-        else None)
-    |> Option.defaultWith (fun () ->
-        let replace pattern value =
-            Regex.Replace(
-                value,
-                pattern,
-                "",
-                RegexOptions.IgnoreCase ||| RegexOptions.CultureInvariant)
-            |> normalizedSpaces
-        source
-        |> replace @"\s*\([^)]*\)\s*$"
-        |> replace @"\s*/\s*(?:S\.?|SACHS\.?)\s*$"
-        |> replace @",\s*.+$"
-        |> replace (
-            @"\s+(?:" +
-            @"HLAVNÍ\s+NÁDRAŽÍ|HLAVNÁ\s+STANICA|HAUPTBAHNHOF|BAHNHOF|" +
-            @"HL\.?\s*N\.?|OS\.?\s*N\.?|DOL\.?\s*N\.?|D\.?\s*N\.?|" +
-            @"ZAST\.?|N?Z|HP|HBF|FBF" +
-            @")\s*$"))
-
-let private bestEffortShortPointName (value: string) =
-    let replace (pattern: string) (replacement: string) (name: string) =
-        Regex.Replace(
-            name,
-            pattern,
-            replacement,
-            RegexOptions.IgnoreCase ||| RegexOptions.CultureInvariant)
-
-    let compacted =
-        [
-            @"\bHauptbahnhof\b", "Hbf"
-            @"\bBahnhof\b", "Bf"
-            @"\bhlavná\s+stanica\b", "hl. st."
-            @"\bželezničná\s+stanica\b", "žel. st."
-            @"\ban\s+der\b", "a. d."
-            @"\bam\b", "a."
-            @"\bnad\b", "n."
-            @"\bpod\b", "p."
-            @"(\p{L}{6,})stadt\b", "$1st."
-        ]
-        |> List.fold (fun name (pattern, replacement) ->
-            replace pattern replacement name) (normalizedSpaces value)
-        |> normalizedSpaces
-
-    let abbreviated =
-        if compacted.Length <= 20 then compacted
-        else
-            let words =
-                compacted.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            if words.Length <= 2 then compacted
-            else
-                words
-                |> Array.mapi (fun index word ->
-                    if index > 0
-                        && index < words.Length - 1
-                        && word.Length > 3
-                    then $"{word.[0]}."
-                    else word)
-                |> String.concat " "
-
-    if abbreviated.Length <= 20 then abbreviated
-    else
-        let prefix =
-            abbreviated.Substring(0, 19).TrimEnd()
-                .TrimEnd([| ' '; '.'; ','; '-'; '–' |])
-        $"{prefix}."
-
-let private fallbackPointDisplayName (call: NormalizedCall) =
-    municipalityPointName call |> bestEffortShortPointName
-
 let private publicEndpoints (calls: NormalizedCall array) =
     let passengerCalls = calls |> Array.filter (fun call -> call.passenger)
     passengerCalls.[0], passengerCalls.[passengerCalls.Length - 1]
 
-let private stops (calls: NormalizedCall seq) =
+let private stops pointNames (calls: NormalizedCall seq) =
     calls
     |> Seq.collect (fun call ->
         let create id locationType parent platform = {
             id = id
             code = None
-            name = stopName call
+            name = stopName pointNames call
             description = None
             lat = None
             lon = None
@@ -789,26 +793,65 @@ let private lineForDate (catalog: CatalogSnapshot) (date: LocalDate) (code: stri
     |> Array.sortBy (fun line -> line.validFrom)
     |> Array.tryLast
 
-let private routeId (catalog: CatalogSnapshot) (date: LocalDate)
-                    (endpoints: NormalizedCall * NormalizedCall)
-                    (segment: Segment) =
-    match segment.lineCode with
-    | Some code when lineForDate catalog date code |> Option.isSome ->
-        $"czptt:route:line:{idComponent code}:{idComponent segment.responsibleRu}:" +
-        $"{idComponent segment.routeType}"
-    | _ ->
-        let firstIdentity, lastIdentity =
-            pointIdentity (fst endpoints), pointIdentity (snd endpoints)
-        let endpointA, endpointB =
-            if firstIdentity <= lastIdentity
-            then firstIdentity, lastIdentity
-            else lastIdentity, firstIdentity
-        $"czptt:route:fallback:{idComponent segment.responsibleRu}:" +
-        $"{idComponent segment.category}:{idComponent segment.routeType}:" +
-        $"{pointIdentityText endpointA}:{pointIdentityText endpointB}"
+type private JourneyLabel = {
+    identity: string
+    display: string
+    mappedLine: CatalogLine option
+}
 
-let private tripId (message: CzPttXml.CzpttcisMessage) (segment: Segment) =
-    $"czptt:trip:{idComponent (paId message)}:{segment.index + 1}"
+let private trainNumberForCalls (message: CzPttXml.CzpttcisMessage)
+                                (calls: NormalizedCall array) =
+    calls
+    |> Array.choose (fun call -> nullOpt call.location.OperationalTrainNumber)
+    |> Array.tryHead
+    |> Option.orElseWith (fun () -> nullOpt (trIdentifier message).Core)
+
+let private labelsForJourney catalog date message (journey: Journey) =
+    journey.parts
+    |> Seq.map (fun part ->
+        let mapped = part.lineCode |> Option.bind (lineForDate catalog date)
+        match part.lineCode, mapped with
+        | Some code, Some line -> {
+            identity = $"line:{code}"
+            display = line.mark
+            mappedLine = Some line
+          }
+        | _ ->
+            let number = trainNumberForCalls message part.calls
+            let numberKey = number |> Option.defaultValue ""
+            let display =
+                number
+                |> Option.map (fun value -> $"{part.category} {value}")
+                |> Option.defaultValue part.category
+            {
+                identity = $"train:{part.category}:{numberKey}"
+                display = display
+                mappedLine = None
+            })
+    |> distinctInOrder
+
+let private routeId blockMode catalog date message (journey: Journey) =
+    let labels = labelsForJourney catalog date message journey
+    match blockMode, journey.parts with
+    | Blocks, [| segment |] ->
+        match segment.lineCode with
+        | Some code when lineForDate catalog date code |> Option.isSome ->
+            $"czptt:route:line:{idComponent code}:" +
+            $"{idComponent segment.responsibleRu}:{idComponent segment.routeType}"
+        | _ ->
+            let number = trainNumberForCalls message segment.calls
+            $"czptt:route:fallback:{idComponent segment.responsibleRu}:" +
+            $"{idComponent segment.category}:{idComponent segment.routeType}:" +
+            $"{idComponent (number |> Option.defaultValue segment.category)}"
+    | _ ->
+        let signature =
+            labels |> Array.map (fun label -> label.identity) |> String.concat "/"
+        let operators = journey.responsibleRus |> String.concat "/"
+        $"czptt:route:combined:{idComponent signature}:" +
+        $"{idComponent operators}:{idComponent journey.routeType}"
+
+let private tripId (message: CzPttXml.CzpttcisMessage) (journey: Journey) =
+    $"czptt:trip:{idComponent (paId message)}:{journey.index + 1}"
 
 let private serviceId (message: CzPttXml.CzpttcisMessage) =
     $"czptt:service:{idComponent (paId message)}:calendar:journey"
@@ -816,18 +859,12 @@ let private blockId (message: CzPttXml.CzpttcisMessage) =
     $"czptt:block:{idComponent (paId message)}"
 let private agencyId (code: string) = $"czptt:agency:{idComponent code}"
 
-let private trainNumber (message: CzPttXml.CzpttcisMessage)
-                        (segment: Segment) =
-    segment.calls
-    |> Array.choose (fun call -> nullOpt call.location.OperationalTrainNumber)
-    |> Array.tryHead
-    |> Option.orElseWith (fun () -> nullOpt (trIdentifier message).Core)
-
 let private tripShortName (message: CzPttXml.CzpttcisMessage)
-                          (segment: Segment) =
-    trainNumber message segment
-    |> Option.map (fun number -> $"{segment.category} {number}")
-    |> Option.orElse (Some segment.category)
+                          (journey: Journey) =
+    let category = journey.calls.[0].category
+    trainNumberForCalls message journey.calls
+    |> Option.map (fun number -> $"{category} {number}")
+    |> Option.orElse (Some category)
 
 let private calendarExceptions (message: CzPttXml.CzpttcisMessage) =
     let calendar = message.CzpttInformation.PlannedCalendar
@@ -852,14 +889,14 @@ let private gtfsTimeShift (calls: NormalizedCall array) =
     if minimum >= 0 then 0
     else ((-minimum + 86399) / 86400) * 86400
 
-let private stopTimes message shift segment =
-    segment.calls
+let private stopTimes message shift journey =
+    journey.calls
     |> Array.map (fun call ->
         let request = hasActivity RequestStop call.location
         let regular =
             if request then CoordinationWithDriver else RegularlyScheduled
         {
-            tripId = tripId message segment
+            tripId = tripId message journey
             arrivalTime =
                 call.arrival
                 |> Option.map (fun value ->
@@ -893,55 +930,68 @@ let private routeColor routeType =
     | "105" -> "4c1d95"
     | _ -> "475569"
 
-let private route catalog date endpoints fallbackDisplayNames segment =
-    let mapped =
-        segment.lineCode |> Option.bind (lineForDate catalog date)
-    let id = routeId catalog date endpoints segment
-    let fallbackShortName =
-        Map.tryFind id fallbackDisplayNames
-        |> Option.map (fun (origin, destination) ->
-            $"{segment.category} {origin} – {destination}")
+let private agencyGroupId codes =
+    match codes with
+    | [| code |] -> agencyId code
+    | codes ->
+        let codeKey = codes |> String.concat "/" |> idComponent
+        $"czptt:agency-group:{codeKey}"
+
+let private journeyAgencyId journey =
+    agencyGroupId journey.responsibleRus
+
+let private route blockMode catalog date message journey =
+    let labels = labelsForJourney catalog date message journey
+    let mappedLongName =
+        match labels with
+        | [| label |] -> label.mappedLine |> Option.map (fun line -> line.name)
+        | _ -> None
     {
-        id = id
-        agencyId = Some (agencyId segment.responsibleRu)
+        id = routeId blockMode catalog date message journey
+        agencyId = Some (journeyAgencyId journey)
         shortName =
-            mapped
-            |> Option.map (fun line -> line.mark)
-            |> Option.orElse fallbackShortName
-        longName = mapped |> Option.map (fun line -> line.name)
+            labels
+            |> Array.map (fun label -> label.display)
+            |> distinctInOrder
+            |> String.concat "/"
+            |> Some
+        longName = mappedLongName
         description = None
-        routeType = segment.routeType
+        routeType = journey.routeType
         url = None
-        color = Some (routeColor segment.routeType)
+        color = Some (routeColor journey.routeType)
         textColor = Some "ffffff"
         sortOrder = None
     }
 
-let private trip catalog date message endpoints segment =
+let private trip pointNames blockMode catalog date message endpoints journey =
     let finalCall = snd endpoints
     {
-        routeId = routeId catalog date endpoints segment
+        routeId = routeId blockMode catalog date message journey
         serviceId = serviceId message
-        id = tripId message segment
-        headsign = Some (pointDisplayName finalCall)
-        shortName = tripShortName message segment
+        id = tripId message journey
+        headsign = Some (pointDisplayName pointNames finalCall)
+        shortName = tripShortName message journey
         directionId = None
-        blockId = Some (blockId message)
+        blockId =
+            match blockMode with
+            | Blocks -> Some (blockId message)
+            | NoBlocks -> None
         shapeId = None
         wheelchairAccessible = None
         bikesAllowed = None
     }
 
-let private transfers message (segments: Segment array) =
-    segments
+let private transfers message (journeys: Journey array) =
+    journeys
     |> Array.pairwise
-    |> Array.map (fun (fromSegment, toSegment) -> {
+    |> Array.map (fun (fromJourney, toJourney) -> {
         fromStopId = None
         toStopId = None
         fromRouteId = None
         toRouteId = None
-        fromTripId = Some (tripId message fromSegment)
-        toTripId = Some (tripId message toSegment)
+        fromTripId = Some (tripId message fromJourney)
+        toTripId = Some (tripId message toJourney)
         transferType = 4
         minTransferTime = None
     })
@@ -966,6 +1016,25 @@ let private agency catalog code =
         id = Some (agencyId code)
         name = company |> Option.map (fun value -> value.name) |> Option.defaultValue $"Unknown {code}"
         url = Some agencyUrl
+        timezone = "Europe/Prague"
+        lang = Some "cs"
+        phone = None
+        fareUrl = None
+        email = None
+    }
+
+let private compositeAgency catalog (codes: string array) =
+    let names =
+        codes
+        |> Array.map (fun code ->
+            catalog.companies
+            |> Array.tryFind (fun company -> company.code = code)
+            |> Option.map (fun company -> company.name)
+            |> Option.defaultValue $"Unknown {code}")
+    {
+        id = Some (agencyGroupId codes)
+        name = String.concat " / " names
+        url = Some "https://portal.cisjr.cz/"
         timezone = "Europe/Prague"
         lang = Some "cs"
         phone = None
@@ -1044,60 +1113,15 @@ let private feedInfo (messages: CzPttXml.CzpttcisMessage array) =
             version = None
         }
 
-let private activeServiceDays (message: CzPttXml.CzpttcisMessage) =
-    message.CzpttInformation.PlannedCalendar.BitmapDays
-    |> Seq.filter ((=) '1')
-    |> Seq.length
-
-let private fallbackDisplayNames
-        (catalog: CatalogSnapshot)
-        (accepted:
-            ResizeArray<
-                CzPttXml.CzpttcisMessage * NormalizedCall array * Segment array>) =
-    accepted
-    |> Seq.collect (fun (message, calls, journeySegments) ->
-        let date =
-            LocalDate.FromDateTime(
-                message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
-        let endpoints = publicEndpoints calls
-        journeySegments
-        |> Seq.choose (fun segment ->
-            match segment.lineCode |> Option.bind (lineForDate catalog date) with
-            | Some _ -> None
-            | None ->
-                Some {
-                    routeId = routeId catalog date endpoints segment
-                    paId = paId message
-                    serviceDays = activeServiceDays message
-                    originIdentity = pointIdentity (fst endpoints)
-                    destinationIdentity = pointIdentity (snd endpoints)
-                    originName = fallbackPointDisplayName (fst endpoints)
-                    destinationName = fallbackPointDisplayName (snd endpoints)
-                }))
-    |> Seq.distinctBy (fun candidate -> candidate.routeId, candidate.paId)
-    |> Seq.groupBy (fun candidate -> candidate.routeId)
-    |> Seq.map (fun (id, candidates) ->
-        let selected =
-            candidates
-            |> Seq.groupBy (fun candidate ->
-                candidate.originIdentity, candidate.destinationIdentity)
-            |> Seq.map (fun (_, direction) ->
-                let values = direction |> Seq.toArray
-                let representative = values |> Array.minBy (fun value -> value.paId)
-                values |> Array.sumBy (fun value -> value.serviceDays),
-                representative)
-            |> Seq.sortBy (fun (serviceDays, representative) ->
-                -serviceDays, representative.paId)
-            |> Seq.head
-            |> snd
-        id, (selected.originName, selected.destinationName))
-    |> Map
-
-let convertWithPointNames catalog mode _pointNames
+let convertWithPointNamesAndOptions catalog options pointNames
                           (messages: CzPttXml.CzpttcisMessage seq) =
-    let accepted = ResizeArray<CzPttXml.CzpttcisMessage * NormalizedCall array * Segment array>()
+    let accepted =
+        ResizeArray<
+            CzPttXml.CzpttcisMessage * NormalizedCall array *
+            NormalizedCall array * Journey array>()
     let rejected = ResizeArray<RejectedJourney>()
     let approximations = ResizeArray<string>()
+    let boundaryAdjustments = ResizeArray<BoundaryAdjustment>()
     for message in messages |> Seq.sortBy paId do
         let calls = normalize catalog message
         if not (calls |> Array.exists (fun call -> call.passenger)) then
@@ -1112,104 +1136,113 @@ let convertWithPointNames catalog mode _pointNames
             match chronologyError message calls with
             | Some error -> rejected.Add error
             | None ->
-                let selected = selectedCalls mode calls
-                let journeySegments = segments selected
-                if mode = Sidecar then
+                let projected, adjustments =
+                    projectPassengerServiceBoundaries message calls
+                boundaryAdjustments.AddRange(adjustments)
+                let selected =
+                    selectedCalls options.operationalPointMode projected
+                let journeySegments = selected |> segments
+                let generatedJourneys =
+                    journeys options.blockMode selected journeySegments
+                if options.operationalPointMode = Sidecar then
                     let exactChanges =
                         calls
                         |> Array.pairwise
                         |> Array.choose (fun (left, right) ->
-                            let leftKey =
-                                left.lineCode, left.responsibleRu,
-                                left.routeType, left.category
-                            let rightKey =
-                                right.lineCode, right.responsibleRu,
-                                right.routeType, right.category
-                            if leftKey <> rightKey && not right.passenger
-                            then
-                                let placement =
-                                    match left.lineCode, right.lineCode with
-                                    | Some _, None -> "preceding passenger call"
-                                    | _ -> "following passenger call"
-                                Some (right.sourceIndex, placement)
+                            if left.responsibleRu <> right.responsibleRu
+                               && not right.passenger then
+                                Some right.sourceIndex
                             else None)
                     if exactChanges.Length > 0 then
-                        let sourceIndex, placement = exactChanges.[0]
+                        let sourceIndex = exactChanges.[0]
                         approximations.Add(
-                            $"{paId message}: service boundary moved from source sequence " +
-                            $"{sourceIndex + 1} to the {placement}")
-                accepted.Add(message, calls, journeySegments)
+                            $"{paId message}: operator boundary moved from source sequence " +
+                            $"{sourceIndex + 1} to the following passenger call")
+                accepted.Add(message, calls, selected, generatedJourneys)
 
-    let acceptedMessages = accepted |> Seq.map (fun (message, _, _) -> message) |> Seq.toArray
-    let fallbackDisplays = fallbackDisplayNames catalog accepted
+    let acceptedMessages =
+        accepted |> Seq.map (fun (message, _, _, _) -> message) |> Seq.toArray
     let routes =
         accepted
-        |> Seq.collect (fun (message, calls, journeySegments) ->
+        |> Seq.collect (fun (message, _, _, generatedJourneys) ->
             let date =
                 LocalDate.FromDateTime(
                     message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
-            let endpoints = publicEndpoints calls
-            journeySegments
-            |> Seq.map (route catalog date endpoints fallbackDisplays))
+            generatedJourneys
+            |> Seq.map (route options.blockMode catalog date message))
         |> Seq.distinctBy (fun value -> value.id)
         |> Seq.sortBy (fun value -> value.id)
         |> Seq.toArray
     let generatedTrips =
         accepted
-        |> Seq.collect (fun (message, calls, journeySegments) ->
+        |> Seq.collect (fun (message, calls, _, generatedJourneys) ->
             let date =
                 LocalDate.FromDateTime(
                     message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
             let endpoints = publicEndpoints calls
-            journeySegments
-            |> Seq.map (fun segment ->
-                message, segment, trip catalog date message endpoints segment))
+            generatedJourneys
+            |> Seq.map (fun journey ->
+                message, journey,
+                trip pointNames options.blockMode catalog date message endpoints journey))
         |> Seq.toArray
     let trips = generatedTrips |> Array.map (fun (_, _, value) -> value)
     let allSelectedCalls =
-        accepted
-        |> Seq.collect (fun (_, calls, _) -> selectedCalls mode calls)
+        accepted |> Seq.collect (fun (_, _, selected, _) -> selected)
         |> Seq.toArray
     let allStopTimes =
         accepted
-        |> Seq.collect (fun (message, calls, journeySegments) ->
+        |> Seq.collect (fun (message, calls, _, generatedJourneys) ->
             let shift = gtfsTimeShift calls
-            journeySegments |> Seq.collect (stopTimes message shift))
+            generatedJourneys |> Seq.collect (stopTimes message shift))
         |> Seq.toArray
     let allTransfers =
         accepted
-        |> Seq.collect (fun (message, _, journeySegments) ->
-            transfers message journeySegments)
+        |> Seq.collect (fun (message, _, _, generatedJourneys) ->
+            transfers message generatedJourneys)
         |> Seq.toArray
     let allCalendarExceptions =
         acceptedMessages |> Array.collect calendarExceptions
     let agencyCodes =
         accepted
-        |> Seq.collect (fun (_, _, journeySegments) ->
-            journeySegments |> Seq.map (fun segment -> segment.responsibleRu))
+        |> Seq.collect (fun (_, _, _, generatedJourneys) ->
+            generatedJourneys |> Seq.collect (fun journey -> journey.responsibleRus))
         |> Seq.distinct
         |> Seq.sort
         |> Seq.toArray
+    let publicLineRouteIds =
+        accepted
+        |> Seq.collect (fun (message, _, _, generatedJourneys) ->
+            let date =
+                LocalDate.FromDateTime(
+                    message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
+            generatedJourneys
+            |> Seq.choose (fun journey ->
+                let hasMappedLine =
+                    labelsForJourney catalog date message journey
+                    |> Array.exists (fun label -> label.mappedLine.IsSome)
+                if hasMappedLine then
+                    Some (routeId options.blockMode catalog date message journey)
+                else None))
+        |> Set
     let czRoutes =
         routes
         |> Array.map (fun value -> {
             routeId = value.id
             cisLineId = None
             publicLineNumber =
-                if value.id.StartsWith(
-                       "czptt:route:line:", StringComparison.Ordinal)
+                if Set.contains value.id publicLineRouteIds
                 then value.shortName
                 else None
             sourceProvenance = "czptt"
         })
     let segmentByCall =
         accepted
-        |> Seq.collect (fun (message, _, journeySegments) ->
-            journeySegments
-            |> Seq.collect (fun segment ->
-                segment.calls
+        |> Seq.collect (fun (message, _, _, generatedJourneys) ->
+            generatedJourneys
+            |> Seq.collect (fun journey ->
+                journey.calls
                 |> Seq.map (fun call ->
-                    (paId message, call.sourceIndex), tripId message segment)))
+                    (paId message, call.sourceIndex), tripId message journey)))
         |> Seq.groupBy fst
         |> Seq.map (fun (key, values) ->
             key, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
@@ -1217,7 +1250,7 @@ let convertWithPointNames catalog mode _pointNames
     let idsDiagnostics = ResizeArray<string>()
     let tripStopZones =
         accepted
-        |> Seq.collect (fun (message, calls, _) ->
+        |> Seq.collect (fun (message, calls, _, _) ->
             let date =
                 LocalDate.FromDateTime(
                     message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
@@ -1306,7 +1339,7 @@ let convertWithPointNames catalog mode _pointNames
         |> Map
     let operationalCalls =
         accepted
-        |> Seq.collect (fun (message, calls, _) ->
+        |> Seq.collect (fun (message, calls, _, _) ->
             calls |> Seq.map (fun call ->
                 let subsidiary =
                     nullOpt call.location.Location.LocationSubsidiaryIdentification
@@ -1315,7 +1348,7 @@ let convertWithPointNames catalog mode _pointNames
                     sourceSequence = call.sourceIndex + 1
                     countryCode = call.location.Location.CountryCodeIso
                     primaryCode = call.location.Location.LocationPrimaryCode
-                    name = stopName call
+                    name = stopName pointNames call
                     passengerCall = call.passenger
                     arrivalSeconds = call.arrival
                     departureSeconds = call.departure
@@ -1335,11 +1368,24 @@ let convertWithPointNames catalog mode _pointNames
                 }))
         |> Seq.toArray
     let feedStops =
-        stops allSelectedCalls
+        stops pointNames allSelectedCalls
         |> Array.map (fun value ->
             { value with zoneId = Map.tryFind value.id unambiguousStopZones })
+    let compositeAgencyCodes =
+        accepted
+        |> Seq.collect (fun (_, _, _, generatedJourneys) ->
+            generatedJourneys
+            |> Seq.choose (fun journey ->
+                if journey.responsibleRus.Length > 1
+                then Some journey.responsibleRus else None))
+        |> Seq.distinct
+        |> Seq.toArray
     let feed = {
-        agencies = agencyCodes |> Array.map (agency catalog)
+        agencies =
+            Array.append
+                (agencyCodes |> Array.map (agency catalog))
+                (compositeAgencyCodes |> Array.map (compositeAgency catalog))
+            |> Array.sortBy (fun value -> value.id)
         stops = feedStops
         routes = routes
         trips = trips
@@ -1351,11 +1397,11 @@ let convertWithPointNames catalog mode _pointNames
         czRoutes = Some czRoutes
         czTrips =
             generatedTrips
-            |> Array.map (fun (message, segment, value) -> {
+            |> Array.map (fun (message, journey, value) -> {
                 tripId = value.id
                 cisLineId = None
                 cisTripId = None
-                trainNumber = trainNumber message segment
+                trainNumber = trainNumberForCalls message journey.calls
                 sourceTripIds =
                     Some (
                         $"PA={paId message}|" +
@@ -1374,6 +1420,7 @@ let convertWithPointNames catalog mode _pointNames
         cancelledPaIds = [||]
         acceptedPaIds = acceptedMessages |> Array.map paId
         sidecarBoundaryApproximations = approximations.ToArray()
+        boundaryAdjustments = boundaryAdjustments.ToArray()
         idsDiagnostics = idsDiagnostics.ToArray()
         mergeDiagnostics = [||]
         coordinateDiagnostics = {
@@ -1394,8 +1441,20 @@ let convertWithPointNames catalog mode _pointNames
         }
     }
 
+let convertWithOptions catalog options messages =
+    convertWithPointNamesAndOptions catalog options emptyPointNames messages
+
+let convertWithPointNames catalog mode pointNames messages =
+    convertWithPointNamesAndOptions catalog {
+        operationalPointMode = mode
+        blockMode = Blocks
+    } pointNames messages
+
 let convert catalog mode messages =
-    convertWithPointNames catalog mode emptyPointNames messages
+    convertWithOptions catalog {
+        operationalPointMode = mode
+        blockMode = Blocks
+    } messages
 
 let gtfsFeedWithOptions catalog mode messages =
     (convert catalog mode messages).feed
@@ -1406,6 +1465,12 @@ let gtfsFeedMergedWithOptions catalog mode (messages: (string * CzpttMessage) se
     let merger = CzPttMerger()
     merger.ProcessAll(messages)
     gtfsFeedWithOptions catalog mode merger.Messages.Values
+
+let gtfsFeedMergedWithConversionOptions
+        catalog options (messages: (string * CzpttMessage) seq) =
+    let merger = CzPttMerger()
+    merger.ProcessAll(messages)
+    (convertWithOptions catalog options merger.Messages.Values).feed
 
 let gtfsFeedMergedWithOptionsAndPointNames
         catalog mode pointNames (messages: (string * CzpttMessage) seq) =

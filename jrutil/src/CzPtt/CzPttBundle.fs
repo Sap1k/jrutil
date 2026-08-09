@@ -11,6 +11,7 @@ open System.Text
 open System.Text.Json
 open System.Text.RegularExpressions
 open System.Threading
+open FSharp.Data
 open OsmSharp
 open OsmSharp.Streams
 open Parquet
@@ -97,6 +98,7 @@ let private idsSystem (catalog: CzPttToGtfs.CatalogSnapshot) code =
 
 type private Sr70CoordinateIndex = {
     coordinates: Map<string * string, double * double>
+    names: CzPttToGtfs.PointNameIndex
     conflictingCodes: string array
     invalidCodes: string array
 }
@@ -105,18 +107,26 @@ let private loadSr70Coordinates path =
     match path with
     | None -> {
         coordinates = Map.empty
+        names = Map.empty
         conflictingCodes = [||]
         invalidCodes = [||]
       }
     | Some file ->
         let parsed =
-            File.ReadLines(file)
-            |> Seq.choose (fun line ->
-                let fields = line.Split(',')
+            CsvFile.Parse(File.ReadAllText(file), hasHeaders = false).Rows
+            |> Seq.choose (fun row ->
+                let fields = row.Columns
                 if fields.Length < 1 || fields.[0].Length < 5 then None
                 else
                     let code = fields.[0].Substring(0, 5)
-                    if fields.Length < 4 then Some (code, None)
+                    let name =
+                        if fields.Length < 2 then None
+                        else
+                            let value = fields.[1].Trim()
+                            if String.IsNullOrWhiteSpace(value) || value = "-"
+                            then None
+                            else Some value
+                    if fields.Length < 4 then Some (code, name, None)
                     else
                         match Double.TryParse(
                                   fields.[fields.Length - 2],
@@ -129,12 +139,12 @@ let private loadSr70Coordinates path =
                         | (true, latitude), (true, longitude)
                             when latitude >= -90. && latitude <= 90.
                                  && longitude >= -180. && longitude <= 180. ->
-                            Some (code, Some (latitude, longitude))
-                        | _ -> Some (code, None))
+                            Some (code, name, Some (latitude, longitude))
+                        | _ -> Some (code, name, None))
             |> Seq.toArray
         let grouped =
             parsed
-            |> Seq.choose (fun (code, coordinates) ->
+            |> Seq.choose (fun (code, _, coordinates) ->
                 coordinates |> Option.map (fun value -> code, value))
             |> Seq.groupBy fst
             |> Seq.map (fun (code, values) ->
@@ -142,7 +152,7 @@ let private loadSr70Coordinates path =
             |> Seq.toArray
         let invalidCodes =
             parsed
-            |> Seq.choose (fun (code, coordinates) ->
+            |> Seq.choose (fun (code, _, coordinates) ->
                 if coordinates.IsNone then Some code else None)
             |> Seq.distinct
             |> Seq.sort
@@ -154,6 +164,16 @@ let private loadSr70Coordinates path =
                     if coordinates.Length = 1
                        && not (Array.contains code invalidCodes)
                     then Some (("CZ", code), coordinates.[0])
+                    else None)
+                |> Map
+            names =
+                parsed
+                |> Seq.choose (fun (code, name, _) ->
+                    name |> Option.map (fun value -> code, value))
+                |> Seq.groupBy fst
+                |> Seq.choose (fun (code, values) ->
+                    let names = values |> Seq.map snd |> Seq.distinct |> Seq.toArray
+                    if names.Length = 1 then Some (("CZ", code), names.[0])
                     else None)
                 |> Map
             conflictingCodes =
@@ -418,9 +438,10 @@ let private distanceMeters (latitude1, longitude1) (latitude2, longitude2) =
           * Math.Sin(dLongitude / 2.) ** 2.
     6371000. * 2. * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1. - a))
 
-let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
-                              _sr70Name20Path osmPath osmAliasesPath
-                              (progress: string -> string -> unit) =
+let writeSidecarsWithProgressAndOptions catalog options inputPath outputDirectory
+                                       sr70Path _sr70Name20Path osmPath
+                                       osmAliasesPath
+                                       (progress: string -> string -> unit) =
     Directory.CreateDirectory(outputDirectory) |> ignore
     progress "parse-input" "started"
     let merger = CzPttMerge.CzPttMerger()
@@ -443,15 +464,16 @@ let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
     let cancelledPaIds =
         Set.difference sourcePaIds survivingPaIds |> Set.toArray |> Array.sort
     progress "prepare-identities" "completed"
-    progress "convert-gtfs" "started"
-    let rawResult =
-        CzPttToGtfs.convert catalog mode messages
-    progress "convert-gtfs" "completed"
     progress "load-coordinate-sources" "started"
     let sr70 = loadSr70Coordinates sr70Path
     let osmCandidates = loadOsmCandidates osmPath
     let osmAliases = loadAliases osmAliasesPath
     progress "load-coordinate-sources" "completed"
+    progress "convert-gtfs" "started"
+    let rawResult =
+        CzPttToGtfs.convertWithPointNamesAndOptions
+            catalog options sr70.names messages
+    progress "convert-gtfs" "completed"
     progress "index-stop-times" "started"
     let pointIdentityByStopId =
         rawResult.operationalCalls
@@ -1371,12 +1393,27 @@ let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
 
     result
 
+let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
+                              sr70Name20Path osmPath osmAliasesPath progress =
+    writeSidecarsWithProgressAndOptions
+        catalog {
+            operationalPointMode = mode
+            blockMode = CzPttToGtfs.Blocks
+        } inputPath outputDirectory sr70Path sr70Name20Path osmPath
+        osmAliasesPath progress
+
 let writeSidecars catalog mode inputPath outputDirectory sr70Path sr70Name20Path
                   osmPath osmAliasesPath =
     writeSidecarsWithProgress
         catalog mode inputPath outputDirectory sr70Path sr70Name20Path
         osmPath osmAliasesPath
         (fun _ _ -> ())
+
+let writeSidecarsWithOptions catalog options inputPath outputDirectory sr70Path
+                             sr70Name20Path osmPath osmAliasesPath =
+    writeSidecarsWithProgressAndOptions
+        catalog options inputPath outputDirectory sr70Path sr70Name20Path
+        osmPath osmAliasesPath (fun _ _ -> ())
 
 let writeManifest outputDirectory =
     let textRows path =

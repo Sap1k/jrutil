@@ -132,7 +132,10 @@ type CzPttToGtfsTests() =
                     validTo = Some (LocalDate(2026, 12, 12))
                 }
             |]
-            companies = [| { code = "54"; name = "České dráhy"; url = None } |]
+            companies = [|
+                { code = "54"; name = "České dráhy"; url = None }
+                { code = "80"; name = "DB"; url = None }
+            |]
             ids = [|
                 {
                     code = "11"
@@ -290,7 +293,7 @@ type CzPttToGtfsTests() =
         Assert.AreEqual(Some "ffffff", unknownRoute.textColor)
 
     [<TestMethod>]
-    member _.``Fallback corridors group reverse directions and retain raw train numbers``() =
+    member _.``Fallback routes use train designations and retain raw train numbers``() =
         let outbound =
             message [
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
@@ -312,7 +315,7 @@ type CzPttToGtfsTests() =
         let route = feed.routes.[0]
         Assert.IsTrue(
             route.id.StartsWith("czptt:route:fallback:", StringComparison.Ordinal))
-        Assert.AreEqual(Some "RJ Praha – Břeclav", route.shortName)
+        Assert.AreEqual(Some "RJ 01234", route.shortName)
         Assert.AreEqual(None, route.longName)
         Assert.IsTrue(
             feed.trips
@@ -377,6 +380,201 @@ type CzPttToGtfsTests() =
         Assert.AreEqual(1, feed.transfers.Value.Length)
 
     [<TestMethod>]
+    member _.``No blocks combines unique labels into one trip``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112" ]
+                location "54357" "Břeclav" "09:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "54358" "Lanžhot" "09:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+        let result =
+            CzPttToGtfs.convertWithOptions catalog {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.NoBlocks
+            } [ value ]
+        Assert.AreEqual(1, result.feed.trips.Length)
+        Assert.AreEqual(None, result.feed.trips.[0].blockId)
+        Assert.AreEqual(0, result.feed.transfers.Value.Length)
+        Assert.AreEqual(Some "S1/S12", result.feed.routes.[0].shortName)
+        Assert.AreEqual(None, result.feed.routes.[0].longName)
+        Assert.AreEqual(
+            Some "S1/S12", result.feed.czRoutes.Value.[0].publicLineNumber)
+        Assert.IsTrue(
+            result.operationalCalls
+            |> Array.forall (fun call ->
+                call.generatedTripIds = [| result.feed.trips.[0].id |]))
+
+    [<TestMethod>]
+    member _.``No blocks combines lines fallbacks and operators``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None []
+                location "54357" "Břeclav" "09:00:00" ["0001"] None []
+            ] [ "CZIPTS", "11|CZ57076||CZ54357||" ]
+            |> setCommercialType "Os"
+        value.CzpttInformation.CzpttLocation.[1].ResponsibleRu <- "80"
+        value.CzpttInformation.CzpttLocation.[2].ResponsibleRu <- "80"
+        value.CzpttInformation.CzpttLocation.[3].ResponsibleRu <- "54"
+        let result =
+            CzPttToGtfs.convertWithOptions catalog {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.NoBlocks
+            } [ value ]
+        Assert.AreEqual(Some "S1/Os 01234", result.feed.routes.[0].shortName)
+        let routeAgency = result.feed.routes.[0].agencyId.Value
+        let composite =
+            result.feed.agencies
+            |> Array.find (fun value -> value.id = Some routeAgency)
+        Assert.AreEqual("České dráhy / DB", composite.name)
+        Assert.IsTrue(result.feed.czTripStopZones.Value.Length > 0)
+        Assert.IsTrue(
+            result.feed.czTripStopZones.Value
+            |> Array.forall (fun zone -> zone.tripId = result.feed.trips.[0].id))
+
+    [<TestMethod>]
+    member _.``Internal line changes move to the next passenger call``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "93001" "Praha hl.n. LC601" "08:01:00" [] None
+                    [ "CZPassengerServiceNumber", "112" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112" ]
+            ] []
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let oldRoute = result.feed.routes |> Array.find (fun r -> r.shortName = Some "S1")
+        let oldTrip = result.feed.trips |> Array.find (fun t -> t.routeId = oldRoute.id)
+        let internalStopId = "czptt:stop:CZ:93001:unspecified"
+        Assert.IsTrue(
+            result.feed.stopTimes
+            |> Array.exists (fun call ->
+                call.tripId = oldTrip.id && call.stopId = internalStopId))
+        Assert.IsTrue(
+            result.boundaryAdjustments
+            |> Array.exists (fun adjustment ->
+                adjustment.sourceSequence = 2
+                && adjustment.appliedSequence = Some 3
+                && adjustment.reason = "deferred-to-next-passenger-call"))
+
+    [<TestMethod>]
+    member _.``Line and operator changes in one interstop span share a boundary``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "93001" "Border" "08:05:00" [] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "93002" "Line marker" "08:06:00" [] None
+                    [ "CZPassengerServiceNumber", "112" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112" ]
+            ] []
+        for index in 1 .. 4 do
+            value.CzpttInformation.CzpttLocation.[index].ResponsibleRu <- "80"
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(2, result.feed.trips.Length)
+        CollectionAssert.AreEquivalent(
+            [| "S1"; "S12" |],
+            result.feed.routes |> Array.choose (fun route -> route.shortName))
+        Assert.IsTrue(
+            result.boundaryAdjustments
+            |> Array.exists (fun adjustment ->
+                adjustment.sourceSequence = 3
+                && adjustment.appliedSequence = Some 2
+                && adjustment.reason = "coalesced-with-operator-boundary"))
+
+    [<TestMethod>]
+    member _.``No blocks selects the highest service route type``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+        value.CzpttInformation.CzpttLocation.[0].CommercialTrafficType <- "Os"
+        value.CzpttInformation.CzpttLocation.[1].CommercialTrafficType <- "R"
+        value.CzpttInformation.CzpttLocation.[2].CommercialTrafficType <- "R"
+        let result =
+            CzPttToGtfs.convertWithOptions catalog {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.NoBlocks
+            } [ value ]
+        Assert.AreEqual("103", result.feed.routes.[0].routeType)
+        Assert.AreEqual(Some "b45309", result.feed.routes.[0].color)
+
+    [<TestMethod>]
+    member _.``Unknown catalog lines use the train designation fallback``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "999" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "999" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "999" ]
+            ] []
+            |> setCommercialType "Os"
+        let result =
+            CzPttToGtfs.convertWithOptions catalog {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.NoBlocks
+            } [ value ]
+        Assert.AreEqual(Some "Os 01234", result.feed.routes.[0].shortName)
+        Assert.AreEqual(None, result.feed.czRoutes.Value.[0].publicLineNumber)
+
+    [<TestMethod>]
+    member _.``Agency-only internal boundaries stay exact or are diagnosed``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "93001" "Border" "08:05:00" [] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57016" "Nymburk" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+        for index in 1 .. 3 do
+            value.CzpttInformation.CzpttLocation.[index].ResponsibleRu <- "80"
+        let gtfs = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let sidecar = CzPttToGtfs.convert catalog CzPttToGtfs.Sidecar [ value ]
+        let internalStopId = "czptt:stop:CZ:93001:unspecified"
+        Assert.AreEqual(2, gtfs.feed.trips.Length)
+        Assert.AreEqual(2, sidecar.feed.trips.Length)
+        Assert.AreEqual(
+            2,
+            gtfs.feed.stopTimes
+            |> Array.filter (fun call -> call.stopId = internalStopId)
+            |> Array.length)
+        Assert.IsFalse(
+            sidecar.feed.stopTimes
+            |> Array.exists (fun call -> call.stopId = internalStopId))
+        Assert.IsTrue(
+            sidecar.sidecarBoundaryApproximations
+            |> Array.exists (fun diagnostic ->
+                diagnostic.Contains("operator boundary moved")))
+
+    [<TestMethod>]
     member _.``Location line applicability clears in both directions``() =
         let lineThenFallback =
             message [
@@ -393,7 +591,7 @@ type CzPttToGtfsTests() =
             [| Some "101"; Some "101"; None; None |],
             cleared.operationalCalls |> Array.map (fun call -> call.activeLineCode))
         CollectionAssert.AreEquivalent(
-            [| "S1"; "Vlak Praha – Břeclav" |],
+            [| "S1"; "Vlak 01234" |],
             cleared.feed.routes |> Array.choose (fun route -> route.shortName))
         Assert.AreEqual(2, cleared.feed.trips.Length)
         Assert.AreEqual(1, cleared.feed.transfers.Value.Length)
@@ -403,7 +601,7 @@ type CzPttToGtfsTests() =
         let clearedFallbackRoute =
             cleared.feed.routes
             |> Array.find (fun route ->
-                route.shortName = Some "Vlak Praha – Břeclav")
+                route.shortName = Some "Vlak 01234")
         let clearedLineTrip =
             cleared.feed.trips
             |> Array.find (fun trip -> trip.routeId = clearedLineRoute.id)
@@ -414,10 +612,10 @@ type CzPttToGtfsTests() =
             cleared.feed.stopTimes
             |> Array.filter (fun call -> call.tripId = tripId)
         Assert.AreEqual(
-            "czptt:stop:CZ:57050:unspecified",
+            "czptt:stop:CZ:57016:unspecified",
             (callsFor clearedLineTrip.id |> Array.last).stopId)
         Assert.AreEqual(
-            "czptt:stop:CZ:57050:unspecified",
+            "czptt:stop:CZ:57016:unspecified",
             (callsFor clearedFallbackTrip.id |> Array.head).stopId)
 
         let fallbackThenLine =
@@ -434,12 +632,12 @@ type CzPttToGtfsTests() =
             [| None; Some "101"; Some "101" |],
             activated.operationalCalls |> Array.map (fun call -> call.activeLineCode))
         CollectionAssert.AreEquivalent(
-            [| "Vlak Praha – Kolín"; "S1" |],
+            [| "Vlak 01234"; "S1" |],
             activated.feed.routes |> Array.choose (fun route -> route.shortName))
         let activatedFallbackRoute =
             activated.feed.routes
             |> Array.find (fun route ->
-                route.shortName = Some "Vlak Praha – Kolín")
+                route.shortName = Some "Vlak 01234")
         let activatedLineRoute =
             activated.feed.routes
             |> Array.find (fun route -> route.shortName = Some "S1")
@@ -469,7 +667,7 @@ type CzPttToGtfsTests() =
         Assert.AreEqual(Some "S1", rootFeed.routes.[0].shortName)
 
     [<TestMethod>]
-    member _.``Line expiry before an internal point shares the preceding call``() =
+    member _.``Line expiry before the terminus is deferred to the terminus``() =
         let value =
             message [
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None
@@ -481,37 +679,27 @@ type CzPttToGtfsTests() =
             ] []
         for mode in [| CzPttToGtfs.Gtfs; CzPttToGtfs.Sidecar |] do
             let result = CzPttToGtfs.convert catalog mode [ value ]
-            let fallbackRoute =
-                result.feed.routes
-                |> Array.find (fun route ->
-                    route.shortName = Some "Vlak Praha – Kadaň")
-            let fallbackTrip =
-                result.feed.trips
-                |> Array.find (fun trip -> trip.routeId = fallbackRoute.id)
-            let fallbackCalls =
-                result.feed.stopTimes
-                |> Array.filter (fun call -> call.tripId = fallbackTrip.id)
-            Assert.AreEqual(
-                "czptt:stop:CZ:53039:unspecified",
-                fallbackCalls.[0].stopId,
-                string mode)
+            Assert.AreEqual(1, result.feed.trips.Length, string mode)
+            Assert.AreEqual(Some "S1", result.feed.routes.[0].shortName, string mode)
+            Assert.IsTrue(
+                result.boundaryAdjustments
+                |> Array.exists (fun adjustment ->
+                    adjustment.sourceSequence = 3
+                    && adjustment.appliedSequence = Some 4
+                    && adjustment.reason = "deferred-to-next-passenger-call"))
             if mode = CzPttToGtfs.Gtfs then
                 Assert.IsTrue(
-                    fallbackCalls
+                    result.feed.stopTimes
                     |> Array.exists (fun call ->
                         call.stopId = "czptt:stop:CZ:93001:unspecified"))
             else
                 Assert.IsFalse(
-                    fallbackCalls
+                    result.feed.stopTimes
                     |> Array.exists (fun call ->
                         call.stopId = "czptt:stop:CZ:93001:unspecified"))
-                Assert.IsTrue(
-                    result.sidecarBoundaryApproximations
-                    |> Array.exists (fun diagnostic ->
-                        diagnostic.Contains("preceding passenger call")))
 
     [<TestMethod>]
-    member _.``Fallback names ignore Nazev20 and use complete PA endpoints``() =
+    member _.``Provided point names apply to stops and headsigns``() =
         let root =
             Path.Combine(Path.GetTempPath(), $"jrutil-czptt-name20-{Guid.NewGuid():N}")
         let name20 = Path.Combine(root, "SR70_Nazev20.csv")
@@ -540,11 +728,16 @@ type CzPttToGtfsTests() =
                 (CzPttToGtfs.convertWithPointNames
                     catalog CzPttToGtfs.Gtfs names [ value ]).feed
             CollectionAssert.AreEquivalent(
-                [| "S1"; "Os Source Duchcov – Source Háj" |],
+                [| "S1" |],
                 feed.routes |> Array.choose (fun route -> route.shortName))
             Assert.IsTrue(
                 feed.trips
-                |> Array.forall (fun trip -> trip.headsign = Some "Source Háj"))
+                |> Array.forall (fun trip -> trip.headsign = Some "Háj u Duchcova"))
+            Assert.IsTrue(
+                feed.stops
+                |> Array.filter (fun stop ->
+                    stop.id.StartsWith("czptt:stop:CZ:54129"))
+                |> Array.forall (fun stop -> stop.name = "Háj u Duchcova"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -570,8 +763,86 @@ type CzPttToGtfsTests() =
                 (CzPttToGtfs.convertWithPointNames
                     catalog CzPttToGtfs.Gtfs names [ value ]).feed
             Assert.AreEqual(
-                Some "Vlak Source origin – Source destination",
+                Some "Vlak 01234",
                 feed.routes.[0].shortName)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``SR70 names override Czech source names throughout bundle output``() =
+        let value =
+            message [
+                location "57076" "Source Praha" "08:00:00" ["0001"] None []
+                location "53339" "Ambiguous source" "08:10:00" ["0001"] None []
+                location "54129" "Duplicate source" "08:20:00" ["0001"] None []
+                location "50051" "Dash source" "08:30:00" ["0001"] None []
+                location "99999" "Missing source" "08:40:00" ["0001"] None []
+                location "76534" "Foreign source" "08:50:00" ["0001"] None []
+                location "76534" "Kraslice-P.vlekem z" "09:00:00" ["0001"] None []
+            ] []
+        value.CzpttInformation.CzpttLocation.[5].Location.CountryCodeIso <- "DE"
+        let sourceFeed =
+            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        Assert.IsTrue(
+            sourceFeed.stops
+            |> Array.filter (fun stop -> stop.id.StartsWith("czptt:stop:CZ:76534"))
+            |> Array.forall (fun stop -> stop.name = "Kraslice-P.vlekem z"))
+
+        let root =
+            Path.Combine(Path.GetTempPath(), $"jrutil-czptt-sr70-names-{Guid.NewGuid():N}")
+        let input = Path.Combine(root, "input.xml")
+        let output = Path.Combine(root, "output")
+        let sr70 = Path.Combine(root, "SR70.csv")
+        Directory.CreateDirectory(root) |> ignore
+        try
+            writeMessage input value
+            File.WriteAllLines(sr70, [|
+                "570768,\"Praha, hlavní\",50.083,14.435"
+                "533398,First official,50.6,13.7"
+                "533399,Second official,50.6,13.7"
+                "541292,Shared official,50.63,13.73"
+                "541299,Shared official,50.63,13.73"
+                "500512,-,50.5,14.0"
+                "765347,Kraslice-Pod vlekem,50.340188,12.49709"
+            |])
+            let result =
+                CzPttBundle.writeSidecars
+                    catalog CzPttToGtfs.Gtfs input output
+                    (Some sr70) None None None
+
+            let namesByIdentity =
+                result.operationalCalls
+                |> Seq.map (fun call ->
+                    (call.countryCode, call.primaryCode), call.name)
+                |> Map
+            Assert.AreEqual("Praha, hlavní", namesByIdentity.[("CZ", "57076")])
+            Assert.AreEqual("Ambiguous source", namesByIdentity.[("CZ", "53339")])
+            Assert.AreEqual("Shared official", namesByIdentity.[("CZ", "54129")])
+            Assert.AreEqual("Dash source", namesByIdentity.[("CZ", "50051")])
+            Assert.AreEqual("Missing source", namesByIdentity.[("CZ", "99999")])
+            Assert.AreEqual("Foreign source", namesByIdentity.[("DE", "76534")])
+            Assert.AreEqual("Kraslice-Pod vlekem", namesByIdentity.[("CZ", "76534")])
+            Assert.IsTrue(
+                result.feed.stops
+                |> Array.filter (fun stop -> stop.id.StartsWith("czptt:stop:CZ:76534"))
+                |> Array.forall (fun stop -> stop.name = "Kraslice-Pod vlekem"))
+            Assert.IsTrue(
+                result.feed.trips
+                |> Array.forall (fun trip ->
+                    trip.headsign = Some "Kraslice-Pod vlekem"))
+
+            use stream =
+                File.OpenRead(Path.Combine(output, "operational_points.parquet"))
+            let points =
+                ParquetSerializer.DeserializeUntypedAsync(stream)
+                    .GetAwaiter().GetResult()
+            let kraslice =
+                points.Data
+                |> Seq.find (fun row ->
+                    string row.["source_location_id"] = "CZ:76534")
+            Assert.AreEqual(
+                "Kraslice-Pod vlekem",
+                string kraslice.["source_name"])
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -600,7 +871,7 @@ type CzPttToGtfsTests() =
                 catalog CzPttToGtfs.Gtfs secondNames [ value ]).feed
 
         Assert.AreEqual(
-            Some "Os Karlovy Vary – Johanngeorgenst.",
+            Some "Os 01234",
             first.routes.[0].shortName)
         Assert.AreEqual(first.routes.[0].shortName, second.routes.[0].shortName)
         Assert.AreEqual(Some "Johanngeorgenstadt", first.trips.[0].headsign)
@@ -614,7 +885,7 @@ type CzPttToGtfsTests() =
             |> Array.forall (fun stop -> stop.name = "Johanngeorgenstadt"))
 
     [<TestMethod>]
-    member _.``Fallback routes use municipalities and preserve compound municipalities``() =
+    member _.``Fallback route naming does not alter stop municipalities``() =
         let cityDistricts =
             message [
                 location "10001" "Praha-Holešovice" "08:00:00" ["0001"] None []
@@ -633,10 +904,10 @@ type CzPttToGtfsTests() =
             (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ compounds ]).feed
 
         Assert.AreEqual(
-            Some "Vlak Praha – Ostrava",
+            Some "Vlak 01234",
             districtFeed.routes.[0].shortName)
         Assert.AreEqual(
-            Some "Vlak Frýdek-Místek – Rájec-Jestřebí",
+            Some "Vlak 01234",
             compoundFeed.routes.[0].shortName)
         CollectionAssert.Contains(
             districtFeed.stops |> Array.map (fun stop -> stop.name),
