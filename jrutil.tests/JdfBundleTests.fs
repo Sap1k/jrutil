@@ -64,6 +64,7 @@ type JdfBundleTests() =
                 "source_travel_restriction_metadata.parquet"
                 "diagnostics.json"; "manifest.json"
                 Path.Combine("gtfs-intermediate", "stop_times.txt")
+                Path.Combine("gtfs-intermediate", "feed_info.txt")
                 Path.Combine("extensions", "cz_stop_zones.txt")
             |]
             expectedFiles |> Array.iter (fun relative ->
@@ -81,11 +82,12 @@ type JdfBundleTests() =
                 "gtfs-intermediate/agency.txt", "26cceaa6f4ff55077dd5a4bb516c09f77686dfd41557ba1a98cd858543239b95"
                 "gtfs-intermediate/calendar_dates.txt", "aaa66bee57e81ca0cd63d4afe576f993aba0441428a79cf6fe5c58721e39421f"
                 "gtfs-intermediate/calendar.txt", "5a5f58ecf2157ade68d72eaa2b247515ffaf849cdb762a24b1df2ba9595b94c0"
+                "gtfs-intermediate/feed_info.txt", "bcab51bae8d3ca3525c03edae4bc1d5166c9534a37d5f567611571a9f4173cfc"
                 "gtfs-intermediate/routes.txt", "a3b6ec8a99b071817d12032685c87de5f1b4f8f5e1f56637116b52d46b79581c"
                 "gtfs-intermediate/stop_times.txt", "a392c69c7d95c018fd7f2957a58245feff9ff75c95ba659ba810a07c6e8cbfeb"
                 "gtfs-intermediate/stops.txt", "922f56c4e4d801e0e3066f341032822d506b3b781032458e57b7ea127a8ff014"
                 "gtfs-intermediate/trips.txt", "dcf7b19da71d5700f3eeaaa9e2d7f1c5e86db7c8104f1713d46038a0eb5be16d"
-                "manifest.json", "c01bd571a1b160520ca2a54e5bf5f6047ad6cfc63f5cf6da9705d26478febb5c"
+                "manifest.json", "20c9577bced2752fc11111c3b4bef35b14638ccd91ec8caa49ab8845a2bea176"
                 "source_call_metadata.parquet", "d0371213210d39f967020dff5d62e719578d701f1a181ae0cf772735e9cbe278"
                 "source_notice_metadata.parquet", "6d0fdf465786ac87faab9b6e200541dde04915842d8b3a09e14dbb1b3918eff5"
                 "source_route_metadata.parquet", "1275e718834fcc3faa10ce927931ba9ad64efad311f87f1c04a2fbe76c8c6de7"

@@ -132,6 +132,42 @@ type JdfToGtfsTests() =
         feed.czTrips |> Option.get |> Array.iter (fun item ->
             assertEqual true (tripIds.Contains item.tripId))
 
+        let info = feed.feedInfo |> Option.get
+        assertEqual "Oběhy project (via JrUtil)" info.publisherName
+        assertEqual "https://obehy.cz" info.publisherUrl
+        assertEqual "cs" info.lang
+        assertEqual (Some (LocalDate(2026, 1, 1))) info.startDate
+        assertEqual (Some (LocalDate(2026, 12, 31))) info.endDate
+        assertEqual (Some "jdf-1.11:OBEHY-EXT:20260718") info.version
+        assertEqual (Some "admin@obehy.cz") info.contactEmail
+
+    [<TestMethod>]
+    member _.``Feed contact round-trips and legacy feed info remains readable``() =
+        let feed = batch () |> JdfToGtfs.getGtfsFeed false
+        let root =
+            Path.Combine(Path.GetTempPath(), "jrutil-feed-info-" + Guid.NewGuid().ToString("N"))
+        try
+            Gtfs.gtfsFeedToFolder () root feed
+            let parsed = Gtfs.gtfsParseFolder () root
+            assertEqual
+                (Some "admin@obehy.cz")
+                (parsed.feedInfo |> Option.bind (fun info -> info.contactEmail))
+            assertEqual
+                (Some "jdf-1.11:OBEHY-EXT:20260718")
+                (parsed.feedInfo |> Option.bind (fun info -> info.version))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+        let legacy =
+            GtfsParser.getGtfsParser<GtfsModel.FeedInfo> [
+                "feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version"
+                "\"Legacy\",\"https://example.test\",\"cs\",\"\",\"\",\"\""
+            ]
+            |> Seq.exactlyOne
+        assertEqual "Legacy" legacy.publisherName
+        assertEqual None legacy.version
+        assertEqual None legacy.contactEmail
+
     [<TestMethod>]
     member _.``Standalone stop-time conversion preserves unsorted JDF behavior``() =
         let source = batch ()

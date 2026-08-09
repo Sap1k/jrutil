@@ -10,6 +10,16 @@ open JrUtil.GtfsCsvSerializer
 open JrUtil.GtfsModel
 open JrUtil.GtfsParser
 
+let internal obehyFeedInfo version startDate endDate = {
+    publisherName = "Oběhy project (via JrUtil)"
+    publisherUrl = "https://obehy.cz"
+    lang = "cs"
+    startDate = startDate
+    endDate = endDate
+    version = version
+    contactEmail = Some "admin@obehy.cz"
+}
+
 let markApproximateStopName (name: string) =
     let suffix = " [?]"
     if name.EndsWith(suffix, StringComparison.Ordinal) then name

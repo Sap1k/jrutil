@@ -944,7 +944,8 @@ let private route blockMode catalog date message journey =
     let labels = labelsForJourney catalog date message journey
     let mappedLongName =
         match labels with
-        | [| label |] -> label.mappedLine |> Option.map (fun line -> line.name)
+        | [| label |] ->
+            label.mappedLine |> Option.map (fun line -> line.name.TrimEnd())
         | _ -> None
     {
         id = routeId blockMode catalog date message journey
@@ -1104,14 +1105,19 @@ let private feedInfo (messages: CzPttXml.CzpttcisMessage array) =
                 |> Option.defaultValue (
                     LocalDate.FromDateTime(
                         message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)))
-        Some {
-            publisherName = "Oběhy / JrUtil"
-            publisherUrl = "https://github.com/dvdkon/jrutil"
-            lang = "cs"
-            startDate = Some (Array.min starts)
-            endDate = Some (Array.max ends)
-            version = None
-        }
+        let version =
+            messages
+            |> Array.maxBy (fun message -> message.CzpttCreation)
+            |> fun message ->
+                message.CzpttCreation.ToString(
+                    "yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture)
+            |> sprintf "czptt:%s"
+            |> Some
+        Some (
+            Gtfs.obehyFeedInfo
+                version
+                (Some (Array.min starts))
+                (Some (Array.max ends)))
 
 let convertWithPointNamesAndOptions catalog options pointNames
                           (messages: CzPttXml.CzpttcisMessage seq) =
@@ -1138,27 +1144,36 @@ let convertWithPointNamesAndOptions catalog options pointNames
             | None ->
                 let projected, adjustments =
                     projectPassengerServiceBoundaries message calls
-                boundaryAdjustments.AddRange(adjustments)
                 let selected =
                     selectedCalls options.operationalPointMode projected
-                let journeySegments = selected |> segments
-                let generatedJourneys =
-                    journeys options.blockMode selected journeySegments
-                if options.operationalPointMode = Sidecar then
-                    let exactChanges =
-                        calls
-                        |> Array.pairwise
-                        |> Array.choose (fun (left, right) ->
-                            if left.responsibleRu <> right.responsibleRu
-                               && not right.passenger then
-                                Some right.sourceIndex
-                            else None)
-                    if exactChanges.Length > 0 then
-                        let sourceIndex = exactChanges.[0]
-                        approximations.Add(
-                            $"{paId message}: operator boundary moved from source sequence " +
-                            $"{sourceIndex + 1} to the following passenger call")
-                accepted.Add(message, calls, selected, generatedJourneys)
+                if selected.Length < 2 then
+                    rejected.Add {
+                        paId = paId message
+                        reason = "fewer than two selected GTFS calls"
+                        sequence = None
+                        previousSeconds = None
+                        currentSeconds = None
+                    }
+                else
+                    boundaryAdjustments.AddRange(adjustments)
+                    let journeySegments = selected |> segments
+                    let generatedJourneys =
+                        journeys options.blockMode selected journeySegments
+                    if options.operationalPointMode = Sidecar then
+                        let exactChanges =
+                            calls
+                            |> Array.pairwise
+                            |> Array.choose (fun (left, right) ->
+                                if left.responsibleRu <> right.responsibleRu
+                                   && not right.passenger then
+                                    Some right.sourceIndex
+                                else None)
+                        if exactChanges.Length > 0 then
+                            let sourceIndex = exactChanges.[0]
+                            approximations.Add(
+                                $"{paId message}: operator boundary moved from source sequence " +
+                                $"{sourceIndex + 1} to the following passenger call")
+                    accepted.Add(message, calls, selected, generatedJourneys)
 
     let acceptedMessages =
         accepted |> Seq.map (fun (message, _, _, _) -> message) |> Seq.toArray
