@@ -20,6 +20,13 @@ open Parquet.Serialization
 
 open JrUtil
 
+let mutable private activeSpillBytes = 0L
+let currentSpillBytes () = activeSpillBytes
+
+type StoragePolicy =
+    | MemoryBacked
+    | SpillBacked
+
 [<Literal>]
 let ParquetSchemaVersion = 1
 
@@ -27,6 +34,18 @@ type private Table = {
     fields: DataField array
     rows: IReadOnlyCollection<IDictionary<string, obj>>
 }
+
+/// Supplies Parquet.NET with a count-known replayable relation without
+/// retaining a second array of row dictionaries. The source relations are
+/// immutable for the lifetime of bundle output and may be enumerated twice.
+type private ReplayableRows<'a>(rows: seq<'a>) =
+    let count = lazy (rows |> Seq.length)
+    interface IReadOnlyCollection<'a> with
+        member _.Count = count.Value
+    interface IEnumerable<'a> with
+        member _.GetEnumerator() = rows.GetEnumerator()
+    interface System.Collections.IEnumerable with
+        member _.GetEnumerator() = rows.GetEnumerator() :> System.Collections.IEnumerator
 
 let private field<'T> name nullable =
     DataField<'T>(name, Nullable nullable) :> DataField
@@ -41,7 +60,7 @@ let private nullableObj value =
 
 let private table fields rows = {
     fields = fields
-    rows = rows |> Seq.toArray :> IReadOnlyCollection<IDictionary<string, obj>>
+    rows = ReplayableRows<IDictionary<string, obj>>(rows)
 }
 
 let private writeParquet (path: string) (value: Table) =
@@ -438,28 +457,31 @@ let private distanceMeters (latitude1, longitude1) (latitude2, longitude2) =
           * Math.Sin(dLongitude / 2.) ** 2.
     6371000. * 2. * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1. - a))
 
-let writeSidecarsWithProgressAndOptions catalog options inputPath outputDirectory
-                                       sr70Path _sr70Name20Path osmPath
-                                       osmAliasesPath
-                                       (progress: string -> string -> unit) =
+let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
+                                                  inputPath outputDirectory
+                                                  sr70Path _sr70Name20Path osmPath
+                                                  osmAliasesPath
+                                                  (progress: string -> string -> unit) =
     Directory.CreateDirectory(outputDirectory) |> ignore
     progress "parse-input" "started"
-    let merger = CzPttMerge.CzPttMerger()
-    let parsed = CzPtt.parseAll inputPath |> Seq.toArray
-    progress "parse-input" "completed"
+    let outputFull = Path.GetFullPath(outputDirectory)
+    let spillPath =
+        Path.Combine(
+            Path.GetDirectoryName(outputFull),
+            $".{Path.GetFileName(outputFull)}.czptt.{Guid.NewGuid():N}.tmp")
+    use merger =
+        match storagePolicy with
+        | MemoryBacked -> new CzPttMerge.CzPttMerger()
+        | SpillBacked -> new CzPttMerge.CzPttMerger(spillPath)
     progress "merge-messages" "started"
-    parsed |> merger.ProcessAll
+    CzPtt.parseAll inputPath |> merger.ProcessAll
+    activeSpillBytes <- merger.SpillBytes
+    progress "parse-input" "completed"
     progress "merge-messages" "completed"
     progress "prepare-identities" "started"
-    let sourcePaIds =
-        parsed
-        |> Array.choose (fun (_, message) ->
-            match message with
-            | CzPtt.Timetable timetable -> Some (paId timetable)
-            | _ -> None)
-        |> Set
+    let sourcePaIds = merger.SourcePaIds |> Set
     let messages =
-        merger.Messages.Values |> Seq.sortBy paId |> Seq.toArray
+        merger.SurvivingMessages |> Seq.sortBy paId |> Seq.toArray
     let survivingPaIds = messages |> Seq.map paId |> Set
     let cancelledPaIds =
         Set.difference sourcePaIds survivingPaIds |> Set.toArray |> Array.sort
@@ -1392,6 +1414,13 @@ let writeSidecarsWithProgressAndOptions catalog options inputPath outputDirector
     progress "write-ids-trip-projection" "completed"
 
     result
+
+let writeSidecarsWithProgressAndOptions catalog options inputPath outputDirectory
+                                       sr70Path sr70Name20Path osmPath
+                                       osmAliasesPath progress =
+    writeSidecarsWithStorageAndProgressAndOptions
+        MemoryBacked catalog options inputPath outputDirectory sr70Path
+        sr70Name20Path osmPath osmAliasesPath progress
 
 let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
                               sr70Name20Path osmPath osmAliasesPath progress =

@@ -1466,7 +1466,8 @@ let private getGtfsFeedInternal warnUnhandledNotes adjacentTripGroups stopIdsCis
     assembleGtfsFeed stopIdsCis jdfBatch tripsToDelete calendar calendarExceptions
                      publicLineNumbers referencedStopIds stopTimes
 
-type internal BundleFeedPreparation = {
+type StreamingFeedPreparation = {
+    adjacentTripGroups: bool
     stopIdsCis: bool
     batch: JdfModel.JdfBatch
     tripsToDelete: Set<string>
@@ -1475,9 +1476,12 @@ type internal BundleFeedPreparation = {
     publicLineNumbers: Map<string * int, string option>
 }
 
-let internal prepareGtfsFeedForStreamingBundle stopIdsCis (batch: JdfModel.JdfBatch) =
+let private prepareGtfsFeedForStreamingInternal
+    warnUnhandledNotes adjacentTripGroups stopIdsCis (batch: JdfModel.JdfBatch) =
+    if warnUnhandledNotes then warnUnhandledServiceNotes batch ()
     let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar batch
     {
+        adjacentTripGroups = adjacentTripGroups
         stopIdsCis = stopIdsCis
         batch = batch
         tripsToDelete = tripsToDelete
@@ -1486,12 +1490,19 @@ let internal prepareGtfsFeedForStreamingBundle stopIdsCis (batch: JdfModel.JdfBa
         publicLineNumbers = getPublicLineNumbers batch
     }
 
-let internal getStreamingBundleStopTimes preparation =
-    getGtfsStopTimesInternal true preparation.stopIdsCis preparation.batch
+let prepareGtfsFeedForStreaming warnUnhandledNotes stopIdsCis batch =
+    prepareGtfsFeedForStreamingInternal warnUnhandledNotes false stopIdsCis batch
+
+let prepareGtfsFeedForStreamingBundle stopIdsCis batch =
+    prepareGtfsFeedForStreamingInternal false true stopIdsCis batch
+
+let getStreamingBundleStopTimes preparation =
+    getGtfsStopTimesInternal
+        preparation.adjacentTripGroups preparation.stopIdsCis preparation.batch
     |> Seq.filter (fun stopTime ->
         not (preparation.tripsToDelete.Contains stopTime.tripId))
 
-let internal finishStreamingBundleFeed preparation (referencedStopIds: Set<string>) =
+let finishStreamingBundleFeed preparation (referencedStopIds: Set<string>) =
     assembleGtfsFeed
         preparation.stopIdsCis preparation.batch preparation.tripsToDelete
         preparation.calendar preparation.calendarExceptions preparation.publicLineNumbers
