@@ -46,7 +46,8 @@ Options:
     --batch-output=VALUE        fix-jdf output: directory or zip (default: directory)
     --catalog-snapshot=FILE     Offline KADR catalog snapshot JSON for CZPTT
     --operational-points=VALUE  CZPTT internal points: gtfs (default) or sidecar
-    --sr70=FILE                 SR70 CSV snapshot for CZPTT point coordinates
+    --block-mode=VALUE         CZPTT trip grouping: blocks (default) or none
+    --sr70=FILE                 SR70 CSV snapshot for CZPTT point names and coordinates
     --sr70-name20=FILE          Companion SR70 Název20 CSV for fallback route names
     --osm-pbf=FILE              Shared regional OSM PBF for CZPTT coordinate gaps
     --osm-aliases=FILE          Reviewed CZPTT identity-to-OSM-object aliases
@@ -296,6 +297,18 @@ let main (args: string array) =
                     | value ->
                         invalidArg "--operational-points"
                             $"Expected gtfs or sidecar, got {value}"
+                let blockMode =
+                    match optArgValue args "--block-mode"
+                          |> Option.defaultValue "blocks" with
+                    | "blocks" -> CzPttToGtfs.Blocks
+                    | "none" -> CzPttToGtfs.NoBlocks
+                    | value ->
+                        invalidArg "--block-mode"
+                            $"Expected blocks or none, got {value}"
+                let conversionOptions: CzPttToGtfs.ConversionOptions = {
+                    operationalPointMode = operationalPointMode
+                    blockMode = blockMode
+                }
                 let inputPath = argValue args "<CzPtt-in-file>"
                 let outputPath = argValue args "<bundle-out-dir>"
                 if Directory.Exists(outputPath) then
@@ -304,8 +317,8 @@ let main (args: string array) =
                 let bundleProgress name state =
                     phase "convert" name state
                 let result =
-                    CzPttBundle.writeSidecarsWithProgress
-                        catalog operationalPointMode inputPath outputPath
+                    CzPttBundle.writeSidecarsWithProgressAndOptions
+                        catalog conversionOptions inputPath outputPath
                         sr70Path sr70Name20Path osmPath osmAliasesPath bundleProgress
                 phase "convert" "write-gtfs" "started"
                 result.feed
@@ -331,11 +344,18 @@ let main (args: string array) =
                         match operationalPointMode with
                         | CzPttToGtfs.Gtfs -> "gtfs"
                         | CzPttToGtfs.Sidecar -> "sidecar")
+                diagnostics.["block_mode"] <-
+                    box (
+                        match blockMode with
+                        | CzPttToGtfs.Blocks -> "blocks"
+                        | CzPttToGtfs.NoBlocks -> "none")
                 diagnostics.["accepted_pa_count"] <- box result.acceptedPaIds.Length
                 diagnostics.["rejected_journeys"] <- box result.rejectedJourneys
                 diagnostics.["cancelled_pa_ids"] <- box result.cancelledPaIds
                 diagnostics.["sidecar_boundary_approximations"] <-
                     box result.sidecarBoundaryApproximations
+                diagnostics.["line_boundary_adjustments"] <-
+                    box result.boundaryAdjustments
                 diagnostics.["ids_diagnostics"] <- box result.idsDiagnostics
                 diagnostics.["merge_diagnostics"] <- box result.mergeDiagnostics
                 diagnostics.["coordinate_diagnostics"] <-
@@ -366,9 +386,20 @@ let main (args: string array) =
                     | value ->
                         invalidArg "--operational-points"
                             $"Expected gtfs or sidecar, got {value}"
+                let blockMode =
+                    match optArgValue args "--block-mode"
+                          |> Option.defaultValue "blocks" with
+                    | "blocks" -> CzPttToGtfs.Blocks
+                    | "none" -> CzPttToGtfs.NoBlocks
+                    | value ->
+                        invalidArg "--block-mode"
+                            $"Expected blocks or none, got {value}"
                 CzPtt.parseAll (argValue args "<CzPtt-in-file>")
-                |> CzPttToGtfs.gtfsFeedMergedWithOptions
-                    catalog operationalPointMode
+                |> CzPttToGtfs.gtfsFeedMergedWithConversionOptions
+                    catalog {
+                        operationalPointMode = operationalPointMode
+                        blockMode = blockMode
+                    }
                 |> Gtfs.deduplicateCalendar
                 |> gtfsWithCoords stopCoordsByIdPath
                 |> Gtfs.fillStandardRequiredFields

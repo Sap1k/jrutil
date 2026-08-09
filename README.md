@@ -82,7 +82,26 @@ dotnet run --project jrutil-multitool -- \
 ```
 
 The extension files are optional in the shared GTFS model. CZPTT conversion
-does not populate them yet.
+populates route, trip and trip-stop-zone extensions when the source supplies
+the corresponding data.
+
+CZPTT conversion defaults to `--block-mode=blocks`: line, train-category and
+operator changes produce linked GTFS trips with a shared `block_id`. Use
+`--block-mode=none` to emit one GTFS trip per PA instead. In that mode route
+labels combine first-seen unique line marks and train-designation fallbacks,
+for example `U32/S32` or `U2/Os 7002`, and multi-operator routes reference a
+composite agency such as `ČD / DB`. Both `czptt-to-gtfs` and
+`czptt-to-bundle` accept the option.
+
+Passenger line/category changes recorded at internal infrastructure points
+are applied at the following passenger call. If an operator handover occurs
+in the same inter-stop span, the passenger attributes are coalesced onto that
+handover so conversion does not create a tiny intermediate block. Bundle
+diagnostics record these adjustments.
+
+For `czptt-to-bundle`, `--sr70=FILE` supplies canonical Czech operational-point
+names as well as coordinates. A matching SR70 name takes precedence over the
+CZPTT `PrimaryLocationName`; points missing from SR70 retain the CZPTT name.
 
 For `fix-jdf`, `--ext-geodata` accepts either one headerless stop-position CSV
 or a directory. Directory inputs recursively load `*.csv` files in stable
