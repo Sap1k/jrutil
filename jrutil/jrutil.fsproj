@@ -36,6 +36,7 @@
     <Compile Include="src/Jdf/Jdf109Model.fs" />
     <Compile Include="src/Jdf/Jdf109To110.fs" />
     <Compile Include="src/Jdf/Jdf.fs" />
+    <Compile Include="src/Jdf/JdfStopReconciliation.fs" />
     <Compile Include="src/Jdf/JdfMerger.fs" />
     <Compile Include="src/Jdf/JdfFixups.fs" />
     <Compile Include="src/Jdf/JdfToGtfs.fs" />

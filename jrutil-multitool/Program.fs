@@ -574,6 +574,7 @@ let main (args: string array) =
                     Log.Error(error, "Error while processing {Batch}", batchPath)
                     if strict then raise error
             phase "merge-jdf" "parse-batches" "completed"
+            merger.logStopMergeSummary()
 
             phase "merge-jdf" "resolve-route-overlaps" "started"
             Log.Information("Resolving route overlaps")
