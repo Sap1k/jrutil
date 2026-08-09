@@ -129,8 +129,11 @@ let main (args: string array) =
             optArgValue args "--jobs"
             |> Option.defaultValue "auto"
             |> Execution.parseJobRequest
+        let admissionBytesByStage = Collections.Generic.Dictionary<string, int64>()
         let jobsFor stage workload reservedBytes =
-            let memoryBudget = Execution.resolveMemoryBudget memoryRequest
+            let memorySnapshot = Execution.detectMemorySnapshot ()
+            let memoryBudget =
+                Execution.resolveMemoryBudgetFromSnapshot memoryRequest memorySnapshot
             let plan =
                 Execution.workerPlan
                     workload
@@ -142,11 +145,30 @@ let main (args: string array) =
                 match jobRequest with
                 | Execution.AutoJobs -> "auto"
                 | Execution.FixedJobs value -> string value
+            let baselinePrivateBytes = memorySnapshot.processPrivateBytes
+            let automaticReserveBytes =
+                Execution.automaticMemoryReserveBytes memorySnapshot.effectiveTotalBytes
+            let admissionBytes =
+                max (8L * Execution.MiB)
+                    (plan.memoryBudgetBytes * 85L / 100L - baselinePrivateBytes)
+            admissionBytesByStage.[stage] <- admissionBytes
+            let weightFormula =
+                match workload with
+                | Execution.MergeParsing ->
+                    "max(8 MiB, ZIP bytes * 12); directories use uncompressed bytes * 3"
+                | _ -> "max(8 MiB, uncompressed input bytes * 3)"
+            let minimumWorkers, minimumIo = Threading.ThreadPool.GetMinThreads()
+            Threading.ThreadPool.SetMinThreads(
+                max minimumWorkers plan.maximumWorkers, minimumIo)
+            |> ignore
             Log.Information(
-                "Execution plan for {Stage}: {Workers} workers; requested {RequestedJobs}; " +
-                "CPU {ProcessorCount}; memory cap {MemoryJobs}; budget {MemoryBudgetGiB:F1} GiB",
-                stage, plan.resolvedWorkers, requested, plan.processorCount,
-                plan.memoryLimitedJobs, float plan.memoryBudgetBytes / float Execution.GiB)
+                "Execution plan for {Stage}: {InitialWorkers}-{MaximumWorkers} adaptive workers; requested {RequestedJobs}; " +
+                "CPU {ProcessorCount}; memory cap {MemoryJobs}; budget {MemoryBudgetGiB:F1} GiB; " +
+                "available {AvailableMemoryGiB:F1} GiB; system reserve {SystemReserveGiB:F1} GiB",
+                stage, plan.initialWorkers, plan.maximumWorkers, requested, plan.processorCount,
+                plan.memoryLimitedJobs, float plan.memoryBudgetBytes / float Execution.GiB,
+                float memorySnapshot.availableBytes / float Execution.GiB,
+                float automaticReserveBytes / float Execution.GiB)
             emitProgressEvent progressEvents "execution_plan" [
                 "stage", box stage
                 "requested_jobs", box requested
@@ -156,6 +178,17 @@ let main (args: string array) =
                 "worker_allowance_bytes", box plan.workerAllowanceBytes
                 "memory_limited_jobs", box plan.memoryLimitedJobs
                 "resolved_workers", box plan.resolvedWorkers
+                "initial_workers", box plan.initialWorkers
+                "maximum_workers", box plan.maximumWorkers
+                "phase_start_private_bytes", box baselinePrivateBytes
+                "effective_total_memory_bytes", box memorySnapshot.effectiveTotalBytes
+                "available_memory_bytes", box memorySnapshot.availableBytes
+                "automatic_system_reserve_bytes", box automaticReserveBytes
+                "admission_allowance_bytes", box admissionBytes
+                "weight_formula", box weightFormula
+                "steady_memory_percent", box 85
+                "pause_memory_percent", box 95
+                "resume_memory_percent", box 80
             ]
             plan
         let phase stage name state =
@@ -176,6 +209,82 @@ let main (args: string array) =
                        "message", box value.Message
                    ])
                    |> Option.defaultValue []))
+        let resourceUsage stage phase spillBytes =
+            let currentProcess = Diagnostics.Process.GetCurrentProcess()
+            currentProcess.Refresh()
+            let gc = GC.GetGCMemoryInfo()
+            emitProgressEvent progressEvents "resource_usage" [
+                "stage", box stage
+                "phase", box phase
+                "working_set_bytes", box currentProcess.WorkingSet64
+                "peak_working_set_bytes", box currentProcess.PeakWorkingSet64
+                "private_bytes", box currentProcess.PrivateMemorySize64
+                "managed_heap_bytes", box gc.HeapSizeBytes
+                "fragmented_bytes", box gc.FragmentedBytes
+                "spill_bytes", box spillBytes
+            ]
+        let schedulerSample stage (sample: Utils.AdaptiveSchedulerSample) =
+            emitProgressEvent progressEvents "scheduler_sample" (
+                [
+                    "stage", box stage
+                    "target_workers", box sample.targetWorkers
+                    "active_workers", box sample.activeWorkers
+                    "maximum_active_workers", box sample.maximumActiveWorkers
+                    "completed_backlog", box sample.completedBacklog
+                    "reorder_depth", box sample.completedBacklog
+                    "retained_estimated_bytes", box sample.retainedEstimatedBytes
+                    "reorder_bytes", box sample.retainedEstimatedBytes
+                    "queued_parse_work", box sample.queuedWork
+                    "queued_transform_work", box 0
+                    "private_bytes", box sample.privateBytes
+                    "working_set_bytes", box sample.workingSetBytes
+                    "managed_heap_bytes", box sample.managedHeapBytes
+                    "normalized_cpu_percent", box sample.normalizedCpuPercent
+                    "throughput_per_second", box sample.throughputPerSecond
+                    "admission_paused", box sample.admissionPaused
+                ] @ (sample.pauseReason
+                     |> Option.map (fun reason -> ["pause_reason", box reason])
+                     |> Option.defaultValue []))
+        let adaptiveAdmissionBytes stage = admissionBytesByStage.[stage]
+        let inputBytes batchPath =
+            if File.Exists(batchPath) then
+                if Path.GetExtension(batchPath).Equals(".zip", StringComparison.OrdinalIgnoreCase) then
+                    use archive = ZipFile.OpenRead(batchPath)
+                    archive.Entries
+                    |> Seq.filter (fun entry -> not (String.IsNullOrEmpty(entry.Name)))
+                    |> Seq.sumBy (fun entry -> entry.Length)
+                else FileInfo(batchPath).Length
+            elif Directory.Exists(batchPath) then
+                Directory.EnumerateFiles(batchPath, "*", SearchOption.AllDirectories)
+                |> Seq.sumBy (fun path -> FileInfo(path).Length)
+            else 0L
+        let mergeInputWeight batchPath =
+            if File.Exists(batchPath) then
+                max (8L * Execution.MiB) (FileInfo(batchPath).Length * 12L)
+            else
+                max (8L * Execution.MiB) (inputBytes batchPath * 3L)
+
+        let longestTripStops (tripStops: JdfModel.TripStop array) =
+            if Array.isEmpty tripStops then
+                invalidOp "Cannot select a representative trip from an empty TripStop relation"
+            let counts = Dictionary<_, struct (int * int)>()
+            tripStops
+            |> Array.iteri (fun index tripStop ->
+                let key = tripStop.routeId, tripStop.tripId
+                match counts.TryGetValue(key) with
+                | true, struct (count, first) -> counts.[key] <- struct (count + 1, first)
+                | _ -> counts.[key] <- struct (1, index))
+            let mutable selected = tripStops.[0].routeId, tripStops.[0].tripId
+            let mutable selectedCount = -1
+            let mutable selectedFirst = Int32.MaxValue
+            for KeyValue(key, struct (count, first)) in counts do
+                if count > selectedCount || (count = selectedCount && first < selectedFirst) then
+                    selected <- key
+                    selectedCount <- count
+                    selectedFirst <- first
+            tripStops
+            |> Array.filter (fun tripStop ->
+                (tripStop.routeId, tripStop.tripId) = selected)
 
         let stopCoordsByIdPath = optArgValue args "--stop-coords-by-id"
         let sr70Path = optArgValue args "--sr70"
@@ -225,6 +334,7 @@ let main (args: string array) =
         let mutable exitCode = 0
         if argFlagSet args "jdf-to-bundle" then
             try
+                phase "jdf-to-bundle" "write-bundle" "started"
                 JdfBundle.writeBundleWithPolicyAndRules
                     (argValue args "--snapshot-descriptor")
                     (argValue args "--converter-version")
@@ -234,6 +344,8 @@ let main (args: string array) =
                     transportModeRules
                     (argValue args "<JDF-input>")
                     (argValue args "<bundle-out-dir>")
+                phase "jdf-to-bundle" "write-bundle" "completed"
+                resourceUsage "jdf-to-bundle" "write-bundle" 0L
                 Log.Information("Finished!")
             with e ->
                 exitCode <- 1
@@ -241,7 +353,6 @@ let main (args: string array) =
         else if argFlagSet args "jdf-to-gtfs" then
             let stopIdsCis = argFlagSet args "--stop-ids-cis"
             let jdfPar = Jdf.jdfBatchDirParser ()
-            let gtfsSer = Gtfs.gtfsFeedToFolder ()
             inOutFiles (argValues args "<JDF-in-dir>" |> Seq.head)
                        (argValue args "<GTFS-out-dir>")
             |> Seq.iter (fun (inpath, out) ->
@@ -271,20 +382,32 @@ let main (args: string array) =
                         else
                             Log.Warning("JDF route {Route}/{Distinction} transport-mode rule mismatch",
                                         decision.routeId, decision.routeDistinction))
+                    let preparation =
+                        JdfToGtfs.prepareGtfsFeedForStreaming true stopIdsCis effectiveBatch
+                    let referencedStopIds = HashSet<string>(StringComparer.Ordinal)
+                    let stopTimes =
+                        JdfToGtfs.getStreamingBundleStopTimes preparation
+                        |> Seq.map (fun stopTime ->
+                            referencedStopIds.Add(stopTime.stopId) |> ignore
+                            stopTime)
+                    Gtfs.gtfsStopTimesToFolder () out stopTimes
                     let gtfs =
-                        JdfToGtfs.getGtfsFeed stopIdsCis effectiveBatch
+                        JdfToGtfs.finishStreamingBundleFeed
+                            preparation (referencedStopIds |> Set.ofSeq)
                         |> Gtfs.deduplicateCalendar
                         |> gtfsWithCoords stopCoordsByIdPath
 
                     Log.Information("Writing GTFS")
-                    gtfs
-                    |> Gtfs.fillStandardRequiredFields
-                    |> gtfsSer out
+                    let completeFeed = gtfs |> Gtfs.fillStandardRequiredFields
+                    Gtfs.gtfsStandardTablesExceptStopTimesToFolder () out completeFeed
+                    Gtfs.gtfsExtensionsToFolder () out completeFeed
+                    resourceUsage "jdf-to-gtfs" "write-gtfs" 0L
                     Log.Information("Finished!")
                 with e ->
                     Log.Error(e, "Error while processing {Batch}", inpath)
             )
         else if argFlagSet args "czptt-to-bundle" then
+            let mutable temporaryOutput: string option = None
             try
                 let catalog =
                     CzPttToGtfs.loadCatalogSnapshot(
@@ -310,15 +433,24 @@ let main (args: string array) =
                     blockMode = blockMode
                 }
                 let inputPath = argValue args "<CzPtt-in-file>"
-                let outputPath = argValue args "<bundle-out-dir>"
-                if Directory.Exists(outputPath) then
+                let finalOutputPath = Path.GetFullPath(argValue args "<bundle-out-dir>")
+                if Directory.Exists(finalOutputPath) || File.Exists(finalOutputPath) then
                     invalidArg "<bundle-out-dir>" "Output path must not exist"
+                let parent = Path.GetDirectoryName(finalOutputPath)
+                Directory.CreateDirectory(parent) |> ignore
+                let outputPath =
+                    Path.Combine(
+                        parent,
+                        $".{Path.GetFileName(finalOutputPath)}.{Guid.NewGuid():N}.tmp")
+                temporaryOutput <- Some outputPath
                 Directory.CreateDirectory(outputPath) |> ignore
                 let bundleProgress name state =
                     phase "convert" name state
+                    if state = "completed" then
+                        resourceUsage "convert" name (CzPttBundle.currentSpillBytes())
                 let result =
-                    CzPttBundle.writeSidecarsWithProgressAndOptions
-                        catalog conversionOptions inputPath outputPath
+                    CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
+                        CzPttBundle.SpillBacked catalog conversionOptions inputPath outputPath
                         sr70Path sr70Name20Path osmPath osmAliasesPath bundleProgress
                 phase "convert" "write-gtfs" "started"
                 result.feed
@@ -335,6 +467,7 @@ let main (args: string array) =
                     if File.Exists(source) then
                         File.Move(source, Path.Combine(extensionsPath, fileName))
                 phase "convert" "write-gtfs" "completed"
+                resourceUsage "convert" "write-gtfs" (CzPttBundle.currentSpillBytes())
                 phase "convert" "write-diagnostics" "started"
                 let diagnostics = Dictionary<string, obj>()
                 diagnostics.["schema_version"] <- box 1
@@ -366,9 +499,16 @@ let main (args: string array) =
                         diagnostics,
                         JsonSerializerOptions(WriteIndented = true)) + "\n")
                 phase "convert" "write-diagnostics" "completed"
+                resourceUsage "convert" "write-diagnostics" (CzPttBundle.currentSpillBytes())
                 CzPttBundle.writeManifest outputPath
+                resourceUsage "convert" "write-manifest" (CzPttBundle.currentSpillBytes())
+                Directory.Move(outputPath, finalOutputPath)
+                temporaryOutput <- None
                 Log.Information("Finished!")
             with e ->
+                temporaryOutput
+                |> Option.iter (fun path ->
+                    if Directory.Exists(path) then Directory.Delete(path, true))
                 exitCode <- 1
                 Log.Error(e, "CZPTT bundle conversion failed")
         else if argFlagSet args "czptt-to-gtfs" then
@@ -430,6 +570,7 @@ let main (args: string array) =
                         ExternalCsv.otherStopsFromPathForJdfMatch gdp)
                 |> Option.defaultValue [||]
             phase "fix-jdf" "read-external-stops" "completed"
+            resourceUsage "fix-jdf" "read-external-stops" 0L
             phase "fix-jdf" "read-osm-stops" "started"
             let osmStopsToMatch =
                 czPbf
@@ -439,6 +580,7 @@ let main (args: string array) =
                         |> Osm.czOtherStopsForJdfMatch)
                 |> Option.defaultValue [||]
             phase "fix-jdf" "read-osm-stops" "completed"
+            resourceUsage "fix-jdf" "read-osm-stops" 0L
             use stopMatcher = new StopMatcher.StopMatcher<_>(
                 Array.concat [ extStopsToMatch; osmStopsToMatch ],
                 Utils.persistentCachePath
@@ -451,15 +593,23 @@ let main (args: string array) =
                 "Fixing JDF with {Jobs} workers and {BatchOutput} batch output",
                 fixPlan.resolvedWorkers, batchOutput)
             phase "fix-jdf" "process-batches" "started"
+            let fixAdmissionBytes =
+                adaptiveAdmissionBytes "fix-jdf"
             let results =
                 Jdf.findJdfBatchPaths inDir
                 |> Seq.sort
-                |> Utils.mapParallelOrderedBatches fixPlan.resolvedWorkers (fun batchPath ->
+                |> Utils.mapParallelOrderedAdaptive
+                    fixPlan.maximumWorkers
+                    fixPlan.initialWorkers
+                    fixPlan.memoryBudgetBytes
+                    fixAdmissionBytes
+                    (fun batchPath -> max (8L * Execution.MiB) (inputBytes batchPath * 3L))
+                    (fun batchPath -> batchEvent "batch_started" "fix-jdf" batchPath None)
+                    (schedulerSample "fix-jdf")
+                    (fun batchPath ->
                 let batchName = Path.GetFileNameWithoutExtension(batchPath)
                 use _logCtx = LogContext.PushProperty("JdfBatch", batchName)
                 Log.Information("Processing JDF batch {BatchPath}", batchPath)
-                batchEvent "batch_started" "fix-jdf" batchPath None
-
                 try
                     let batch = Jdf.parseJdfBatchPath jdfPar batchPath
                     let routeKeys =
@@ -485,16 +635,10 @@ let main (args: string array) =
                                 Array.zip batchFixed.stops stopMatches
                                 |> JdfFixups.rejectImplausibleMatches batchFixed.tripStops
                             Seq.concat [
-                                batchFixed.tripStops
-                                |> Seq.groupBy (fun ts -> ts.routeId, ts.tripId)
-                                |> Seq.map snd
                                 // Take one trip most likely to contain all stops'
                                 // km distances (testing all takes too much time).
-                                |> Seq.sortByDescending Seq.length
-                                |> Seq.head
-                                |> fun ts ->
-                                    JdfFixups.checkMatchDistances
-                                        (Seq.toArray ts) stopsWithMatches
+                                JdfFixups.checkMatchDistances
+                                    (longestTripStops batchFixed.tripStops) stopsWithMatches
 
                                 JdfFixups.checkMissingRegionsCountries batchFixed
                             ]
@@ -504,32 +648,35 @@ let main (args: string array) =
 
                     if batchOutput = "zip" then
                         let fixedOutPath = Path.Combine(outDir, batchName + ".zip")
-                        let temporary = fixedOutPath + ".part"
-                        use archive = ZipFile.Open(temporary, ZipArchiveMode.Create)
-                        jdfWri (Jdf.ZipArchive archive) batchWithLocations
-                        archive.Dispose()
-                        File.Move(temporary, fixedOutPath)
+                        Utils.writeAtomicFile fixedOutPath (fun temporary ->
+                            use archive = ZipFile.Open(temporary, ZipArchiveMode.Create)
+                            jdfWri (Jdf.ZipArchive archive) batchWithLocations)
                     else
                         let fixedOutDir = Path.Combine(outDir, batchName)
                         Directory.CreateDirectory(fixedOutDir) |> ignore
                         jdfWri (Jdf.FsPath fixedOutDir) batchWithLocations
                     Log.Information("Completed JDF batch {BatchPath}", batchPath)
-                    batchEvent "batch_completed" "fix-jdf" batchPath None
-                    routeKeys, routeFilter.decisions
+                    Ok (batchPath, routeKeys, routeFilter.decisions)
                 with error ->
+                    Error (batchPath, error))
+            let mutable internationalRouteKeys = Set.empty
+            let internationalRouteDecisions = ResizeArray<_>()
+            for result in results do
+                match result with
+                | Ok (batchPath, routeKeys, decisions) ->
+                    batchEvent "batch_completed" "fix-jdf" batchPath None
+                    internationalRouteKeys <- Set.union internationalRouteKeys routeKeys
+                    internationalRouteDecisions.AddRange(decisions)
+                | Error (batchPath, error) ->
                     batchEvent "batch_failed" "fix-jdf" batchPath (Some error)
-                    reraise ())
-                |> Seq.toArray
+                    raise error
             phase "fix-jdf" "process-batches" "completed"
-            let internationalRouteKeys =
-                results |> Seq.collect (fst >> Set.toSeq) |> Set
-            let internationalRouteDecisions =
-                results |> Array.collect snd
+            resourceUsage "fix-jdf" "process-batches" 0L
             JdfToGtfs.validateInternationalRouteOverrides
                 internationalRouteKeys internationalRouteOverrides
             JdfFixups.logMatchDiagnostics ()
             JdfToGtfs.logInternationalRouteDecisions
-                internationalRoutePolicy internationalRouteDecisions
+                internationalRoutePolicy (internationalRouteDecisions.ToArray())
             Log.Information("Finished!")
         else if argFlagSet args "merge-jdf" then
             let outDir = argValue args "<JDF-out-dir>"
@@ -537,26 +684,56 @@ let main (args: string array) =
             let strict = argFlagSet args "--strict"
             let mergePlan = jobsFor "merge-jdf" Execution.MergeParsing (4L * Execution.GiB)
 
-            let merger = JdfMerger.JdfMerger(
-                if mergeById then JdfMerger.MergeStopsById
-                else JdfMerger.MergeStopsByName)
-            let jdfPar = Jdf.jdfBatchDirParser ()
-            let jdfWri = Jdf.jdfBatchDirWriter ()
+            let outPath = Path.GetFullPath(outDir)
+            let outParent = Path.GetDirectoryName(outPath)
+            Directory.CreateDirectory(outParent) |> ignore
+            let spillPath =
+                Path.Combine(
+                    outParent,
+                    $".{Path.GetFileName(outPath)}.trip-stops.{Guid.NewGuid():N}.tmp")
 
+            use merger =
+                new JdfMerger.JdfMerger(
+                    (if mergeById then JdfMerger.MergeStopsById
+                     else JdfMerger.MergeStopsByName),
+                    spillPath,
+                    mergePlan.maximumWorkers)
+            let jdfPar = Jdf.jdfBatchDirParser ()
+            let mergeParseBytes =
+                adaptiveAdmissionBytes "merge-jdf"
             Log.Information("Parsing merge inputs with {Jobs} workers", mergePlan.resolvedWorkers)
             phase "merge-jdf" "parse-batches" "started"
+            let availableSpillBytes = DriveInfo(Path.GetPathRoot(outParent)).AvailableFreeSpace
+            let minimumSpillReserve = Execution.GiB
+            emitProgressEvent progressEvents "spill_preflight" [
+                "stage", box "merge-jdf"
+                "mode", box "progressive"
+                "minimum_free_bytes", box minimumSpillReserve
+                "available_bytes", box availableSpillBytes
+            ]
+            if availableSpillBytes < minimumSpillReserve then
+                invalidOp (
+                    $"Insufficient temporary disk for merge-jdf: require at least "
+                    + $"{minimumSpillReserve} free bytes, available {availableSpillBytes}")
             let mergeInputs = seq {
                 for inDir in argValues args "<JDF-in-dir>" do
-                    yield! Jdf.findJdfBatchPaths inDir |> Seq.sort
+                    for path in Jdf.findJdfBatchPaths inDir |> Seq.sort do
+                        yield path, mergeInputWeight path
             }
             let parsedInputs =
                 mergeInputs
-                |> Utils.mapParallelOrderedBatches mergePlan.resolvedWorkers (fun batchPath ->
-                    batchEvent "batch_started" "merge-jdf" batchPath None
+                |> Utils.mapParallelOrderedAdaptive
+                    mergePlan.maximumWorkers
+                    mergePlan.initialWorkers
+                    mergePlan.memoryBudgetBytes
+                    mergeParseBytes
+                    snd
+                    (fun (batchPath, _) ->
+                        batchEvent "batch_started" "merge-jdf" batchPath None)
+                    (schedulerSample "merge-jdf")
+                    (fun (batchPath, _) ->
                     try Ok (batchPath, Jdf.parseJdfBatchPath jdfPar batchPath)
-                    with error ->
-                        batchEvent "batch_failed" "merge-jdf" batchPath (Some error)
-                        Error (batchPath, error))
+                    with error -> Error (batchPath, error))
             for parsed in parsedInputs do
                 match parsed with
                 | Ok (batchPath, batch) ->
@@ -571,20 +748,24 @@ let main (args: string array) =
                         batchEvent "batch_failed" "merge-jdf" batchPath (Some error)
                         reraise ()
                 | Error (batchPath, error) ->
+                    batchEvent "batch_failed" "merge-jdf" batchPath (Some error)
                     Log.Error(error, "Error while processing {Batch}", batchPath)
                     if strict then raise error
             phase "merge-jdf" "parse-batches" "completed"
             merger.logStopMergeSummary()
+            resourceUsage "merge-jdf" "parse-batches" merger.tripStopSpillBytes
 
             phase "merge-jdf" "resolve-route-overlaps" "started"
             Log.Information("Resolving route overlaps")
             merger.resolveRouteOverlaps()
             phase "merge-jdf" "resolve-route-overlaps" "completed"
+            resourceUsage "merge-jdf" "resolve-route-overlaps" merger.tripStopSpillBytes
 
             phase "merge-jdf" "write-merged-jdf" "started"
             Log.Information("Writing merged JDF")
-            jdfWri (Jdf.FsPath outDir) merger.batch
+            merger.write(outDir)
             phase "merge-jdf" "write-merged-jdf" "completed"
+            resourceUsage "merge-jdf" "write-merged-jdf" merger.tripStopSpillBytes
             Log.Information("Finished!")
         else printfn "%s" docstring
         exitCode

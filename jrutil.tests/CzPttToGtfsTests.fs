@@ -368,6 +368,35 @@ type CzPttToGtfsTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``Spill-backed CZPTT merger replays messages and removes its spool``() =
+        let root = Path.Combine(Path.GetTempPath(), $"jrutil-czptt-spill-{Guid.NewGuid():N}")
+        Directory.CreateDirectory(root) |> ignore
+        let spill = Path.Combine(root, "messages.tmp")
+        try
+            let value =
+                message
+                    [ location "57076" "Praha" "10:00:00" ["0001"] None []
+                      location "57016" "Kolín" "11:00:00" ["0001"] None [] ]
+                    []
+            let paid =
+                value.Identifiers
+                |> Seq.find (fun identifier -> identifier.ObjectType = CzPttXml.ObjectType.Pa)
+                |> CzPtt.identifierStr
+            do
+                use merger = new CzPttMerge.CzPttMerger(spill)
+                merger.Add(value)
+                Assert.IsTrue(merger.SpillBytes > 0L)
+                let replayed = merger.SurvivingMessages |> Seq.exactlyOne
+                let replayedPaid =
+                    replayed.Identifiers
+                    |> Seq.find (fun identifier -> identifier.ObjectType = CzPttXml.ObjectType.Pa)
+                    |> CzPtt.identifierStr
+                Assert.AreEqual(paid, replayedPaid)
+            Assert.IsFalse(File.Exists(spill))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Category changes split linked trips with the real terminus``() =
         let value =
             message [
@@ -1130,6 +1159,57 @@ type CzPttToGtfsTests() =
         let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(4, feed.czTripStopZones.Value.Length)
         Assert.IsTrue(feed.stops |> Array.forall (fun stop -> stop.zoneId.IsNone))
+
+    [<TestMethod>]
+    member _.``Memory and spill-backed CZPTT sidecars are byte-identical``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] []
+        let root = Path.Combine(Path.GetTempPath(), $"jrutil-czptt-identity-{Guid.NewGuid():N}")
+        let input = Path.Combine(root, "input.xml")
+        let sr70 = Path.Combine(root, "SR70.csv")
+        let memoryOutput = Path.Combine(root, "memory")
+        let spillOutput = Path.Combine(root, "spill")
+        Directory.CreateDirectory(root) |> ignore
+        try
+            writeMessage input value
+            File.WriteAllLines(sr70, [|
+                "57076,Praha hl.n.,50.083,14.435"
+                "57016,Kolín,50.026,15.214"
+            |])
+            let options: CzPttToGtfs.ConversionOptions = {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.Blocks
+            }
+            CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
+                CzPttBundle.MemoryBacked catalog options input memoryOutput
+                (Some sr70) None None None (fun _ _ -> ())
+            |> ignore
+            CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
+                CzPttBundle.SpillBacked catalog options input spillOutput
+                (Some sr70) None None None (fun _ _ -> ())
+            |> ignore
+            let memoryFiles =
+                Directory.EnumerateFiles(memoryOutput)
+                |> Seq.map Path.GetFileName
+                |> Seq.sort
+                |> Seq.toArray
+            let spillFiles =
+                Directory.EnumerateFiles(spillOutput)
+                |> Seq.map Path.GetFileName
+                |> Seq.sort
+                |> Seq.toArray
+            CollectionAssert.AreEqual(memoryFiles, spillFiles)
+            for name in memoryFiles do
+                CollectionAssert.AreEqual(
+                    File.ReadAllBytes(Path.Combine(memoryOutput, name)),
+                    File.ReadAllBytes(Path.Combine(spillOutput, name)),
+                    name)
+            Assert.AreEqual(0, Directory.EnumerateFiles(root, "*.tmp") |> Seq.length)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
     member _.``CZPTT bundle writer emits all operational Parquet sidecars``() =

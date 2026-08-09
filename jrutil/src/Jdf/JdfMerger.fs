@@ -3,15 +3,275 @@
 
 module JrUtil.JdfMerger
 
+open System
 open System.Collections.Generic
+open System.IO
+open System.Text
 open NodaTime
 open Serilog
 open NetTopologySuite.Geometries
 
 open JrUtil.JdfModel
 open JrUtil.JdfStopReconciliation
+open JrUtil.JdfParser
+open JrUtil.JdfSerializer
 open JrUtil.Utils
 open JrUtil.GeoData.Common
+
+type private SpoolChunk = {
+    path: string
+    offset: int64
+    length: int64
+}
+
+type private SpoolRoute = {
+    storedDistinction: int
+    chunks: ResizeArray<SpoolChunk>
+}
+
+type private SerializedBuffer = {
+    stream: MemoryStream
+    chunks: ((string * int) * int64 * int64) array
+}
+
+type private TripStopSpool(path: string) =
+    let directory = Path.GetDirectoryName(path)
+    do if not (String.IsNullOrEmpty(directory)) then Directory.CreateDirectory(directory) |> ignore
+
+    let stream =
+        new FileStream(
+            path,
+            FileMode.Create,
+            FileAccess.ReadWrite,
+            FileShare.Read,
+            1024 * 1024,
+            FileOptions.SequentialScan)
+    let writer = new StreamWriter(stream, jdfEncoding, 1024 * 1024, true)
+    let writeRecord = getJdfRecordWriter<TripStop>
+    let routes = Dictionary<string * int, SpoolRoute>()
+    let segmentPaths = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    let mutable currentKey: (string * int) option = None
+    let mutable currentOffset = 0L
+    let mutable finalized = false
+    let mutable peakLength = 0L
+
+    let storedLength () =
+        stream.Length
+        + (segmentPaths
+           |> Seq.sumBy (fun segmentPath ->
+               if File.Exists(segmentPath) then FileInfo(segmentPath).Length else 0L))
+
+    let finishChunk () =
+        match currentKey with
+        | Some key ->
+            writer.Flush()
+            let length = stream.Position - currentOffset
+            if length > 0L then
+                routes.[key].chunks.Add({ path = path; offset = currentOffset; length = length })
+            currentKey <- None
+        | None -> ()
+
+    let ensureRoute key distinction =
+        match routes.TryGetValue(key) with
+        | true, route -> route
+        | false, _ ->
+            let route = { storedDistinction = distinction; chunks = ResizeArray() }
+            routes.Add(key, route)
+            route
+
+    let finalize () =
+        if not finalized then
+            finishChunk ()
+            writer.Flush()
+            finalized <- true
+
+    let copyChunk (input: Stream) (output: Stream) (chunk: SpoolChunk) =
+        input.Position <- chunk.offset
+        let buffer = Array.zeroCreate<byte> (1024 * 1024)
+        let mutable remaining = chunk.length
+        while remaining > 0L do
+            let requested = int (min remaining (int64 buffer.Length))
+            let read = input.Read(buffer, 0, requested)
+            if read = 0 then raise (EndOfStreamException("Unexpected end of trip-stop spool"))
+            output.Write(buffer, 0, read)
+            remaining <- remaining - int64 read
+
+    let rewriteChunk
+        (input: Stream) (output: Stream) storedDistinction outputDistinction (chunk: SpoolChunk) =
+        input.Position <- chunk.offset
+        let oldSuffix = $"\",\"{storedDistinction}\";\r\n"
+        let newSuffix = $"\",\"{outputDistinction}\";\r\n"
+        let buffer = Array.zeroCreate<byte> (1024 * 1024)
+        let mutable remaining = chunk.length
+        let mutable carry = ""
+        let mutable replaced = false
+        let writeText (text: string) =
+            let bytes = jdfEncoding.GetBytes(text)
+            output.Write(bytes, 0, bytes.Length)
+        while remaining > 0L do
+            let requested = int (min remaining (int64 buffer.Length))
+            let read = input.Read(buffer, 0, requested)
+            if read = 0 then raise (EndOfStreamException("Unexpected end of trip-stop spool"))
+            remaining <- remaining - int64 read
+            let text = carry + jdfEncoding.GetString(buffer, 0, read)
+            let safeLimit =
+                if remaining = 0L then text.Length
+                else max 0 (text.Length - oldSuffix.Length + 1)
+            let mutable position = 0
+            let mutable searching = true
+            while searching do
+                let found = text.IndexOf(oldSuffix, position, StringComparison.Ordinal)
+                if found >= 0 && (remaining = 0L || found < safeLimit) then
+                    writeText (text.Substring(position, found - position))
+                    writeText newSuffix
+                    replaced <- true
+                    position <- found + oldSuffix.Length
+                else
+                    searching <- false
+            let writeUntil = max position safeLimit
+            writeText (text.Substring(position, writeUntil - position))
+            carry <- text.Substring(writeUntil)
+        if not replaced then
+            failwithf "Trip-stop spool did not contain distinction %d" storedDistinction
+
+    member _.Add(key: string * int, row: TripStop) =
+        if finalized then invalidOp "Cannot append to a finalized trip-stop spool"
+        ensureRoute key (snd key) |> ignore
+        if currentKey <> Some key then
+            finishChunk ()
+            currentKey <- Some key
+            currentOffset <- stream.Position
+        writeRecord writer row
+
+    member _.BeginMappedBatch(
+        rows: TripStop array,
+        workers: int,
+        mapRow: TripStop -> TripStop) =
+        if finalized then invalidOp "Cannot append to a finalized trip-stop spool"
+        Threading.Tasks.Task.Run<unit -> unit>(Func<unit -> unit>(fun () ->
+            let usefulPartitions = max 1 ((rows.Length + 2047) / 2048)
+            let partitionCount =
+                min workers (min Environment.ProcessorCount usefulPartitions)
+            let partitionSize = (rows.Length + partitionCount - 1) / partitionCount
+            let partitions =
+                if rows.Length = 0 then [||]
+                else [| for start in 0 .. partitionSize .. rows.Length - 1 ->
+                          start, min rows.Length (start + partitionSize) |]
+            let serializeBuffer (startIndex, endIndex) =
+                let bufferStream = new MemoryStream()
+                use partWriter = new StreamWriter(bufferStream, jdfEncoding, 64 * 1024, true)
+                let chunks = ResizeArray<_>()
+                let mutable chunkKey: (string * int) option = None
+                let mutable chunkOffset = 0L
+                let finishBufferChunk () =
+                    match chunkKey with
+                    | Some key ->
+                        partWriter.Flush()
+                        let length = bufferStream.Position - chunkOffset
+                        if length > 0L then chunks.Add(key, chunkOffset, length)
+                        chunkKey <- None
+                    | None -> ()
+                for index in startIndex .. endIndex - 1 do
+                    let mapped = mapRow rows.[index]
+                    let key = mapped.routeId, mapped.routeDistinction
+                    if chunkKey <> Some key then
+                        finishBufferChunk ()
+                        chunkKey <- Some key
+                        chunkOffset <- bufferStream.Position
+                    writeRecord partWriter mapped
+                finishBufferChunk ()
+                partWriter.Flush()
+                {
+                    stream = bufferStream
+                    chunks = chunks.ToArray()
+                }
+            let buffers =
+                partitions
+                |> mapParallelOrderedBatches partitionCount serializeBuffer
+                |> Seq.toArray
+            fun () ->
+                if finalized then invalidOp "Cannot register into a finalized trip-stop spool"
+                finishChunk ()
+                writer.Flush()
+                try
+                    for buffer in buffers do
+                        let baseOffset = stream.Position
+                        buffer.stream.Position <- 0L
+                        buffer.stream.CopyTo(stream)
+                        for key, offset, length in buffer.chunks do
+                            let route = ensureRoute key (snd key)
+                            route.chunks.Add({
+                                path = path
+                                offset = baseOffset + offset
+                                length = length
+                            })
+                    peakLength <- max peakLength (storedLength ())
+                finally
+                    for buffer in buffers do buffer.stream.Dispose()))
+
+    member this.AddMappedBatch(
+        rows: TripStop array,
+        workers: int,
+        mapRow: TripStop -> TripStop) =
+        let register =
+            this.BeginMappedBatch(rows, workers, mapRow).GetAwaiter().GetResult()
+        register ()
+
+    member _.Delete(key) =
+        finishChunk ()
+        routes.Remove(key) |> ignore
+
+    member _.Copy(sourceKey, destinationKey) =
+        finishChunk ()
+        let source = ensureRoute sourceKey (snd sourceKey)
+        routes.[destinationKey] <- source
+
+    member _.WriteTo(output: Stream) =
+        finalize ()
+        let mutable segmentInput: FileStream = null
+        let mutable segmentInputPath = ""
+        let inputFor chunkPath =
+            if String.Equals(chunkPath, path, StringComparison.OrdinalIgnoreCase) then
+                stream :> Stream
+            else
+                if segmentInputPath <> chunkPath then
+                    if not (isNull segmentInput) then segmentInput.Dispose()
+                    segmentInput <- File.OpenRead(chunkPath)
+                    segmentInputPath <- chunkPath
+                segmentInput :> Stream
+        try
+            for KeyValue(key, route) in routes do
+                for chunk in route.chunks do
+                    let input = inputFor chunk.path
+                    if route.storedDistinction = snd key then copyChunk input output chunk
+                    else rewriteChunk input output route.storedDistinction (snd key) chunk
+        finally
+            if not (isNull segmentInput) then segmentInput.Dispose()
+
+    member this.ToArray() =
+        use memory = new MemoryStream()
+        this.WriteTo(memory)
+        memory.Position <- 0L
+        let parser: Stream -> TripStop seq = getJdfParser
+        parser memory |> Seq.toArray
+
+    member _.Length =
+        writer.Flush()
+        storedLength ()
+
+    member _.PeakLength =
+        writer.Flush()
+        max peakLength (storedLength ())
+
+    interface IDisposable with
+        member _.Dispose() =
+            try
+                try writer.Dispose()
+                finally stream.Dispose()
+            finally
+                if File.Exists(path) then File.Delete(path)
+                for segmentPath in segmentPaths do
+                    if File.Exists(segmentPath) then File.Delete(segmentPath)
 
 type StopMergeStrategy =
     // The default, should work on any valid JDF
@@ -19,7 +279,10 @@ type StopMergeStrategy =
     // Can be convenient if you know all batches have consistent IDs
     | MergeStopsById
 
-type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
+type JdfMerger(
+    stopMergeStrategy: StopMergeStrategy,
+    ?tripStopSpoolPath: string,
+    ?tripStopTransformWorkers: int) =
     let stops = ResizeArray()
     let stopPosts = ResizeArray()
     let agenciesByIco = MultiDict()
@@ -29,6 +292,11 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
     let tripsByRoute = MultiDict()
     let tripGroups = ResizeArray()
     let tripStopsByRoute = MultiDict()
+    let tripStopSpool = tripStopSpoolPath |> Option.map (fun path -> new TripStopSpool(path))
+    let tripStopTransformWorkers = defaultArg tripStopTransformWorkers 1
+    do
+        if tripStopTransformWorkers <= 0 then
+            invalidArg "tripStopTransformWorkers" "Trip-stop transform workers must be positive"
     let routeInfoByRoute = MultiDict()
     let attributeRefs = ResizeArray()
     let serviceNotesByRoute = MultiDict()
@@ -46,6 +314,8 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
     let mutable lastTripGroupId = 0
 
     let attributeRefsByValue = Dictionary()
+    let attributeArrays =
+        Dictionary<int option array, int option array>(HashIdentity.Structural)
     let stopsByIds = Dictionary()
     let stopPostsSet = HashSet()
     let batchDateByRoute = Dictionary()
@@ -72,7 +342,7 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         Array.init 6 (fun index ->
             if index < min 6 merged.Length then Some merged.[index] else None)
 
-    member this.batch = {
+    member private this.batchWithTripStops tripStops = {
         version = {
             version = "1.11"
             duNum = None
@@ -91,7 +361,7 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
             routeStopsByRoute.Values |> Seq.collect id |> Seq.toArray
         trips = tripsByRoute.Values |> Seq.collect id |> Seq.toArray
         tripGroups = tripGroups |> Seq.toArray
-        tripStops = tripStopsByRoute.Values |> Seq.collect id |> Seq.toArray
+        tripStops = tripStops
         routeInfo = routeInfoByRoute.Values |> Seq.collect id |> Seq.toArray
         attributeRefs = attributeRefs |> Seq.toArray
         serviceNotes =
@@ -109,6 +379,25 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
             |> Seq.map (fun pair -> { stopId = pair.Key; source = pair.Value })
             |> Seq.toArray
     }
+
+    member this.batch =
+        let tripStops =
+            match tripStopSpool with
+            | Some spool -> spool.ToArray()
+            | None -> tripStopsByRoute.Values |> Seq.collect id |> Seq.toArray
+        this.batchWithTripStops tripStops
+
+    member this.write(path: string) =
+        match tripStopSpool with
+        | None -> Jdf.jdfBatchDirWriter () (Jdf.FsPath path) this.batch
+        | Some spool ->
+            let withoutTripStops = this.batchWithTripStops [||]
+            Jdf.jdfBatchDirWriter () (Jdf.FsPath path) withoutTripStops
+            use output = File.Open(Path.Combine(path, "Zasspoje.txt"), FileMode.Create)
+            spool.WriteTo(output)
+
+    member _.tripStopSpillBytes =
+        tripStopSpool |> Option.map (fun spool -> spool.PeakLength) |> Option.defaultValue 0L
 
     member _.stopMergeStatistics = stopReconciler.Statistics
 
@@ -134,7 +423,9 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         routeIntegrationsByRoute.Remove((routeId, routeDistinction)) |> ignore
         routeStopsByRoute.Remove((routeId, routeDistinction)) |> ignore
         tripsByRoute.Remove((routeId, routeDistinction)) |> ignore
-        tripStopsByRoute.Remove((routeId, routeDistinction)) |> ignore
+        match tripStopSpool with
+        | Some spool -> spool.Delete((routeId, routeDistinction))
+        | None -> tripStopsByRoute.Remove((routeId, routeDistinction)) |> ignore
         routeInfoByRoute.Remove((routeId, routeDistinction)) |> ignore
         serviceNotesByRoute.Remove((routeId, routeDistinction)) |> ignore
         transfersByRoute.Remove((routeId, routeDistinction)) |> ignore
@@ -172,13 +463,16 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                     routeId = copy.id
                     routeDistinction = newDist
             })
-        tripStopsByRoute.[(copy.id, newDist)] <-
-            tripStopsByRoute.[(copy.id, oldDist)]
-            |> Seq.map (fun x -> {
-                x with
-                    routeId = copy.id
-                    routeDistinction = newDist
-            })
+        match tripStopSpool with
+        | Some spool -> spool.Copy((copy.id, oldDist), (copy.id, newDist))
+        | None ->
+            tripStopsByRoute.[(copy.id, newDist)] <-
+                tripStopsByRoute.[(copy.id, oldDist)]
+                |> Seq.map (fun x -> {
+                    x with
+                        routeId = copy.id
+                        routeDistinction = newDist
+                })
         routeInfoByRoute.[(copy.id, newDist)] <-
             routeInfoByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
@@ -359,44 +653,41 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                     |> Option.iter (fun r2now ->
                         this.resolveOneRouteOverlap(r1, r2now))
 
-    member this.add(batch: JdfBatch) =
-        let existingAttributeRefs, attributeRefsToAdd =
-            batch.attributeRefs
-            |> splitSeq (fun ar ->
-                attributeRefsByValue.ContainsKey(ar.value, ar.reserved1))
-        let attributeRefsToAddNewId =
-            attributeRefsToAdd
-            |> Seq.map (fun ar ->
+    member this.beginAdd(batch: JdfBatch) =
+        let attributeRefIdMap = Dictionary<int, int>()
+        let existingAttributeRefsByValue =
+            Dictionary<Attribute * string option, int>(attributeRefsByValue)
+        for ar in batch.attributeRefs do
+            match existingAttributeRefsByValue.TryGetValue((ar.value, ar.reserved1)) with
+            | true, existingId -> attributeRefIdMap.[ar.attributeId] <- existingId
+            | false, _ ->
                 lastAttributeRefId <- lastAttributeRefId + 1
-                { ar with attributeId = lastAttributeRefId })
-            |> Seq.cache
-        attributeRefs.AddRange(attributeRefsToAddNewId)
-        for ar in attributeRefsToAddNewId do
-            attributeRefsByValue.[(ar.value, ar.reserved1)] <- ar.attributeId
-        let attributeRefIdMap =
-            Seq.concat [
-                Seq.zip attributeRefsToAdd attributeRefsToAddNewId
-                |> Seq.map (fun (ar, arni) ->
-                    ar.attributeId, arni.attributeId)
+                let added = { ar with attributeId = lastAttributeRefId }
+                attributeRefs.Add(added)
+                attributeRefsByValue.[(added.value, added.reserved1)] <- added.attributeId
+                attributeRefIdMap.[ar.attributeId] <- added.attributeId
+        let mapAttributes attributes =
+            let mapped =
+                attributes
+                |> Array.map (Option.map (fun id -> attributeRefIdMap.[id]))
+            match attributeArrays.TryGetValue(mapped) with
+            | true, interned -> interned
+            | false, _ ->
+                attributeArrays.Add(mapped, mapped)
+                mapped
 
-                existingAttributeRefs
-                |> Seq.map (fun ar ->
-                    ar.attributeId, attributeRefsByValue.[(ar.value, ar.reserved1)])
-            ]
-            |> Map
-        let mapAttributes =
-            Array.map (Option.map (fun id -> attributeRefIdMap.[id]))
-
-        let batchLocationsByStop =
-            batch.stopLocations
-            |> Seq.map (fun location -> location.stopId, location)
-            |> Map
+        let batchLocationsByStop = Dictionary<int64, StopLocation>()
+        for location in batch.stopLocations do
+            batchLocationsByStop.[location.stopId] <- location
         let stopIdMap = Dictionary<int64, int64>()
         let preferredIncomingLocationSources = HashSet<int64>()
 
         for sourceStop in batch.stops do
             let mappedStop = { sourceStop with attributes = mapAttributes sourceStop.attributes }
-            let sourceLocation = batchLocationsByStop |> Map.tryFind sourceStop.id
+            let sourceLocation =
+                match batchLocationsByStop.TryGetValue(sourceStop.id) with
+                | true, location -> Some location
+                | false, _ -> None
             match stopMergeStrategy with
             | MergeStopsById ->
                 match stopsByIds.TryGetValue(sourceStop.id) with
@@ -455,8 +746,9 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                     stops.Add(added)
                     stopIdMap.[sourceStop.id] <- added.id
                     stopReconciler.AddAlias(added.id, sourceStop, sourceLocation)
-        let batchLocationSources =
-            batch.stopLocationSources |> Seq.map (fun value -> value.stopId, value.source) |> Map
+        let batchLocationSources = Dictionary<int64, string>()
+        for value in batch.stopLocationSources do
+            batchLocationSources.[value.stopId] <- value.source
         for sl in batch.stopLocations do
             let stopId = stopIdMap.[sl.stopId]
             let hasOldSl, oldSl = stopLocationsByStop.TryGetValue(stopId)
@@ -482,9 +774,9 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                    && preferredIncomingLocationSources.Contains(sl.stopId))
             then
                 stopLocationsByStop.[stopId] <- { sl with stopId = stopId }
-                match batchLocationSources |> Map.tryFind sl.stopId with
-                | Some source -> stopLocationSourcesByStop.[stopId] <- source
-                | None -> stopLocationSourcesByStop.Remove(stopId) |> ignore
+                match batchLocationSources.TryGetValue(sl.stopId) with
+                | true, source -> stopLocationSourcesByStop.[stopId] <- source
+                | false, _ -> stopLocationSourcesByStop.Remove(stopId) |> ignore
 
         let stopPostsToAdd =
             batch.stopPosts
@@ -537,10 +829,9 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
             |> Map
 
         // For later merging steps
-        let routesMap =
-            batch.routes
-            |> Seq.map (fun r -> (r.id, r.idDistinction), r)
-            |> Map
+        let routesMap = Dictionary<string * int, Route>()
+        for route in batch.routes do
+            routesMap.[(route.id, route.idDistinction)] <- route
         // We don't resolve validity overlaps here and leave that for a
         // post-processing phase
         let newRoutes =
@@ -557,11 +848,10 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
 
             batchDateByRoute.[(r.id, r.idDistinction)] <-
                 batch.version.creationDate
-        let routeIdMap =
-            Seq.zip batch.routes newRoutes
-            |> Seq.map (fun (r, rni) ->
-                (r.id, r.idDistinction), (rni.id, rni.idDistinction))
-            |> Map
+        let routeIdMap = Dictionary<string * int, string * int>()
+        for source, mapped in Seq.zip batch.routes newRoutes do
+            routeIdMap.[(source.id, source.idDistinction)] <-
+                (mapped.id, mapped.idDistinction)
 
         batch.routeIntegrations
         |> Seq.map (fun ri ->
@@ -614,17 +904,33 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         |> Seq.groupBy (fun t -> t.routeId, t.routeDistinction)
         |> Seq.iter (fun (k, v) -> tripsByRoute.[k] <- v)
 
-        batch.tripStops
-        |> Seq.map (fun ts ->
+        let tripStopAttributes =
+            Dictionary<int option array, int option array>(HashIdentity.Structural)
+        // Populate the structural interning dictionaries in source order
+        // before workers perform read-only lookups. This keeps allocation and
+        // dictionary insertion deterministic while allowing the dominant
+        // relation's remapping to use the aggressive CLI worker ceiling.
+        for source in batch.tripStops do
+            if not (tripStopAttributes.ContainsKey(source.attributes)) then
+                tripStopAttributes.Add(source.attributes, mapAttributes source.attributes)
+        let mappedTripStop (ts: TripStop) =
             let rid, ridd = routeIdMap.[(ts.routeId, ts.routeDistinction)]
             { ts with
                 routeId = rid
                 routeDistinction = ridd
                 stopId = stopIdMap.[ts.stopId]
-                attributes = mapAttributes ts.attributes
-            })
-        |> Seq.groupBy (fun ts -> ts.routeId, ts.routeDistinction)
-        |> Seq.iter (fun (k, v) -> tripStopsByRoute.[k] <- v)
+                attributes = tripStopAttributes.[ts.attributes]
+            }
+        let tripStopRegistration =
+            match tripStopSpool with
+            | Some spool ->
+                spool.BeginMappedBatch(batch.tripStops, tripStopTransformWorkers, mappedTripStop)
+            | None ->
+                batch.tripStops
+                |> mapParallelOrderedBatches tripStopTransformWorkers mappedTripStop
+                |> Seq.groupBy (fun ts -> ts.routeId, ts.routeDistinction)
+                |> Seq.iter (fun (k, v) -> tripStopsByRoute.[k] <- v)
+                Threading.Tasks.Task.FromResult(fun () -> ())
 
         batch.routeInfo
         |> Seq.map (fun ri ->
@@ -690,4 +996,13 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         |> Seq.groupBy (fun ro -> ro.routeId, ro.routeDistinction)
         |> Seq.iter (fun (k, v) -> reservationOptionsByRoute.[k] <- v)
 
-        ()
+        tripStopRegistration
+
+    member this.add(batch: JdfBatch) =
+        let register = this.beginAdd(batch).GetAwaiter().GetResult()
+        register ()
+
+    interface IDisposable with
+        member _.Dispose() =
+            tripStopSpool
+            |> Option.iter (fun spool -> (spool :> IDisposable).Dispose())

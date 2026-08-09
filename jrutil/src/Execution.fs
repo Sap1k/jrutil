@@ -3,6 +3,7 @@
 module JrUtil.Execution
 
 open System
+open System.Diagnostics
 open System.Globalization
 open System.IO
 open System.Runtime.InteropServices
@@ -41,6 +42,26 @@ type WorkerPlan = {
     workerAllowanceBytes: int64
     memoryLimitedJobs: int
     resolvedWorkers: int
+    initialWorkers: int
+    maximumWorkers: int
+}
+
+type AdaptiveState = {
+    targetWorkers: int
+    admissionPaused: bool
+}
+
+type AdaptiveSample = {
+    privateBytes: int64
+    normalizedCpuPercent: float
+    workQueued: bool
+    backlogHealthy: bool
+}
+
+type MemorySnapshot = {
+    effectiveTotalBytes: int64
+    availableBytes: int64
+    processPrivateBytes: int64
 }
 
 [<StructLayout(LayoutKind.Sequential)>]
@@ -99,23 +120,47 @@ let detectEffectiveMemoryBytes () =
         gcLimit, max 0L (gcLimit - gcInfo.MemoryLoadBytes)
     | None -> 8L * GiB, 6L * GiB
 
-let autoMemoryBudgetBytes effectiveTotalBytes _availableBytes =
+let automaticMemoryReserveBytes effectiveTotalBytes =
     if effectiveTotalBytes <= 0L then
         invalidArg "effectiveTotalBytes" "Effective total memory must be positive"
 
-    // Base automatic budgets on machine/process capacity, not the instantaneous
-    // available-physical-memory counter. In particular, Windows can reclaim
-    // standby pages and use its page file, so treating that counter as a hard
-    // admission limit rejects work that the OS can run normally.
+    min (4L * GiB) (max GiB (effectiveTotalBytes / 4L))
+
+let autoMemoryBudgetBytes effectiveTotalBytes availableBytes processPrivateBytes =
+    if effectiveTotalBytes <= 0L then
+        invalidArg "effectiveTotalBytes" "Effective total memory must be positive"
+    if availableBytes < 0L then
+        invalidArg "availableBytes" "Available memory must not be negative"
+    if processPrivateBytes < 0L then
+        invalidArg "processPrivateBytes" "Process memory must not be negative"
+
+    // Keep the former capacity ceiling, but never assume that capacity is
+    // currently free. Available memory excludes the process's existing private
+    // bytes, so add only the portion left after reserving RAM for the OS and
+    // other applications to the current process footprint.
     let capacityBudget =
         if effectiveTotalBytes <= 20L * GiB then
             min (10L * GiB) (effectiveTotalBytes - 6L * GiB)
         else
             effectiveTotalBytes - max (8L * GiB) (effectiveTotalBytes / 4L)
-    // Do not add another minimum-memory gate here. Bounded workers can still
-    // make progress with a small budget, and an explicit OS/GC limit remains
-    // represented by effectiveTotalBytes.
-    max GiB capacityBudget
+    let capacityBudget = max 1L capacityBudget
+    let available = min effectiveTotalBytes availableBytes
+    let allocatable = max 0L (available - automaticMemoryReserveBytes effectiveTotalBytes)
+    let liveBudget = processPrivateBytes + allocatable
+
+    min capacityBudget liveBudget
+    |> max processPrivateBytes
+    |> max 1L
+
+let detectMemorySnapshot () =
+    let total, available = detectEffectiveMemoryBytes ()
+    use currentProcess = Process.GetCurrentProcess()
+    currentProcess.Refresh()
+    {
+        effectiveTotalBytes = total
+        availableBytes = max 0L (min total available)
+        processPrivateBytes = max 0L currentProcess.PrivateMemorySize64
+    }
 
 let parseMemoryBudget (value: string) =
     if value.Equals("auto", StringComparison.OrdinalIgnoreCase) then AutoMemory
@@ -142,24 +187,53 @@ let parseJobRequest (value: string) =
         | true, count when count > 0 -> FixedJobs count
         | _ -> invalidArg "value" "Jobs must be 'auto' or a positive integer"
 
-let resolveMemoryBudget request =
+let resolveMemoryBudgetFromSnapshot request snapshot =
     match request with
     | FixedMemory bytes -> bytes
     | AutoMemory ->
-        let total, available = detectEffectiveMemoryBytes ()
-        autoMemoryBudgetBytes total available
+        autoMemoryBudgetBytes
+            snapshot.effectiveTotalBytes
+            snapshot.availableBytes
+            snapshot.processPrivateBytes
+
+let resolveMemoryBudget request =
+    resolveMemoryBudgetFromSnapshot request (detectMemorySnapshot ())
+
+let aggressiveAutoMaximum processorCount =
+    min 256 (max 32 (processorCount * 8))
 
 let requestedJobCount request =
     match request with
-    | AutoJobs -> Environment.ProcessorCount
+    | AutoJobs -> aggressiveAutoMaximum Environment.ProcessorCount
     | FixedJobs count -> count
+
+let initialJobCount maximum processorCount =
+    min maximum (max 4 (processorCount * 2))
+
+let advanceAdaptiveState (memoryBudget: int64) (maximumWorkers: int)
+                         (state: AdaptiveState) (sample: AdaptiveSample) =
+    let memoryRatio = float sample.privateBytes / float memoryBudget
+    if memoryRatio >= 0.95 then
+        { targetWorkers = max 1 (state.targetWorkers / 2); admissionPaused = true }
+    elif state.admissionPaused && memoryRatio >= 0.80 then
+        state
+    elif memoryRatio > 0.85 then
+        { targetWorkers = max 1 (state.targetWorkers * 3 / 4); admissionPaused = false }
+    elif memoryRatio >= 0.80 || sample.normalizedCpuPercent >= 90.0
+         || not sample.workQueued || not sample.backlogHealthy then
+        { state with admissionPaused = false }
+    else
+        { targetWorkers =
+            min maximumWorkers
+                (state.targetWorkers + max 2 (state.targetWorkers / 4))
+          admissionPaused = false }
 
 let storageModeForBudget budgetBytes =
     if budgetBytes <= 12L * GiB then SpillFirst else AdaptiveMemory
 
 let private workerAllowance = function
-    | FixBatches -> 512L * MiB
-    | MergeParsing -> 256L * MiB
+    // Fix and merge use live process-memory and per-input byte admission.
+    | FixBatches | MergeParsing -> 0L
     | BundleWork -> 128L * MiB
 
 let workerPlan workload requestedJobs processorCount budgetBytes reservedBytes =
@@ -167,7 +241,9 @@ let workerPlan workload requestedJobs processorCount budgetBytes reservedBytes =
     if processorCount <= 0 then invalidArg "processorCount" "Processor count must be positive"
     let usable = max 0L (budgetBytes - reservedBytes)
     let allowance = workerAllowance workload
-    let memoryJobs = max 1 (int (usable / allowance))
+    let memoryJobs =
+        if allowance = 0L then requestedJobs
+        else max 1 (int (usable / allowance))
     {
         workload = workload
         requestedJobs = requestedJobs
@@ -176,10 +252,9 @@ let workerPlan workload requestedJobs processorCount budgetBytes reservedBytes =
         reservedBytes = reservedBytes
         workerAllowanceBytes = allowance
         memoryLimitedJobs = memoryJobs
-        resolvedWorkers =
-            [requestedJobs; processorCount; 16; memoryJobs]
-            |> List.min
-            |> max 1
+        resolvedWorkers = min requestedJobs memoryJobs |> max 1
+        initialWorkers = initialJobCount (min requestedJobs memoryJobs) processorCount
+        maximumWorkers = min requestedJobs memoryJobs
     }
 
 let effectiveJobCount workload requestedJobs processorCount budgetBytes reservedBytes =

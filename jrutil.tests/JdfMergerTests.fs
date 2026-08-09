@@ -2,8 +2,10 @@
 
 namespace JrUtil.Tests
 
+open System
 open System.IO
 open Microsoft.VisualStudio.TestTools.UnitTesting
+open NodaTime
 
 open JrUtil
 open JrUtil.JdfModel
@@ -272,3 +274,65 @@ type JdfMergerTests() =
         match reconciler.FindMatch(query, Some (precise 4L 50.0001M 14.0001M)) with
         | Choice1Of2 candidate -> assertEqual 1L candidate.stopId
         | Choice2Of2 _ -> Assert.Fail("Expected the nearby fuzzy candidate to match")
+
+    [<TestMethod>]
+    member _.``Spill-backed output is byte-identical across interleaved rows and route splits``() =
+        let root = Path.Combine(Path.GetTempPath(), $"jrutil-merge-{Guid.NewGuid():N}")
+        let memoryOutput = Path.Combine(root, "memory")
+        let spillOutput = Path.Combine(root, "spill")
+        let spillPath = Path.Combine(root, "trip-stops.tmp")
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let interleavedTripStops =
+                template.Value.tripStops
+                |> Array.groupBy (fun value -> value.routeId)
+                |> Array.map snd
+                |> fun groups -> [|
+                    for index in 0 .. (groups |> Array.map Array.length |> Array.max) - 1 do
+                        for group in groups do
+                            if index < group.Length then yield group.[index]
+                |]
+                |> fun rows -> Array.init 3000 (fun _ -> rows) |> Array.concat
+            let batch creationDate validFrom validTo =
+                { template.Value with
+                    version = { template.Value.version with creationDate = Some creationDate }
+                    routes =
+                        template.Value.routes
+                        |> Array.map (fun route -> {
+                            route with
+                                timetableValidFrom = validFrom
+                                timetableValidTo = validTo
+                        })
+                    tripStops = interleavedTripStops }
+            let older = batch (LocalDate(2026, 1, 1)) (LocalDate(2026, 1, 1)) (LocalDate(2026, 12, 31))
+            let inner = batch (LocalDate(2026, 2, 1)) (LocalDate(2026, 4, 1)) (LocalDate(2026, 6, 30))
+
+            use memory = new JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
+            memory.add(older)
+            memory.add(inner)
+            memory.resolveRouteOverlaps()
+            memory.write(memoryOutput)
+
+            do
+                use spill =
+                    new JdfMerger.JdfMerger(
+                        JdfMerger.MergeStopsById,
+                        spillPath,
+                        tripStopTransformWorkers = 24)
+                spill.add(older)
+                spill.add(inner)
+                spill.resolveRouteOverlaps()
+                spill.write(spillOutput)
+                Assert.IsTrue(spill.tripStopSpillBytes > 0L)
+
+            Assert.IsFalse(File.Exists(spillPath), "The spill file survived merger disposal")
+            assertEqual 0 (Directory.EnumerateFiles(root, "trip-stops.tmp*") |> Seq.length)
+            let memoryFiles = Directory.GetFiles(memoryOutput) |> Array.map Path.GetFileName |> Array.sort
+            let spillFiles = Directory.GetFiles(spillOutput) |> Array.map Path.GetFileName |> Array.sort
+            assertEqual memoryFiles spillFiles
+            for name in memoryFiles do
+                let expected = File.ReadAllBytes(Path.Combine(memoryOutput, name))
+                let actual = File.ReadAllBytes(Path.Combine(spillOutput, name))
+                CollectionAssert.AreEqual(expected, actual, name)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)

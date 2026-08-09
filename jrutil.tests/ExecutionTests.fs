@@ -3,6 +3,7 @@
 namespace JrUtil.Tests
 
 open System
+open System.IO
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
@@ -13,16 +14,33 @@ open JrUtil.Tests.Asserts
 [<TestClass>]
 type ExecutionTests() =
     [<TestMethod>]
-    member _.``Automatic memory budget leaves capacity headroom``() =
-        assertEqual (10L * GiB) (autoMemoryBudgetBytes (16L * GiB) (14L * GiB))
-        assertEqual (10L * GiB) (autoMemoryBudgetBytes (16L * GiB) (11L * GiB))
-        assertEqual (24L * GiB) (autoMemoryBudgetBytes (32L * GiB) (30L * GiB))
-        assertEqual (48L * GiB) (autoMemoryBudgetBytes (64L * GiB) (60L * GiB))
+    member _.``Automatic memory budget respects capacity and live availability``() =
+        let baseline = 512L * MiB
+        assertEqual (10L * GiB)
+            (autoMemoryBudgetBytes (16L * GiB) (14L * GiB) baseline)
+        assertEqual (15L * GiB / 2L)
+            (autoMemoryBudgetBytes (16L * GiB) (11L * GiB) baseline)
+        assertEqual (24L * GiB)
+            (autoMemoryBudgetBytes (32L * GiB) (30L * GiB) baseline)
+        assertEqual (48L * GiB)
+            (autoMemoryBudgetBytes (64L * GiB) (60L * GiB) baseline)
 
     [<TestMethod>]
-    member _.``Automatic memory budget does not reject low instantaneous availability``() =
-        assertEqual (10L * GiB) (autoMemoryBudgetBytes (16L * GiB) 0L)
-        assertEqual GiB (autoMemoryBudgetBytes (6L * GiB) 0L)
+    member _.``Automatic memory budget does not invent unavailable RAM``() =
+        assertEqual (512L * MiB)
+            (autoMemoryBudgetBytes (16L * GiB) (4L * GiB) (512L * MiB))
+        assertEqual (256L * MiB)
+            (autoMemoryBudgetBytes (6L * GiB) 0L (256L * MiB))
+
+    [<TestMethod>]
+    member _.``Sixteen GiB auto budget contracts as other applications consume RAM``() =
+        let baseline = 512L * MiB
+        let abundant = autoMemoryBudgetBytes (16L * GiB) (14L * GiB) baseline
+        let constrained = autoMemoryBudgetBytes (16L * GiB) (8L * GiB) baseline
+        let exhausted = autoMemoryBudgetBytes (16L * GiB) (3L * GiB) baseline
+        assertEqual (10L * GiB) abundant
+        assertEqual (9L * GiB / 2L) constrained
+        assertEqual baseline exhausted
 
     [<TestMethod>]
     member _.``Memory budget parser accepts binary units and auto``() =
@@ -39,11 +57,19 @@ type ExecutionTests() =
         assertEqual AdaptiveMemory (storageModeForBudget (12L * GiB + 1L))
 
     [<TestMethod>]
-    member _.``Worker count respects CPU requested jobs and stage allowance``() =
+    member _.``Explicit worker count is not capped by CPU count``() =
         assertEqual 1 (effectiveJobCount FixBatches 1 16 (32L * GiB) (4L * GiB))
-        assertEqual 4 (effectiveJobCount FixBatches 8 4 (32L * GiB) (4L * GiB))
-        assertEqual 4 (effectiveJobCount FixBatches 16 16 (6L * GiB) (4L * GiB))
-        assertEqual 16 (effectiveJobCount BundleWork 32 32 (32L * GiB) (4L * GiB))
+        assertEqual 8 (effectiveJobCount FixBatches 8 4 (32L * GiB) (4L * GiB))
+        assertEqual 16 (effectiveJobCount FixBatches 16 4 (6L * GiB) (4L * GiB))
+        assertEqual 32 (effectiveJobCount BundleWork 32 4 (32L * GiB) (4L * GiB))
+
+    [<TestMethod>]
+    member _.``Automatic worker ceiling aggressively oversubscribes processors``() =
+        assertEqual 32 (aggressiveAutoMaximum 1)
+        assertEqual 96 (aggressiveAutoMaximum 12)
+        assertEqual 256 (aggressiveAutoMaximum 64)
+        assertEqual 24 (initialJobCount 96 12)
+        assertEqual 12 (initialJobCount 12 12)
 
     [<TestMethod>]
     member _.``Worker plan exposes every limiting factor``() =
@@ -52,9 +78,42 @@ type ExecutionTests() =
         assertEqual 12 plan.processorCount
         assertEqual (9L * GiB) plan.memoryBudgetBytes
         assertEqual (4L * GiB) plan.reservedBytes
-        assertEqual (512L * MiB) plan.workerAllowanceBytes
-        assertEqual 10 plan.memoryLimitedJobs
-        assertEqual 10 plan.resolvedWorkers
+        assertEqual 0L plan.workerAllowanceBytes
+        assertEqual 20 plan.memoryLimitedJobs
+        assertEqual 20 plan.resolvedWorkers
+        assertEqual 20 plan.initialWorkers
+        assertEqual 20 plan.maximumWorkers
+
+    [<TestMethod>]
+    member _.``Merge worker ceiling delegates memory admission to input weights``() =
+        let plan = workerPlan MergeParsing 12 12 GiB (4L * GiB)
+        assertEqual 0L plan.workerAllowanceBytes
+        assertEqual 12 plan.memoryLimitedJobs
+        assertEqual 12 plan.resolvedWorkers
+
+    [<TestMethod>]
+    member _.``Adaptive controller applies CPU and memory hysteresis``() =
+        let state target paused = { targetWorkers = target; admissionPaused = paused }
+        let sample ratio cpu queued healthy = {
+            privateBytes = int64 (ratio * float GiB)
+            normalizedCpuPercent = cpu
+            workQueued = queued
+            backlogHealthy = healthy
+        }
+        assertEqual (state 25 false)
+            (advanceAdaptiveState GiB 96 (state 20 false) (sample 0.70 40.0 true true))
+        assertEqual (state 20 false)
+            (advanceAdaptiveState GiB 96 (state 20 false) (sample 0.70 90.0 true true))
+        assertEqual (state 20 false)
+            (advanceAdaptiveState GiB 96 (state 20 false) (sample 0.82 20.0 true true))
+        assertEqual (state 15 false)
+            (advanceAdaptiveState GiB 96 (state 20 false) (sample 0.90 20.0 true true))
+        assertEqual (state 10 true)
+            (advanceAdaptiveState GiB 96 (state 20 false) (sample 0.96 20.0 true true))
+        assertEqual (state 10 true)
+            (advanceAdaptiveState GiB 96 (state 10 true) (sample 0.85 20.0 true true))
+        assertEqual (state 12 false)
+            (advanceAdaptiveState GiB 96 (state 10 true) (sample 0.79 20.0 true true))
 
     [<TestMethod>]
     member _.``Bounded parallel map preserves input order``() =
@@ -119,3 +178,157 @@ type ExecutionTests() =
         assertEqual 0 enumerator.Current
         let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> enumerator.MoveNext() |> ignore)
         assertEqual "first" error.Message
+
+    [<TestMethod>]
+    member _.``Weighted parallel map preserves order and byte bound``() =
+        let gate = obj()
+        let mutable activeWeight = 0L
+        let mutable maximumWeight = 0L
+        let weights = [| 3L; 4L; 6L; 2L; 5L |]
+        let work index =
+            lock gate (fun () ->
+                activeWeight <- activeWeight + weights.[index]
+                maximumWeight <- max maximumWeight activeWeight)
+            try
+                Thread.Sleep((weights.Length - index) * 5)
+                index * index
+            finally
+                lock gate (fun () -> activeWeight <- activeWeight - weights.[index])
+        let result =
+            [0 .. weights.Length - 1]
+            |> JrUtil.Utils.mapParallelOrderedWeighted 4 10L (fun index -> weights.[index]) work
+            |> Seq.toArray
+        assertEqual [|0; 1; 4; 9; 16|] result
+        Assert.IsTrue(maximumWeight <= 10L, $"Observed {maximumWeight} bytes in flight")
+
+    [<TestMethod>]
+    member _.``Weighted parallel map admits one oversized input``() =
+        let result =
+            [0; 1; 2]
+            |> JrUtil.Utils.mapParallelOrderedWeighted 3 10L (fun index -> if index = 1 then 20L else 4L) id
+            |> Seq.toArray
+        assertEqual [|0; 1; 2|] result
+
+    [<TestMethod>]
+    member _.``Weighted parallel map reports failures in input order``() =
+        let values =
+            [0..3]
+            |> JrUtil.Utils.mapParallelOrderedWeighted 3 10L (fun _ -> 3L) (fun value ->
+                if value = 1 then raise (InvalidOperationException("first"))
+                if value = 2 then raise (InvalidOperationException("second"))
+                value)
+        use enumerator = values.GetEnumerator()
+        assertEqual true (enumerator.MoveNext())
+        assertEqual 0 enumerator.Current
+        let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> enumerator.MoveNext() |> ignore)
+        assertEqual "first" error.Message
+
+    [<TestMethod>]
+    member _.``Adaptive map continuously replenishes independently of consumer``() =
+        use thirdStarted = new ManualResetEventSlim(false)
+        let values =
+            [0..7]
+            |> JrUtil.Utils.mapParallelOrderedAdaptive
+                4 2 (1024L * GiB) 64L (fun _ -> 1L) ignore ignore (fun value ->
+                    if value = 2 then thirdStarted.Set()
+                    Thread.Sleep(20)
+                    value)
+        use enumerator = values.GetEnumerator()
+        assertEqual true (enumerator.MoveNext())
+        assertEqual 0 enumerator.Current
+        Assert.IsTrue(
+            thirdStarted.Wait(TimeSpan.FromSeconds(2.0)),
+            "Workers were not replenished while ordered consumption was paused")
+        let remaining = ResizeArray<int>()
+        while enumerator.MoveNext() do remaining.Add(enumerator.Current)
+        assertEqual [|1; 2; 3; 4; 5; 6; 7|] (remaining.ToArray())
+
+    [<TestMethod>]
+    member _.``Adaptive map does not force-admit behind a blocked consumer``() =
+        let mutable started = 0
+        let values =
+            [0..99]
+            |> JrUtil.Utils.mapParallelOrderedAdaptive
+                2 2 (1024L * GiB) 1024L (fun _ -> 1L) ignore ignore (fun value ->
+                    Interlocked.Increment(&started) |> ignore
+                    Thread.Sleep(5)
+                    value)
+        use enumerator = values.GetEnumerator()
+        assertEqual true (enumerator.MoveNext())
+        Thread.Sleep(250)
+        Assert.IsTrue(started <= 6, $"Blocked consumer admitted {started} inputs")
+
+    [<TestMethod>]
+    member _.``Adaptive map preserves order concurrency and deterministic failures``() =
+        let gate = obj()
+        let mutable active = 0
+        let mutable maximum = 0
+        let values =
+            [0..7]
+            |> JrUtil.Utils.mapParallelOrderedAdaptive
+                6 4 (1024L * GiB) 64L (fun _ -> 1L) ignore ignore (fun value ->
+                    lock gate (fun () ->
+                        active <- active + 1
+                        maximum <- max maximum active)
+                    try
+                        Thread.Sleep((8 - value) * 4)
+                        if value = 2 then raise (InvalidOperationException("first"))
+                        if value = 3 then raise (InvalidOperationException("second"))
+                        value
+                    finally
+                        lock gate (fun () -> active <- active - 1))
+        use enumerator = values.GetEnumerator()
+        assertEqual true (enumerator.MoveNext())
+        assertEqual 0 enumerator.Current
+        assertEqual true (enumerator.MoveNext())
+        assertEqual 1 enumerator.Current
+        let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> enumerator.MoveNext() |> ignore)
+        assertEqual "first" error.Message
+        Assert.IsTrue(maximum > 1 && maximum <= 4, $"Observed {maximum} workers")
+
+    [<TestMethod>]
+    member _.``Adaptive map admits one oversized input``() =
+        let result =
+            [0; 1; 2]
+            |> JrUtil.Utils.mapParallelOrderedAdaptive
+                3 3 (1024L * GiB) 10L
+                (fun value -> if value = 1 then 20L else 4L)
+                ignore ignore id
+            |> Seq.toArray
+        assertEqual [|0; 1; 2|] result
+
+    [<TestMethod>]
+    member _.``Adaptive map charges the current result until the consumer advances``() =
+        use secondStarted = new ManualResetEventSlim(false)
+        let values =
+            [0; 1]
+            |> JrUtil.Utils.mapParallelOrderedAdaptive
+                2 2 (1024L * GiB) 10L (fun _ -> 8L) ignore ignore (fun value ->
+                    if value = 1 then secondStarted.Set()
+                    value)
+        use enumerator = values.GetEnumerator()
+        assertEqual true (enumerator.MoveNext())
+        assertEqual 0 enumerator.Current
+        Assert.IsFalse(
+            secondStarted.Wait(TimeSpan.FromMilliseconds(200.0)),
+            "The yielded result was uncharged before the consumer advanced")
+        assertEqual true (enumerator.MoveNext())
+        assertEqual 1 enumerator.Current
+        Assert.IsTrue(secondStarted.IsSet)
+
+    [<TestMethod>]
+    member _.``Atomic file output preserves destination and removes failed temporary``() =
+        let root = Path.Combine(Path.GetTempPath(), $"jrutil-atomic-{Guid.NewGuid():N}")
+        Directory.CreateDirectory(root) |> ignore
+        let destination = Path.Combine(root, "result.txt")
+        try
+            File.WriteAllText(destination, "old")
+            Assert.ThrowsExactly<InvalidOperationException>(fun () ->
+                JrUtil.Utils.writeAtomicFile destination (fun temporary ->
+                    File.WriteAllText(temporary, "partial")
+                    raise (InvalidOperationException("stop"))))
+            |> ignore
+            assertEqual "old" (File.ReadAllText(destination))
+            assertEqual 0 (Directory.EnumerateFiles(root, "*.part") |> Seq.length)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)

@@ -158,6 +158,50 @@ type JdfToGtfsTests() =
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
+    [<TestMethod>]
+    member _.``Streaming and materialized JDF conversion outputs are byte-identical``() =
+        let root =
+            Path.Combine(Path.GetTempPath(), "jrutil-jdf-streaming-" + Guid.NewGuid().ToString("N"))
+        let materialized = Path.Combine(root, "materialized")
+        let streaming = Path.Combine(root, "streaming")
+        try
+            let source = batch ()
+            let feed = source |> JdfToGtfs.getGtfsFeed false
+            Gtfs.gtfsFeedToFolder () materialized feed
+
+            let preparation =
+                JdfToGtfs.prepareGtfsFeedForStreaming true false source
+            let referenced = Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+            let stopTimes =
+                JdfToGtfs.getStreamingBundleStopTimes preparation
+                |> Seq.map (fun stopTime ->
+                    referenced.Add(stopTime.stopId) |> ignore
+                    stopTime)
+            Gtfs.gtfsStopTimesToFolder () streaming stopTimes
+            let remainder =
+                JdfToGtfs.finishStreamingBundleFeed preparation (referenced |> Set.ofSeq)
+            Gtfs.gtfsStandardTablesExceptStopTimesToFolder () streaming remainder
+            Gtfs.gtfsExtensionsToFolder () streaming remainder
+
+            let expectedFiles =
+                Directory.EnumerateFiles(materialized)
+                |> Seq.map Path.GetFileName
+                |> Seq.sort
+                |> Seq.toArray
+            let actualFiles =
+                Directory.EnumerateFiles(streaming)
+                |> Seq.map Path.GetFileName
+                |> Seq.sort
+                |> Seq.toArray
+            CollectionAssert.AreEqual(expectedFiles, actualFiles)
+            for name in expectedFiles do
+                CollectionAssert.AreEqual(
+                    File.ReadAllBytes(Path.Combine(materialized, name)),
+                    File.ReadAllBytes(Path.Combine(streaming, name)),
+                    name)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
         let legacy =
             GtfsParser.getGtfsParser<GtfsModel.FeedInfo> [
                 "feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version"
@@ -185,6 +229,17 @@ type JdfToGtfsTests() =
         }
         let actual = JdfToGtfs.getGtfsStopTimes false unsorted |> normalize
         assertEqual expected actual
+        let expectedStreamed =
+            source
+            |> JdfToGtfs.getGtfsFeed false
+            |> fun feed -> feed.stopTimes
+            |> normalize
+        let streamed =
+            unsorted
+            |> JdfToGtfs.prepareGtfsFeedForStreaming true false
+            |> JdfToGtfs.getStreamingBundleStopTimes
+            |> normalize
+        assertEqual expectedStreamed streamed
 
     [<TestMethod>]
     member _.``JDF routes receive default colors by transport mode``() =

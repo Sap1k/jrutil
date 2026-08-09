@@ -112,18 +112,43 @@ fail the command instead of being logged and skipped.
 ## Parallelism and memory budgets
 
 The multitool accepts `--jobs=<count|auto>` and
-`--memory-budget=<KiB|MiB|GiB|auto>`. Automatic mode leaves operating
-system headroom and derives a separate bounded worker count for each stage.
-`fix-jdf` processes independent batches concurrently, while `merge-jdf`
-parses batches concurrently and commits their results in stable input order.
+`--memory-budget=<KiB|MiB|GiB|auto>`. Automatic jobs start at twice the
+logical processor count and may grow to eight times it (between 32 and 256
+workers), subject to live process-memory, CPU, and ordered-backlog pressure.
+An explicit numeric job count is a hard ceiling and is not reduced to the
+processor count. Automatic memory mode snapshots currently available RAM and
+the process's existing private bytes, reserves 25% of effective system memory
+(between 1 and 4 GiB) for the OS and other applications, and also applies a
+capacity ceiling. On a busy 16 GiB machine the budget therefore contracts with
+live availability instead of assuming that 10 GiB can always be allocated.
+`fix-jdf` and `merge-jdf` admit independent batch parsing by estimated
+uncompressed bytes while committing results in stable input order. Admission
+targets 85% of the process memory budget, keeps the batch currently being
+consumed charged against that bound, pauses at 95%, and resumes below 80%.
 Use `--jobs=1` for a serial run or an explicit memory budget for repeatable
 capacity tests.
 
 `fix-jdf --batch-output=zip` writes one deterministic uncompressed ZIP per
 fixed input batch; the default remains the traditional directory layout.
 `--progress-events` adds `JRUTIL_PROGRESS` JSON lines for resolved worker
-plans, phase changes, and batch start/completion/failure events. Human logs
-remain available alongside the machine-readable stream.
+plans, phase changes, batch start/completion/failure events, and one-second
+`scheduler_sample` resource/controller snapshots. Human logs remain available
+alongside the machine-readable stream.
+
+`merge-jdf` keeps the large `Zasspoje.txt` relation in an uncompressed spool
+beside the output while route overlap metadata remains in memory. Within each
+ordered batch, trip-stop rows are remapped and serialized into bounded parallel
+memory buffers, then appended to the spool in their original order. The spool
+is removed on success or failure. Parsing uses the requested worker ceiling
+with an additional byte-weighted in-flight bound.
+Phase-boundary `resource_usage` progress events report working-set, private,
+managed-heap, fragmentation, and spill byte counts.
+
+`czptt-to-bundle` uses a sibling spill file for surviving timetable messages,
+replays them in PA-ID order after cancellations, and removes the spill on all
+exit paths. Library conversion helpers remain memory-backed by default. Its
+Parquet writers enumerate count-known replayable rows instead of retaining an
+additional array of row dictionaries.
 
 National bundle conversion uses pooled source values and streams GTFS stop
 times and row-grouped Parquet call metadata directly from compact source trip
