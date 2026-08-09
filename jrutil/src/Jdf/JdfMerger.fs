@@ -9,6 +9,7 @@ open Serilog
 open NetTopologySuite.Geometries
 
 open JrUtil.JdfModel
+open JrUtil.JdfStopReconciliation
 open JrUtil.Utils
 open JrUtil.GeoData.Common
 
@@ -37,19 +38,17 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
     let reservationOptionsByRoute = MultiDict()
     let stopLocationsByStop = Dictionary()
     let stopLocationSourcesByStop = Dictionary<int64, string>()
+    let stopIndexesById = Dictionary<int64, int>()
+    let stopReconciler = StopReconciler()
 
     let mutable lastStopId = 0L
     let mutable lastAttributeRefId = 0
     let mutable lastTripGroupId = 0
 
     let attributeRefsByValue = Dictionary()
-    let stopsByNames = Dictionary()
     let stopsByIds = Dictionary()
     let stopPostsSet = HashSet()
     let batchDateByRoute = Dictionary()
-
-    let stopNameTuple (s: Stop) =
-        s.town, s.district, s.nearbyPlace, s.regionId, s.country
 
     let locationDistance loc1 loc2 =
         let locToPt loc =
@@ -59,12 +58,19 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         (locToPt loc1).Distance(locToPt loc2)
     let locationDistanceThresh = 1000
 
-    let matchingStop (s: Stop) =
-        let ok, s2 =
-            match stopMergeStrategy with
-            | MergeStopsByName -> stopsByNames.TryGetValue(stopNameTuple s)
-            | MergeStopsById -> stopsByIds.TryGetValue(s.id)
-        if ok then Some s2 else None
+    let mergeAttributes stopId (left: int option array) (right: int option array) =
+        let merged =
+            Seq.append (left |> Array.choose id) (right |> Array.choose id)
+            |> Seq.distinct
+            |> Seq.sort
+            |> Seq.toArray
+        if merged.Length > 6 then
+            Log.Warning(
+                "Merged stop {StopId} has {AttributeCount} attributes; JDF can retain only six",
+                stopId,
+                merged.Length)
+        Array.init 6 (fun index ->
+            if index < min 6 merged.Length then Some merged.[index] else None)
 
     member this.batch = {
         version = {
@@ -103,6 +109,22 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
             |> Seq.map (fun pair -> { stopId = pair.Key; source = pair.Value })
             |> Seq.toArray
     }
+
+    member _.stopMergeStatistics = stopReconciler.Statistics
+
+    member _.logStopMergeSummary() =
+        let statistics = stopReconciler.Statistics
+        Log.Information(
+            "Stop reconciliation completed: {ExactCount} exact, {SuffixCount} suffix, "
+            + "{FuzzyCount} fuzzy, {AmbiguousCount} ambiguous, "
+            + "{CandidateComparisonCount} candidate comparisons "
+            + "({FuzzyComparisonCount} fuzzy)",
+            statistics.exact,
+            statistics.suffix,
+            statistics.fuzzy,
+            statistics.ambiguous,
+            statistics.candidateComparisons,
+            statistics.fuzzyComparisons)
 
     member private this.deleteRoute(r: Route) =
         let routeId = r.id
@@ -365,37 +387,74 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
         let mapAttributes =
             Array.map (Option.map (fun id -> attributeRefIdMap.[id]))
 
-        let existingStops, stopsToAdd =
-            batch.stops
-            |> splitSeq (fun s -> matchingStop s |> Option.isSome)
-        let stopsToAddIds = stopsToAdd |> Seq.map (fun s -> s.id) |> Set
-        let stopsToAddNewIds =
-            stopsToAdd
-            |> Seq.map (fun s ->
-                { s with
-                    id =
-                        match stopMergeStrategy with
-                        | MergeStopsByName ->
-                            lastStopId <- lastStopId + 1L
-                            lastStopId
-                        | MergeStopsById -> s.id
-                    attributes = mapAttributes s.attributes }
-            )
-            |> Seq.cache
-        stops.AddRange(stopsToAddNewIds)
-        for s in stopsToAddNewIds do
-            match stopMergeStrategy with
-            | MergeStopsByName -> stopsByNames[stopNameTuple s] <- s.id
-            | MergeStopsById -> stopsByIds[s.id] <- s.id
-        let stopIdMap =
-            Seq.concat [
-                Seq.zip stopsToAdd stopsToAddNewIds
-                |> Seq.map (fun (s, sni) -> s.id, sni.id)
-
-                existingStops
-                |> Seq.map (fun s -> s.id, matchingStop s |> Option.get)
-            ]
+        let batchLocationsByStop =
+            batch.stopLocations
+            |> Seq.map (fun location -> location.stopId, location)
             |> Map
+        let stopIdMap = Dictionary<int64, int64>()
+        let preferredIncomingLocationSources = HashSet<int64>()
+
+        for sourceStop in batch.stops do
+            let mappedStop = { sourceStop with attributes = mapAttributes sourceStop.attributes }
+            let sourceLocation = batchLocationsByStop |> Map.tryFind sourceStop.id
+            match stopMergeStrategy with
+            | MergeStopsById ->
+                match stopsByIds.TryGetValue(sourceStop.id) with
+                | true, existingId -> stopIdMap.[sourceStop.id] <- existingId
+                | false, _ ->
+                    stopsByIds.[sourceStop.id] <- sourceStop.id
+                    stopIndexesById.[sourceStop.id] <- stops.Count
+                    stops.Add(mappedStop)
+                    stopIdMap.[sourceStop.id] <- sourceStop.id
+            | MergeStopsByName ->
+                match stopReconciler.FindMatch(sourceStop, sourceLocation) with
+                | Choice1Of2 candidate ->
+                    let stopIndex = stopIndexesById.[candidate.stopId]
+                    let current = stops.[stopIndex]
+                    let incomingPreferred = isCanonicalNamePreferred mappedStop current
+                    let preferred = if incomingPreferred then mappedStop else current
+                    let other = if incomingPreferred then current else mappedStop
+                    stops.[stopIndex] <- {
+                        preferred with
+                            id = candidate.stopId
+                            regionId = preferred.regionId |> Option.orElse other.regionId
+                            country = preferred.country |> Option.orElse other.country
+                            attributes = mergeAttributes candidate.stopId current.attributes mappedStop.attributes
+                    }
+                    if incomingPreferred then
+                        preferredIncomingLocationSources.Add(sourceStop.id) |> ignore
+                    stopIdMap.[sourceStop.id] <- candidate.stopId
+                    stopReconciler.AddAlias(candidate.stopId, sourceStop, sourceLocation)
+                    let aliasName = stopDisplayName sourceStop
+                    let canonicalName = stopDisplayName stops.[stopIndex]
+                    if aliasName <> canonicalName then
+                        Log.Information(
+                            "Merged stop {AliasName} into {CanonicalName} ({MatchKind}, "
+                            + "Levenshtein {Levenshtein:F3}, Dice {Dice:F3}, distance {Distance})",
+                            aliasName,
+                            canonicalName,
+                            candidate.kind,
+                            candidate.levenshteinSimilarity,
+                            candidate.tokenDiceSimilarity,
+                            candidate.distance)
+                | Choice2Of2 candidates ->
+                    if candidates.Length > 0 then
+                        let candidateDetails =
+                            candidates
+                            |> Array.map (fun candidate ->
+                                let existing = stops.[stopIndexesById.[candidate.stopId]]
+                                $"{stopDisplayName existing} "
+                                + $"[{candidate.kind}; distance={candidate.distance}]" )
+                        Log.Warning(
+                            "Ambiguous stop reconciliation for {StopName}; candidates: {Candidates}",
+                            stopDisplayName sourceStop,
+                            candidateDetails)
+                    lastStopId <- lastStopId + 1L
+                    let added = { mappedStop with id = lastStopId }
+                    stopIndexesById.[added.id] <- stops.Count
+                    stops.Add(added)
+                    stopIdMap.[sourceStop.id] <- added.id
+                    stopReconciler.AddAlias(added.id, sourceStop, sourceLocation)
         let batchLocationSources =
             batch.stopLocationSources |> Seq.map (fun value -> value.stopId, value.source) |> Map
         for sl in batch.stopLocations do
@@ -419,6 +478,8 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
             // Either this is a new location or a precision upgrade.
             if not hasOldSl
                || precisionRank sl.precision < precisionRank oldSl.precision
+               || (precisionRank sl.precision = precisionRank oldSl.precision
+                   && preferredIncomingLocationSources.Contains(sl.stopId))
             then
                 stopLocationsByStop.[stopId] <- { sl with stopId = stopId }
                 match batchLocationSources |> Map.tryFind sl.stopId with
@@ -426,7 +487,7 @@ type JdfMerger(stopMergeStrategy: StopMergeStrategy) =
                 | None -> stopLocationSourcesByStop.Remove(stopId) |> ignore
 
         let stopPostsToAdd =
-            stopPosts
+            batch.stopPosts
             |> Seq.filter (fun sp ->
                 not <| stopPostsSet.Contains((stopIdMap.[sp.stopId], sp.stopPostId)))
             |> Seq.map (fun sp -> { sp with stopId = stopIdMap.[sp.stopId] })

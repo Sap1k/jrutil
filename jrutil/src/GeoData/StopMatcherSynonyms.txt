@@ -7,6 +7,7 @@
 # Since the names to match are lowercased, so should everything in this file.
 
 nám., náměstí
+hl., hlavní
 rozc., rozcestí
 odb., odbočka
 žel., železniční
