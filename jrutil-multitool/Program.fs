@@ -21,6 +21,8 @@ jrutil, a tool for working with czech public transport data
 Usage:
     jrutil-multitool.exe jdf-to-gtfs [options] <JDF-in-dir> <GTFS-out-dir>
     jrutil-multitool.exe jdf-to-bundle [options] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
+    jrutil-multitool.exe jdf-validate-post-inference --evidence=DIR
+    jrutil-multitool.exe jdf-replay-post-inference [options] --evidence=DIR --output=DIR
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
@@ -41,6 +43,21 @@ Options:
     --international-route-policy=VALUE  keep-all (default) or regional-adjacent
     --international-route-overrides=FILE  Optional route keep/drop override CSV
     --transport-mode-rules=FILE  Reviewed JDF effective transport-mode rule CSV
+    --no-estimated-posts         Disable candidate-based internal post inference
+    --routing-osm-pbf=FILE       Osmium demand-clipped road/tram PBF for routed inference
+    --diagnostic-post-labels     Emit inferred O*/O-direction labels in GTFS platform_code
+    --post-review-stops=FILE     Stop IDs/names for routed-inference review GeoJSON
+    --capture-post-inference-evidence=DIR  Persist reusable policy-neutral routed evidence
+    --post-inference-evidence-only         Stop after writing the evidence directory
+    --post-inference-evidence=DIR          Reuse captured routed evidence without loading a graph
+    --post-inference-policy=FILE           Versioned routed-inference policy JSON
+    --no-post-inference-scores             Skip diagnostic score rows for publication-only bundles
+    --evidence=DIR                         Evidence directory for policy replay
+    --policy=FILE                          Policy JSON for policy replay
+    --policy-grid=FILE                     Deterministic policy variants for replay
+    --expectations=FILE                    Labelled routed-post expectation TSV
+    --review-stops=FILE                    Stop selectors for replay diagnostics
+    --output=DIR                           Replay report output directory
     -j --jobs=VALUE             Worker count or auto (default: auto)
     --memory-budget=VALUE       RAM budget such as 10GiB or auto (default: auto)
     --batch-output=VALUE        fix-jdf output: directory or zip (default: directory)
@@ -148,6 +165,11 @@ let main (args: string array) =
             let baselinePrivateBytes = memorySnapshot.processPrivateBytes
             let automaticReserveBytes =
                 Execution.automaticMemoryReserveBytes memorySnapshot.effectiveTotalBytes
+            let automaticEvictableBytes =
+                Execution.automaticEvictableAllowanceBytes
+                    memorySnapshot.effectiveTotalBytes
+                    memorySnapshot.availableBytes
+                    memorySnapshot.processPrivateBytes
             let admissionBytes =
                 max (8L * Execution.MiB)
                     (plan.memoryBudgetBytes * 85L / 100L - baselinePrivateBytes)
@@ -164,10 +186,12 @@ let main (args: string array) =
             Log.Information(
                 "Execution plan for {Stage}: {InitialWorkers}-{MaximumWorkers} adaptive workers; requested {RequestedJobs}; " +
                 "CPU {ProcessorCount}; memory cap {MemoryJobs}; budget {MemoryBudgetGiB:F1} GiB; " +
-                "available {AvailableMemoryGiB:F1} GiB; system reserve {SystemReserveGiB:F1} GiB",
+                "available {AvailableMemoryGiB:F1} GiB; evictable allowance {EvictableMemoryGiB:F1} GiB; " +
+                "system reserve {SystemReserveGiB:F1} GiB",
                 stage, plan.initialWorkers, plan.maximumWorkers, requested, plan.processorCount,
                 plan.memoryLimitedJobs, float plan.memoryBudgetBytes / float Execution.GiB,
                 float memorySnapshot.availableBytes / float Execution.GiB,
+                float automaticEvictableBytes / float Execution.GiB,
                 float automaticReserveBytes / float Execution.GiB)
             emitProgressEvent progressEvents "execution_plan" [
                 "stage", box stage
@@ -183,6 +207,7 @@ let main (args: string array) =
                 "phase_start_private_bytes", box baselinePrivateBytes
                 "effective_total_memory_bytes", box memorySnapshot.effectiveTotalBytes
                 "available_memory_bytes", box memorySnapshot.availableBytes
+                "automatic_evictable_allowance_bytes", box automaticEvictableBytes
                 "automatic_system_reserve_bytes", box automaticReserveBytes
                 "admission_allowance_bytes", box admissionBytes
                 "weight_formula", box weightFormula
@@ -327,6 +352,18 @@ let main (args: string array) =
             optArgValue args "--transport-mode-rules"
             |> Option.map JdfToGtfs.loadTransportModeRules
             |> Option.defaultValue JdfToGtfs.emptyTransportModeRules
+        let routingPbf = optArgValue args "--routing-osm-pbf"
+        let postInferenceEvidence = optArgValue args "--post-inference-evidence"
+        // Candidate discovery has to happen during fix-jdf, before the merged
+        // routing-demand relation (and therefore its clipped routing PBF) can
+        // exist.  Keep that switch independent from routed inference, which is
+        // only available to conversion commands once a routing PBF is supplied.
+        let estimatedPostActivation =
+            Execution.estimatedPostActivation
+                (argFlagSet args "--no-estimated-posts")
+                (routingPbf.IsSome || postInferenceEvidence.IsSome)
+        let collectEstimatedPostEvidence = estimatedPostActivation.collectEvidence
+        let routedPostInference = estimatedPostActivation.runRoutedInference
         if internationalRoutePolicy = JdfToGtfs.KeepAll
            && internationalRouteOverrides.Length > 0 then
             invalidArg "--international-route-overrides"
@@ -334,22 +371,99 @@ let main (args: string array) =
         let mutable exitCode = 0
         if argFlagSet args "jdf-to-bundle" then
             try
+                let bundlePlan =
+                    jobsFor "jdf-to-bundle" Execution.BundleWork
+                            (6L * Execution.GiB)
+                let bundleProgress (event: JdfBundle.BundleProgressEvent) =
+                    emitProgressEvent progressEvents "work_progress" (
+                        [ "stage", box "jdf-to-bundle"
+                          "phase", box event.phase
+                          "state", box event.state
+                          "completed", box event.completed
+                          "unit", box event.unit
+                          "elapsed_ms", box event.elapsedMilliseconds
+                          "active_workers", box event.activeWorkers
+                          "private_bytes", box event.privateBytes
+                          "working_set_bytes", box event.workingSetBytes ]
+                        @ (event.total |> Option.map (fun value -> [ "total", box value ])
+                           |> Option.defaultValue [])
+                        @ (event.detail |> Option.map (fun value -> [ "detail", box value ])
+                           |> Option.defaultValue []))
+                let bundleOptions: JdfBundle.BundleExecutionOptions = {
+                    maximumWorkers = min 8 bundlePlan.resolvedWorkers
+                    memoryBudgetBytes = bundlePlan.memoryBudgetBytes
+                    reviewStopsPath = optArgValue args "--post-review-stops"
+                    capturePostInferenceEvidencePath = optArgValue args "--capture-post-inference-evidence"
+                    postInferenceEvidenceOnly = argFlagSet args "--post-inference-evidence-only"
+                    postInferenceEvidencePath = postInferenceEvidence
+                    postInferencePolicyPath = optArgValue args "--post-inference-policy"
+                    includePostInferenceScores = not(argFlagSet args "--no-post-inference-scores")
+                    progress = bundleProgress
+                }
                 phase "jdf-to-bundle" "write-bundle" "started"
-                JdfBundle.writeBundleWithPolicyAndRules
-                    (argValue args "--snapshot-descriptor")
-                    (argValue args "--converter-version")
-                    (argFlagSet args "--stop-ids-cis")
-                    internationalRoutePolicy
-                    internationalRouteOverrides
-                    transportModeRules
-                    (argValue args "<JDF-input>")
-                    (argValue args "<bundle-out-dir>")
-                phase "jdf-to-bundle" "write-bundle" "completed"
-                resourceUsage "jdf-to-bundle" "write-bundle" 0L
+                let bundleResult =
+                    JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                        (argValue args "--snapshot-descriptor")
+                        (argValue args "--converter-version")
+                        (argFlagSet args "--stop-ids-cis")
+                        internationalRoutePolicy
+                        internationalRouteOverrides
+                        transportModeRules
+                        routedPostInference
+                        routingPbf
+                        (argFlagSet args "--diagnostic-post-labels")
+                        bundleOptions
+                        (argValue args "<JDF-input>")
+                        (argValue args "<bundle-out-dir>")
+                match bundleResult with
+                | JdfBundle.CaptureCompleted(manifest,metrics) ->
+                    phase "jdf-to-bundle" "capture-post-inference-evidence" "completed"
+                    emitProgressEvent progressEvents "capture_metrics" [
+                        "stage", box "jdf-to-bundle"
+                        "estimated_evidence_bytes", box metrics.estimatedEvidenceBytes
+                        "atomic_output_headroom_bytes", box metrics.atomicOutputHeadroomBytes
+                        "current_spill_bytes", box metrics.currentSpillBytes
+                        "peak_spill_bytes", box metrics.peakSpillBytes
+                        "maximum_workers", box metrics.maximumWorkers
+                    ]
+                    resourceUsage "jdf-to-bundle" "capture-post-inference-evidence"
+                                  metrics.peakSpillBytes
+                    Log.Information(
+                        "Post-inference evidence capture completed: pack_id={PackId}; rows={Rows}",
+                        manifest.packId,manifest.routePointEvidenceCount)
+                | JdfBundle.BundleCompleted ->
+                    phase "jdf-to-bundle" "write-bundle" "completed"
+                    resourceUsage "jdf-to-bundle" "write-bundle" 0L
                 Log.Information("Finished!")
             with e ->
                 exitCode <- 1
                 Log.Error(e, "JDF bundle conversion failed")
+        else if argFlagSet args "jdf-validate-post-inference" then
+            try
+                use store=JdfPostEvidenceStore.openValidatedStore
+                              JdfPostEvidenceStore.noIdentityExpectation
+                              (argValue args "--evidence")
+                Log.Information(
+                    "Post-inference evidence is valid: pack_id={PackId}; contexts={Contexts}; rows={Rows}",
+                    store.Manifest.packId,store.Manifest.contextCount,
+                    store.Manifest.routePointEvidenceCount)
+                Log.Information("Finished!")
+            with e ->
+                exitCode <- 1
+                Log.Error(e,"JDF post-inference evidence validation failed")
+        else if argFlagSet args "jdf-replay-post-inference" then
+            try
+                JdfBundle.replayPostInferenceEvidence
+                    (argValue args "--evidence")
+                    (optArgValue args "--policy")
+                    (optArgValue args "--policy-grid")
+                    (optArgValue args "--expectations")
+                    (optArgValue args "--review-stops")
+                    (argValue args "--output")
+                Log.Information("Finished!")
+            with e ->
+                exitCode <- 1
+                Log.Error(e,"JDF post-inference replay failed")
         else if argFlagSet args "jdf-to-gtfs" then
             let stopIdsCis = argFlagSet args "--stop-ids-cis"
             let jdfPar = Jdf.jdfBatchDirParser ()
@@ -372,8 +486,12 @@ let main (args: string array) =
                     JdfToGtfs.logInternationalRouteDecisions
                         internationalRoutePolicy filterResult.decisions
                     Log.Information("Converting to GTFS")
-                    let effectiveBatch, transportModeDecisions =
+                    let correctedBatch, transportModeDecisions =
                         JdfToGtfs.applyTransportModeRules transportModeRules filterResult.batch
+                    let effectiveBatch =
+                        if routedPostInference then correctedBatch
+                        else { correctedBatch with
+                                   postCandidateEvidence = [||] }
                     transportModeDecisions
                     |> Array.iter (fun decision ->
                         if decision.corrected then
@@ -559,7 +677,6 @@ let main (args: string array) =
                 |> fun value -> value.ToLowerInvariant()
             if batchOutput <> "directory" && batchOutput <> "zip" then
                 invalidArg "--batch-output" "fix-jdf batch output must be 'directory' or 'zip'"
-            let fixPlan = jobsFor "fix-jdf" Execution.FixBatches (4L * Execution.GiB)
             Directory.CreateDirectory(outDir) |> ignore
 
             phase "fix-jdf" "read-external-stops" "started"
@@ -586,6 +703,10 @@ let main (args: string array) =
                 Utils.persistentCachePath
                 |> Option.map (fun d -> Path.Combine(d, "cz-stop-matcher")))
 
+            // The transit-geometry index is a persistent part of this stage's
+            // working set. Snapshot memory only after it (and the stop matcher)
+            // exist so the adaptive budget cannot start below its true baseline.
+            let fixPlan = jobsFor "fix-jdf" Execution.FixBatches (4L * Execution.GiB)
             let jdfPar = Jdf.jdfBatchDirParser ()
             let jdfWri = Jdf.jdfBatchDirWriter ()
             JdfFixups.resetMatchDiagnostics ()
@@ -619,7 +740,7 @@ let main (args: string array) =
                     let routeFilter =
                         JdfToGtfs.applyInternationalRoutePolicy
                             internationalRoutePolicy internationalRouteOverrides batch
-                    let batchWithLocations =
+                    let inferredBatch =
                         match JdfFixups.dropDegenerateBatch batch with
                         | Some emptyBatch ->
                             Log.Warning(
@@ -634,6 +755,19 @@ let main (args: string array) =
                             let stopsWithMatches =
                                 Array.zip batchFixed.stops stopMatches
                                 |> JdfFixups.rejectImplausibleMatches batchFixed.tripStops
+                            let retainedCandidateStops =
+                                stopsWithMatches
+                                |> Seq.choose (fun (stop, match_) ->
+                                    match_ |> Option.map (fun _ -> stop.id))
+                                |> Set
+                            let batchFixed = {
+                                batchFixed with
+                                    postCandidateEvidence =
+                                        batchFixed.postCandidateEvidence
+                                        |> Array.filter (fun observation ->
+                                            retainedCandidateStops.Contains(observation.stopId))
+                            }
+                            JdfModel.validatePostCandidateEvidence batchFixed.postCandidateEvidence
                             Seq.concat [
                                 // Take one trip most likely to contain all stops'
                                 // km distances (testing all takes too much time).
@@ -645,6 +779,10 @@ let main (args: string array) =
                             |> Seq.iter (fun msg -> Log.Write(msg))
                             JdfFixups.addStopLocations batchFixed stopsWithMatches
                             |> JdfFixups.estimateMissingStopLocations
+                    let batchWithLocations =
+                        if collectEstimatedPostEvidence then inferredBatch
+                        else { inferredBatch with
+                                   postCandidateEvidence = [||] }
 
                     if batchOutput = "zip" then
                         let fixedOutPath = Path.Combine(outDir, batchName + ".zip")

@@ -1,0 +1,10 @@
+{
+  "sweep": {
+    "consolidation.maximum_diameter_metres": [15.0, 25.0],
+    "resolution.material_routed_advantage": [0.05, 0.10],
+    "resolution.minimum_physical_margin": [0.10, 0.15, 0.20],
+    "resolution.minimum_physical_score": [0.70, 0.78, 0.86],
+    "resolution.minimum_plausible_score": [0.35, 0.45],
+    "consensus.minimum_winning_share": [0.67, 1.0]
+  }
+}

@@ -40,5 +40,7 @@ let jdf110To111Converter () =
                 "transfers", (fun b -> Array.map transferAC b.transfers |> box)
                 "stopLocations", (fun _ -> [||]: JdfModel.StopLocation array)
                 "stopLocationSources", (fun _ -> [||]: JdfModel.StopLocationSource array)
+                "postCandidateEvidence", (fun _ -> [||]: JdfModel.PostCandidateEvidence array)
+                "routingDemands", (fun _ -> [||]: JdfModel.RoutingDemand array)
             ])
     batchAC

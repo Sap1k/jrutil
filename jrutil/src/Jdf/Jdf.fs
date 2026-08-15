@@ -109,8 +109,10 @@ let jdf111BatchDirParser () =
     let reservationOptionsParser = fileParserOrEmpty "Mistenky.txt"
     let stopLocationsParser = fileParserOrEmpty "Polzast.txt"
     let stopLocationSourcesParser = fileParserOrEmpty "PolzastZdroj.txt"
+    let postCandidateEvidenceParser = fileParserOrEmpty "JrutilPostCandidateEvidence.txt"
+    let routingDemandsParser = fileParserOrEmpty "JrutilRoutingDemands.txt"
     fun path ->
-        {
+        let batch = {
             version = (versionParser path).[0]
             stops = stopsParser path
             stopPosts = stopPostsParser path
@@ -130,7 +132,11 @@ let jdf111BatchDirParser () =
             reservationOptions = reservationOptionsParser path
             stopLocations = stopLocationsParser path
             stopLocationSources = stopLocationSourcesParser path
+            postCandidateEvidence = postCandidateEvidenceParser path
+            routingDemands = routingDemandsParser path
         }
+        validatePostCandidateEvidence batch.postCandidateEvidence
+        batch
 
 // This repetition is annoying. Refactoring suggestions welcome.
 let jdf110BatchDirParser () =
@@ -298,8 +304,11 @@ let jdfBatchDirWriter () =
     let reservationOptionsWriter = fileWriter "Mistenky.txt"
     let stopLocationsWriter = fileWriter "Polzast.txt"
     let stopLocationSourcesWriter = fileWriter "PolzastZdroj.txt"
+    let postCandidateEvidenceWriter = fileWriter "JrutilPostCandidateEvidence.txt"
+    let routingDemandsWriter = fileWriter "JrutilRoutingDemands.txt"
 
     fun dir (batch: JdfBatch) ->
+        validatePostCandidateEvidence batch.postCandidateEvidence
         match dir with
         | FsPath path -> Directory.CreateDirectory(path) |> ignore
         | ZipArchive _ -> ()
@@ -325,3 +334,7 @@ let jdfBatchDirWriter () =
         reservationOptionsWriter dir batch.reservationOptions ()
         stopLocationsWriter dir batch.stopLocations ()
         stopLocationSourcesWriter dir batch.stopLocationSources ()
+        if batch.postCandidateEvidence.Length > 0 then
+            postCandidateEvidenceWriter dir batch.postCandidateEvidence ()
+        if batch.routingDemands.Length > 0 then
+            routingDemandsWriter dir batch.routingDemands ()

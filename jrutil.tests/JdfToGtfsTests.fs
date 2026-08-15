@@ -7,6 +7,9 @@ open System.IO
 open System.Globalization
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open NodaTime
+open OsmSharp
+open OsmSharp.Streams
+open OsmSharp.Tags
 
 open JrUtil
 open JrUtil.Tests.Asserts
@@ -21,6 +24,31 @@ type JdfToGtfsTests() =
 
     let route routeId (feed: GtfsModel.GtfsFeed) =
         feed.routes |> Array.find (fun item -> item.id = routeId)
+
+    let postEvidence stopId candidateId lat lon : JdfModel.PostCandidateEvidence = {
+        stopId=stopId;candidateId=candidateId;observationId=candidateId
+        sourceKind="test";sourceObjectId=Some candidateId;observedAt=None
+        lat=lat;lon=lon;supportWeight=1M;rawTags="";explicitModes=""
+        deniedModes="";lifecycle="active" }
+
+    let osmTags pairs =
+        let result=TagsCollection()
+        for key,value in pairs do result.Add(key,value)
+        result
+    let osmNode id latitude longitude =
+        Node(Id=Nullable id,Version=Nullable 1L,ChangeSetId=Nullable 0L,
+             Visible=Nullable true,TimeStamp=Nullable DateTime.UnixEpoch,
+             UserId=Nullable 0L,UserName="",Latitude=Nullable latitude,
+             Longitude=Nullable longitude,Tags=osmTags [])
+    let osmWay id nodes tags =
+        Way(Id=Nullable id,Version=Nullable 1L,ChangeSetId=Nullable 0L,
+            Visible=Nullable true,TimeStamp=Nullable DateTime.UnixEpoch,
+            UserId=Nullable 0L,UserName="",Nodes=nodes,Tags=osmTags tags)
+    let writeOsmPbf path (objects:OsmGeo array) =
+        use stream=File.Create(path)
+        let target=PBFOsmStreamTarget(stream,true,Nullable<int>(),Nullable<int>())
+        target.RegisterSource(new OsmEnumerableStreamSource(objects))
+        target.Pull()
 
     [<TestMethod>]
     member _.``Specialized stop-time writer is byte-identical to generic serialization``() =
@@ -157,6 +185,58 @@ type JdfToGtfsTests() =
                 (parsed.feedInfo |> Option.bind (fun info -> info.version))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Post inference policy round-trips and enforces the evidence horizon``() =
+        let root=Path.Combine(Path.GetTempPath(),$"jrutil-post-policy-{Guid.NewGuid():N}")
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let path=Path.Combine(root,"policy.json")
+            let expected={ JdfPostInferencePolicy.conservativeRoutedV4 with policyId="test-policy" }
+            JdfPostInferencePolicy.writePolicy path expected
+            assertEqual expected (JdfPostInferencePolicy.loadPolicy path)
+            let invalid={ expected with hardGates={ expected.hardGates with maximumRoutedExcessMetres=1001.0 } }
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                JdfPostInferencePolicy.validatePolicy 1000.0 invalid |> ignore)
+            |> ignore
+        finally
+            Directory.Delete(root,true)
+
+    [<TestMethod>]
+    member _.``Post inference policy keeps topology failures invariant``() =
+        let policy=JdfPostInferencePolicy.conservativeRoutedV4
+        assertEqual (Some "search-limit")
+            (JdfPostInference.hardGateReason policy (Some "search-limit") None None (Some 0.0))
+        assertEqual (Some "routed-excess")
+            (JdfPostInference.hardGateReason policy None (Some 5.0) (Some -5.0) (Some 501.0))
+
+    [<TestMethod>]
+    member _.``Post inference policy v2 rejects unsafe numeric domains``() =
+        let policy=JdfPostInferencePolicy.conservativeRoutedV4
+        let zeroExcess={ policy with hardGates={policy.hardGates with maximumRoutedExcessMetres=0.0} }
+        Assert.ThrowsExactly<ArgumentException>(fun () ->
+            JdfPostInferencePolicy.validatePolicy 1000.0 zeroExcess |> ignore) |> ignore
+        let inverted={ policy with resolution={policy.resolution with
+                                                   minimumPlausibleScore=0.8
+                                                   minimumPhysicalScore=0.7} }
+        Assert.ThrowsExactly<ArgumentException>(fun () ->
+            JdfPostInferencePolicy.validatePolicy 1000.0 inverted |> ignore) |> ignore
+        let nonFinite={ policy with spatialIsolation={policy.spatialIsolation with
+                                                          maximumAdjustment=Double.NaN} }
+        Assert.ThrowsExactly<ArgumentException>(fun () ->
+            JdfPostInferencePolicy.validatePolicy 1000.0 nonFinite |> ignore) |> ignore
+
+    [<TestMethod>]
+    member _.``Post observation validation rejects duplicates and malformed facts``() =
+        let observation:JdfModel.PostCandidateEvidence = {
+            stopId=1L;candidateId="candidate";observationId="source:1"
+            sourceKind="test";sourceObjectId=Some "source:1";observedAt=None
+            lat=50M;lon=14M;supportWeight=1M;rawTags=""
+            explicitModes="road";deniedModes="";lifecycle="active" }
+        Assert.ThrowsExactly<ArgumentException>(fun () ->
+            JdfModel.validatePostCandidateEvidence [|observation;observation|]) |> ignore
+        Assert.ThrowsExactly<ArgumentException>(fun () ->
+            JdfModel.validatePostCandidateEvidence [|{observation with supportWeight=0M}|]) |> ignore
 
     [<TestMethod>]
     member _.``Streaming and materialized JDF conversion outputs are byte-identical``() =
@@ -469,7 +549,189 @@ type JdfToGtfsTests() =
         feed.stops
         |> Array.filter (fun stop -> stop.id.StartsWith("jdf:stop:200"))
         |> Array.iter (fun stop ->
-            assertEqual false (stop.name.EndsWith(" [?]")))
+             assertEqual false (stop.name.EndsWith(" [?]")))
+
+    [<TestMethod>]
+    member _.``Legacy geometry cannot position authored posts without routed evidence``() =
+        let source = batch ()
+        let inferred = {
+            source with
+                stopLocations = [|
+                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                |]
+        }
+        let plan = JdfToGtfs.buildPostEstimationPlan inferred
+        assertEqual 0 plan.authored.Count
+
+        let feed = inferred |> JdfToGtfs.getGtfsFeed false
+        let authored = feed.stops |> Array.find (fun stop -> stop.id = "jdf:stop:100:post:1")
+        Assert.AreEqual(50.0, float authored.lat.Value, 0.000001)
+        Assert.AreEqual(14.0, float authored.lon.Value, 0.000001)
+        assertEqual (Some "1") authored.platformCode
+
+    [<TestMethod>]
+    member _.``Raw capture is identical across input order workers and forced spill``() =
+        let path=Path.Combine(Path.GetTempPath(),$"jrutil-post-capture-determinism-{Guid.NewGuid():N}.osm.pbf")
+        try
+            writeOsmPbf path [|
+                osmNode 1L 49.99 14.0 :> OsmGeo
+                osmNode 2L 50.00 14.0 :> OsmGeo
+                osmNode 3L 50.01 14.0 :> OsmGeo
+                osmNode 4L 50.02 14.0 :> OsmGeo
+                osmWay 10L [|1L;2L;3L;4L|] ["highway","residential"] :> OsmGeo |]
+            use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(path)
+            let source=batch()
+            let fixture={ source with
+                            stopLocations=[|
+                                {stopId=100L;lat=50.0M;lon=14.0M;precision=JdfModel.StopPrecise}
+                                {stopId=200L;lat=50.01M;lon=14.0M;precision=JdfModel.StopPrecise}|]
+                            postCandidateEvidence=[|
+                                postEvidence 100L "east" 50.0M 14.00005M
+                                postEvidence 100L "west" 50.0M 13.99995M|] }
+            let reversed={fixture with
+                            tripStops=Array.rev fixture.tripStops
+                            postCandidateEvidence=Array.rev fixture.postCandidateEvidence}
+            let capture workers budget input =
+                JdfPostEvidence.captureToStore
+                    {maximumWorkers=workers;memoryBudgetBytes=budget
+                     preflight=ignore
+                     progress=fun _ _ _ _ -> ()} graph input
+            use baseline=capture 1 Int64.MaxValue fixture
+            use manyWorkers=capture 4 Int64.MaxValue fixture
+            use reordered=capture 4 Int64.MaxValue reversed
+            use spilled=capture 4 1L reversed
+            let compare (left:JdfPostEvidence.CapturedPostEvidence)
+                        (right:JdfPostEvidence.CapturedPostEvidence) =
+                assertEqual (left.observations.ReadRows() |> Seq.toArray)
+                            (right.observations.ReadRows() |> Seq.toArray)
+                assertEqual (left.routePoints.ReadRows() |> Seq.toArray)
+                            (right.routePoints.ReadRows() |> Seq.toArray)
+                assertEqual (left.contexts.ReadRows() |> Seq.toArray)
+                            (right.contexts.ReadRows() |> Seq.toArray)
+                assertEqual (left.corridorVariants.ReadRows() |> Seq.toArray)
+                            (right.corridorVariants.ReadRows() |> Seq.toArray)
+                assertEqual (left.routePointEvidence.ReadRows() |> Seq.toArray)
+                            (right.routePointEvidence.ReadRows() |> Seq.toArray)
+            compare baseline manyWorkers
+            compare baseline reordered
+            compare baseline spilled
+            assertEqual 0L baseline.CurrentSpillBytes
+            Assert.IsTrue(spilled.CurrentSpillBytes>0L)
+            Assert.IsTrue(spilled.PeakSpillBytes>=spilled.CurrentSpillBytes)
+        finally
+            if File.Exists(path) then File.Delete(path)
+
+    [<TestMethod>]
+    member _.``A sole coordinate candidate does not create an inferred child``() =
+        let source = batch ()
+        let inferred = {
+            source with
+                postCandidateEvidence = [| postEvidence 200L "only" 50.01M 14.0M |]
+        }
+        let plan = JdfToGtfs.buildPostEstimationPlan inferred
+        assertEqual 0 plan.singleCandidateSkips
+        assertEqual 0 plan.authored.Count
+        assertEqual 0 plan.calls.Count
+        let feed = inferred |> JdfToGtfs.getGtfsFeed false
+        assertEqual false (feed.stops |> Array.exists (fun stop -> stop.id.Contains(":estimated:")))
+
+    [<TestMethod>]
+    member _.``Legacy tram geometry is disabled without routed evidence``() =
+        let source = batch ()
+        let tram = {
+            source with
+                routes = source.routes |> Array.map (fun route ->
+                    if route.id = "586001" then { route with transportMode = JdfModel.Tram } else route)
+                stopLocations = [|
+                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                |]
+        }
+        assertEqual 0 (JdfToGtfs.buildPostEstimationPlan tram).authored.Count
+
+    [<TestMethod>]
+    member _.``Legacy turnback geometry is disabled without routed evidence``() =
+        let source = batch ()
+        let template = source.tripStops.[0]
+        let call routeStopId stopId post = {
+            template with
+                tripId = 5L
+                routeStopId = routeStopId
+                stopId = stopId
+                stopPostId = None
+                stopPostNum = post
+                arrivalTime = template.departureTime
+                departureTime = template.departureTime
+        }
+        let turnback = {
+            source with
+                tripStops = [|
+                    call 1L 200L None
+                    call 2L 100L (Some "A")
+                    call 3L 100L (Some "B")
+                    call 4L 200L None
+                |]
+                stopLocations = [|
+                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                |]
+        }
+        let plan = JdfToGtfs.buildPostEstimationPlan turnback
+        assertEqual 0 plan.authored.Count
+        assertEqual 0 plan.sameStopBlocks
+        assertEqual 0 plan.distinctPairChoices
+
+    [<TestMethod>]
+    member _.``Repeated same authored post does not receive a distinctness preference``() =
+        let source = batch ()
+        let template = source.tripStops.[0]
+        let call routeStopId stopId post = {
+            template with
+                tripId = 5L; routeStopId = routeStopId; stopId = stopId
+                stopPostId = None; stopPostNum = post
+                arrivalTime = template.departureTime; departureTime = template.departureTime
+        }
+        let turnback = {
+            source with
+                tripStops = [|
+                    call 1L 200L None; call 2L 100L (Some "A")
+                    call 3L 100L (Some "A"); call 4L 200L None
+                |]
+                stopLocations = [|
+                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                |]
+        }
+        let plan = JdfToGtfs.buildPostEstimationPlan turnback
+        assertEqual 0 plan.distinctPairChoices
+        assertEqual false (plan.authored.ContainsKey(100L, "num:A"))
+
+    [<TestMethod>]
+    member _.``Near-tie unlabelled calls abstain without a composite location``() =
+        let source = batch ()
+        let template = source.tripStops.[0]
+        let call tripId routeStopId stopId = {
+            template with
+                tripId = tripId; routeStopId = routeStopId; stopId = stopId
+                stopPostId = None; stopPostNum = None
+                arrivalTime = template.departureTime; departureTime = template.departureTime
+        }
+        let inferred = {
+            source with
+                tripStops = [|
+                    call 5L 1L 100L; call 5L 2L 200L
+                    call 7L 1L 100L; call 7L 2L 200L
+                |]
+                stopLocations = [|
+                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
+                |]
+        }
+        let plan = JdfToGtfs.buildPostEstimationPlan inferred
+        let selections = plan.calls |> Seq.map (fun pair -> pair.Value) |> Seq.toArray
+        assertEqual 0 selections.Length
+        assertEqual 0 plan.locations.Length
 
     [<TestMethod>]
     member _.``CIS stop mode and extension serialization are deterministic``() =

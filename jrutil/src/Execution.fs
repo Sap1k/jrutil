@@ -29,6 +29,16 @@ type Workload =
     | MergeParsing
     | BundleWork
 
+type EstimatedPostActivation = {
+    collectEvidence: bool
+    runRoutedInference: bool
+}
+
+let estimatedPostActivation disabled hasRoutingPbf = {
+    collectEvidence = not disabled
+    runRoutedInference = not disabled && hasRoutingPbf
+}
+
 type JobRequest =
     | AutoJobs
     | FixedJobs of count: int
@@ -124,7 +134,39 @@ let automaticMemoryReserveBytes effectiveTotalBytes =
     if effectiveTotalBytes <= 0L then
         invalidArg "effectiveTotalBytes" "Effective total memory must be positive"
 
-    min (4L * GiB) (max GiB (effectiveTotalBytes / 4L))
+    // Small machines cannot afford the same proportional idle reserve as a
+    // workstation. Their OS is also expected to trim caches and working sets
+    // as JrUtil grows. Keep a useful safety margin without making a 6-8 GiB
+    // machine surrender a quarter of its RAM before work starts.
+    if effectiveTotalBytes <= 8L * GiB then
+        max (512L * MiB) (effectiveTotalBytes / 8L)
+    elif effectiveTotalBytes <= 20L * GiB then
+        max GiB (effectiveTotalBytes / 8L)
+    else
+        min (4L * GiB) (max GiB (effectiveTotalBytes / 4L))
+
+let automaticEvictableAllowanceBytes effectiveTotalBytes availableBytes processPrivateBytes =
+    if effectiveTotalBytes <= 0L then
+        invalidArg "effectiveTotalBytes" "Effective total memory must be positive"
+    if availableBytes < 0L then
+        invalidArg "availableBytes" "Available memory must not be negative"
+    if processPrivateBytes < 0L then
+        invalidArg "processPrivateBytes" "Process memory must not be negative"
+
+    // Available memory is only a point-in-time value. On low-memory systems a
+    // useful amount of the occupied memory is normally file cache or another
+    // process's evictable working set. Count a bounded part of that memory so
+    // auto mode can create useful parallelism; the live adaptive controller
+    // still throttles against JrUtil's actual private bytes.
+    let available = min effectiveTotalBytes availableBytes
+    let externallyOccupied =
+        max 0L (effectiveTotalBytes - available - processPrivateBytes)
+    if effectiveTotalBytes <= 8L * GiB then
+        externallyOccupied * 3L / 4L
+    elif effectiveTotalBytes <= 20L * GiB then
+        externallyOccupied / 2L
+    else
+        0L
 
 let autoMemoryBudgetBytes effectiveTotalBytes availableBytes processPrivateBytes =
     if effectiveTotalBytes <= 0L then
@@ -134,18 +176,24 @@ let autoMemoryBudgetBytes effectiveTotalBytes availableBytes processPrivateBytes
     if processPrivateBytes < 0L then
         invalidArg "processPrivateBytes" "Process memory must not be negative"
 
-    // Keep the former capacity ceiling, but never assume that capacity is
-    // currently free. Available memory excludes the process's existing private
-    // bytes, so add only the portion left after reserving RAM for the OS and
-    // other applications to the current process footprint.
+    // Keep a capacity ceiling, but let low-memory hosts rely on normal OS
+    // working-set and cache eviction instead of treating every currently used
+    // byte as permanently unavailable.
+    let reserve = automaticMemoryReserveBytes effectiveTotalBytes
     let capacityBudget =
-        if effectiveTotalBytes <= 20L * GiB then
-            min (10L * GiB) (effectiveTotalBytes - 6L * GiB)
+        if effectiveTotalBytes <= 8L * GiB then
+            effectiveTotalBytes - reserve
+        elif effectiveTotalBytes <= 20L * GiB then
+            min (14L * GiB) (effectiveTotalBytes - reserve)
         else
             effectiveTotalBytes - max (8L * GiB) (effectiveTotalBytes / 4L)
     let capacityBudget = max 1L capacityBudget
     let available = min effectiveTotalBytes availableBytes
-    let allocatable = max 0L (available - automaticMemoryReserveBytes effectiveTotalBytes)
+    let evictable =
+        automaticEvictableAllowanceBytes
+            effectiveTotalBytes available processPrivateBytes
+    let relaxedAvailable = min effectiveTotalBytes (available + evictable)
+    let allocatable = max 0L (relaxedAvailable - reserve)
     let liveBudget = processPrivateBytes + allocatable
 
     min capacityBudget liveBudget

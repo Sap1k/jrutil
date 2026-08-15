@@ -6,6 +6,7 @@ module JrUtil.JdfMerger
 open System
 open System.Collections.Generic
 open System.IO
+open System.Security.Cryptography
 open System.Text
 open NodaTime
 open Serilog
@@ -288,7 +289,7 @@ type JdfMerger(
     let agenciesByIco = MultiDict()
     let routesByLicNum = MultiDict()
     let routeIntegrationsByRoute = MultiDict()
-    let routeStopsByRoute = MultiDict()
+    let routeStopsByRoute = MultiDict<string * int, RouteStop>()
     let tripsByRoute = MultiDict()
     let tripGroups = ResizeArray()
     let tripStopsByRoute = MultiDict()
@@ -304,8 +305,10 @@ type JdfMerger(
     let agencyAlternationsByRoute = MultiDict()
     let alternateRouteNamesByRoute = MultiDict()
     let reservationOptionsByRoute = MultiDict()
-    let stopLocationsByStop = Dictionary()
+    let stopLocationsByStop = Dictionary<int64, StopLocation>()
     let stopLocationSourcesByStop = Dictionary<int64, string>()
+    let postCandidateEvidence =
+        Dictionary<struct (int64 * string), PostCandidateEvidence>()
     let stopIndexesById = Dictionary<int64, int>()
     let stopReconciler = StopReconciler()
 
@@ -320,8 +323,8 @@ type JdfMerger(
     let stopPostsSet = HashSet()
     let batchDateByRoute = Dictionary()
 
-    let locationDistance loc1 loc2 =
-        let locToPt loc =
+    let locationDistance (loc1: StopLocation) (loc2: StopLocation) =
+        let locToPt (loc: StopLocation) =
             wgs84Factory.CreatePoint(
                 Coordinate(float loc.lon, float loc.lat))
             |> pointWgs84ToEtrs89Ex
@@ -342,7 +345,61 @@ type JdfMerger(
         Array.init 6 (fun index ->
             if index < min 6 merged.Length then Some merged.[index] else None)
 
-    member private this.batchWithTripStops tripStops = {
+    member private this.batchWithTripStops tripStops =
+        let locations =
+            stopLocationsByStop
+            |> Seq.map (fun pair -> pair.Key, pair.Value)
+            |> Map
+        let candidateStops: HashSet<int64> =
+            postCandidateEvidence.Keys
+            |> Seq.map (fun struct (stopId, _) -> stopId)
+            |> HashSet
+        let demandId mode previous next searchClass =
+            let payload = $"{mode}|{previous}|{next}|{searchClass}"
+            SHA256.HashData(Encoding.UTF8.GetBytes(payload))
+            |> Convert.ToHexString
+            |> fun value -> value.ToLowerInvariant()
+        let demand mode searchClass previous next =
+            let previousLocation = previous |> Option.bind (fun id -> locations |> Map.tryFind id)
+            let nextLocation = next |> Option.bind (fun id -> locations |> Map.tryFind id)
+            {
+                demandId = demandId mode previous next searchClass
+                modeFamily = mode
+                previousStopId = previous
+                nextStopId = next
+                previousLat = previousLocation |> Option.map (fun value -> value.lat)
+                previousLon = previousLocation |> Option.map (fun value -> value.lon)
+                nextLat = nextLocation |> Option.map (fun value -> value.lat)
+                nextLon = nextLocation |> Option.map (fun value -> value.lon)
+                searchClass = searchClass
+            }: RoutingDemand
+        let pairDemands =
+            routeStopsByRoute.Values
+            |> Seq.collect (fun (values: ResizeArray<RouteStop>) ->
+                let ordered = values |> Seq.sortBy (fun value -> value.routeStopId) |> Seq.toArray
+                ordered
+                |> Seq.pairwise
+                |> Seq.choose (fun (left: RouteStop, right: RouteStop) ->
+                    if candidateStops.Contains(left.stopId)
+                       || candidateStops.Contains(right.stopId) then
+                        Some (demand "both" "local" (Some left.stopId) (Some right.stopId))
+                    else None))
+        let terminalDemands =
+            candidateStops
+            |> Seq.choose (fun stopId ->
+                if locations.ContainsKey(stopId) then
+                    Some (demand "both" "terminal" (Some stopId) None)
+                else None)
+        let routingDemands =
+            Seq.append pairDemands terminalDemands
+            |> Seq.filter (fun value ->
+                (value.previousLat.IsSome && value.previousLon.IsSome)
+                || (value.nextLat.IsSome && value.nextLon.IsSome))
+            |> Seq.distinctBy (fun value -> value.demandId)
+            |> Seq.sortBy (fun value -> value.modeFamily, value.previousStopId, value.nextStopId,
+                                         value.searchClass, value.demandId)
+            |> Seq.toArray
+        {
         version = {
             version = "1.11"
             duNum = None
@@ -378,6 +435,11 @@ type JdfMerger(
             stopLocationSourcesByStop
             |> Seq.map (fun pair -> { stopId = pair.Key; source = pair.Value })
             |> Seq.toArray
+        postCandidateEvidence =
+            postCandidateEvidence.Values
+            |> Seq.sortBy (fun value -> value.stopId, value.candidateId, value.observationId)
+            |> Seq.toArray
+        routingDemands = routingDemands
     }
 
     member this.batch =
@@ -749,7 +811,7 @@ type JdfMerger(
         let batchLocationSources = Dictionary<int64, string>()
         for value in batch.stopLocationSources do
             batchLocationSources.[value.stopId] <- value.source
-        for sl in batch.stopLocations do
+        for (sl: StopLocation) in batch.stopLocations do
             let stopId = stopIdMap.[sl.stopId]
             let hasOldSl, oldSl = stopLocationsByStop.TryGetValue(stopId)
 
@@ -778,6 +840,15 @@ type JdfMerger(
                 | true, source -> stopLocationSourcesByStop.[stopId] <- source
                 | false, _ -> stopLocationSourcesByStop.Remove(stopId) |> ignore
 
+        for evidence in batch.postCandidateEvidence do
+            let mapped = { evidence with stopId = stopIdMap.[evidence.stopId] }
+            let key = struct (mapped.stopId, mapped.observationId)
+            match postCandidateEvidence.TryGetValue(key) with
+            | true,existing when existing<>mapped ->
+                invalidArg "batch"
+                    $"Conflicting merged post observation {mapped.stopId}/{mapped.observationId}"
+            | true,_ -> ()
+            | false,_ -> postCandidateEvidence.[key] <- mapped
         let stopPostsToAdd =
             batch.stopPosts
             |> Seq.filter (fun sp ->
@@ -864,7 +935,7 @@ type JdfMerger(
         |> Seq.iter (fun (k, v) -> routeIntegrationsByRoute.[k] <- v)
 
         batch.routeStops
-        |> Seq.map (fun rs ->
+        |> Seq.map (fun (rs: RouteStop) ->
             let rid, ridd = routeIdMap.[(rs.routeId, rs.routeDistinction)]
             { rs with
                 routeId = rid

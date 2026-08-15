@@ -117,10 +117,15 @@ logical processor count and may grow to eight times it (between 32 and 256
 workers), subject to live process-memory, CPU, and ordered-backlog pressure.
 An explicit numeric job count is a hard ceiling and is not reduced to the
 processor count. Automatic memory mode snapshots currently available RAM and
-the process's existing private bytes, reserves 25% of effective system memory
-(between 1 and 4 GiB) for the OS and other applications, and also applies a
-capacity ceiling. On a busy 16 GiB machine the budget therefore contracts with
-live availability instead of assuming that 10 GiB can always be allocated.
+the process's existing private bytes, keeps an OS reserve, and applies a
+capacity ceiling. On systems with at most 20 GiB it normally uses a smaller
+12.5% reserve and treats a bounded share of memory occupied outside JrUtil as evictable (75%
+at 8 GiB or less, 50% above that). This avoids collapsing the budget on hosts
+whose OS can trim caches and other working sets. Larger systems retain the
+conservative available-memory policy. `fix-jdf` takes its worker-budget snapshot
+after loading its persistent stop index, so that index is included in the
+process baseline rather than mistaken for worker headroom. Legacy straight-line
+transit geometry is not built.
 `fix-jdf` and `merge-jdf` admit independent batch parsing by estimated
 uncompressed bytes while committing results in stable input order. Admission
 targets 85% of the process memory budget, keeps the batch currently being
@@ -167,6 +172,8 @@ dotnet run --project jrutil-multitool -- \
   jdf-to-bundle \
   --snapshot-descriptor=snapshot.json \
   --converter-version=<fork-commit> \
+  --routing-osm-pbf=jdf-transit-routing-demand.osm.pbf \
+  [--diagnostic-post-labels] \
   JDF-input bundle-output
 ```
 
@@ -189,16 +196,93 @@ bundle/
 ├── source_notice_metadata.parquet
 ├── source_transfer_metadata.parquet
 ├── source_travel_restriction_metadata.parquet
+├── derived_post_locations.parquet
+├── derived_post_assignments.parquet
+├── post_candidate_evidence.parquet
+├── post_side_groups.parquet
+├── derived_post_scores.parquet
 ├── diagnostics.json
 └── manifest.json
 ```
 
-The seven slim Parquet tables retain only source facts that would otherwise be
+The source Parquet tables retain facts that would otherwise be
 lost. The original route/stop/call metadata tables preserve JDF distinctions,
 structured stop-name components, coordinate absence and route-stop IDs. The
 additional relations preserve route-stop zone scope, textual notices,
 connection context and the `§`/`A`/`B`/`C` travel-exclusion groups. Trip,
 boarding-point, call and fare-zone entity mirrors are intentionally absent.
+
+Estimated posts are disabled by default unless `--routing-osm-pbf` or
+`--post-inference-evidence` is supplied.
+The input must be the Osmium-prepared demand clip and have its matching
+`.manifest.json` sidecar. `--no-estimated-posts` remains the complete rollback
+path. Diagnostic `O1`/`O-N`/`?` platform codes are independently default-off.
+
+Expensive directed routing can be captured once and replayed without opening
+OSM or running A*:
+
+```text
+jdf-to-bundle --routing-osm-pbf=clip.osm.pbf \
+  --capture-post-inference-evidence=evidence --post-inference-evidence-only ...
+
+jdf-validate-post-inference --evidence=evidence
+
+jdf-replay-post-inference --evidence=evidence --policy=policy.json \
+  --expectations=expectations.tsv --review-stops=stops.txt --output=review
+
+jdf-to-bundle --post-inference-evidence=evidence \
+  --post-inference-policy=policy.json ...
+```
+
+Evidence v2 contains `observations.parquet`, `route_points.parquet`,
+`contexts.parquet`, `corridor_variants.parquet`, and
+`route_point_evidence.parquet`. Capture is a raw-fact phase: it does not load a
+policy or enter consolidation, scoring, resolution, GTFS conversion, or bundle
+writing. Each routed context contains one to three baseline-relative directed
+corridor variants and one attachment or explicit failure row for every route
+point on every variant. Its manifest is bound to the merged JDF and routing PBF
+identities, routing ceilings, router/variant-enumeration versions, and a pack ID
+repeated in each Parquet relation. The capture-tool version is part of that pack
+identity, so two capture implementations cannot silently publish the same ID.
+It records the hash, size, 64-bit row count,
+and schema fingerprint of every relation. V1 and incomplete older v2 packs are
+rejected and must be recaptured. Capture-only cannot be combined with a policy.
+Capture-only is dispatched before policy and bundle preparation and returns a
+typed `CaptureCompleted` result to the CLI.
+Its disk preflight is derived from the canonical deduplicated route-pattern
+plan, not from the number of timetable calls. The upper bound includes every
+captured relation, and atomic publication requires one temporary pack plus a
+fixed safety reserve because activation is a same-volume directory rename.
+Evidence-backed bundle generation rejects a different input snapshot before
+conversion and performs no graph construction or routing searches. Live and
+replay conversion invoke the same v2 evaluator; the live path first creates a
+temporary evidence store and reopens it through the same validated trust
+boundary as replay. Validation covers exact Arrow types/nullability and
+metadata, canonical ordering, key/foreign-key integrity, context/block/family
+identity, corridor ranks and costs, unavailable sentinels, finite numeric facts,
+and complete route-point attachment coverage. Policy v2 owns consolidation, hard gates, geometry,
+support, consensus, alternatives, side groups, authored resolution, and
+same-stop thresholds. A policy
+may request at most the captured routed-excess horizon (currently 1,000 m;
+the default publication gate remains 500 m).
+
+The sole production decision boundary is a validated `PostEvidenceStore` plus a
+`PostInferencePolicyV2`, returning a complete disposable
+`PostInferenceResult`. The result owns replayable assignment and diagnostic-row
+stores, while its hypotheses, side groups, authored positions, and counters are
+complete policy outputs. `JdfToGtfs` only adapts that result to the conversion
+plan; capture and bundle orchestration do not contain a second evaluator.
+
+Capture canonicalizes observations, route points, and context work through one
+bounded replayable-row abstraction. Rows remain in chunks below budget and use
+private binary spools above it. Stop-major contexts receive ordinals before
+routing; admitted workers consume bounded queues with graph-internal concurrency
+set to one, write ordinal-sorted worker spools, and feed a stable k-way merge.
+The same typed enumerators produce fixed 65,536-row Parquet groups, so relation
+and manifest bytes are independent of worker count, input order, and spill
+boundaries. Capture progress reports admission and current/peak spill bytes;
+temporary stores are removed after success, validation failure, routing failure,
+cancellation, or output collision.
 
 The enrichment schemas are:
 

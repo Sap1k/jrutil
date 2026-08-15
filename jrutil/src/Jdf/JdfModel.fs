@@ -369,6 +369,40 @@ type StopLocationSource = {
     source: string
 }
 
+// JrUtil-only raw observations retained for conservative post inference.
+// Modality is deliberately not mandatory: explicitModes/deniedModes contain
+// only facts supplied by the source, while conversion-time inference derives
+// any additional compatibility from distinct routed service patterns.
+type PostCandidateEvidence = {
+    stopId: int64
+    candidateId: string
+    observationId: string
+    sourceKind: string
+    sourceObjectId: string option
+    observedAt: string option
+    lat: decimal
+    lon: decimal
+    supportWeight: decimal
+    rawTags: string
+    explicitModes: string
+    deniedModes: string
+    lifecycle: string
+}
+
+// Compact merge output consumed by the Oběhy Osmium orchestration. It avoids
+// reparsing the national Zasspoje relation merely to discover routing areas.
+type RoutingDemand = {
+    demandId: string
+    modeFamily: string
+    previousStopId: int64 option
+    nextStopId: int64 option
+    previousLat: decimal option
+    previousLon: decimal option
+    nextLat: decimal option
+    nextLon: decimal option
+    searchClass: string
+}
+
 type JdfBatch = {
     version: JdfVersion
     stops: Stop array
@@ -389,4 +423,34 @@ type JdfBatch = {
     reservationOptions: ReservationOptions array
     stopLocations: StopLocation array
     stopLocationSources: StopLocationSource array
+    postCandidateEvidence: PostCandidateEvidence array
+    routingDemands: RoutingDemand array
 }
+
+let validatePostCandidateEvidence (observations:PostCandidateEvidence array) =
+    let allowedModes=Set ["road";"tram";"trolleybus"]
+    let allowedLifecycle=Set ["";"active";"current";"temporary";"construction";"proposed";"disused";"abandoned"]
+    let seen=System.Collections.Generic.HashSet<struct(int64*string)>()
+    let modes (field:PostCandidateEvidence -> string) (value:PostCandidateEvidence) =
+        field value
+        |> fun text -> text.Split([|';';',';' '|],System.StringSplitOptions.RemoveEmptyEntries)
+        |> Array.map(fun mode -> mode.Trim().ToLowerInvariant())
+    for observation in observations do
+        if observation.stopId<=0L then invalidArg "observations" "Post observation stop_id must be positive"
+        if System.String.IsNullOrWhiteSpace(observation.observationId) then
+            invalidArg "observations" "Post observation_id is required"
+        if not(seen.Add(struct(observation.stopId,observation.observationId))) then
+            invalidArg "observations" $"Duplicate post observation {observation.stopId}/{observation.observationId}"
+        if System.String.IsNullOrWhiteSpace(observation.sourceKind) then
+            invalidArg "observations" $"Post observation {observation.observationId} has no source_kind"
+        if observation.lat < -90M || observation.lat > 90M
+           || observation.lon < -180M || observation.lon > 180M then
+            invalidArg "observations" $"Post observation {observation.observationId} has invalid coordinates"
+        if observation.supportWeight<=0M then
+            invalidArg "observations" $"Post observation {observation.observationId} has non-positive support"
+        for mode in Array.append (modes _.explicitModes observation) (modes _.deniedModes observation) do
+            if not(allowedModes.Contains mode) then
+                invalidArg "observations" $"Post observation {observation.observationId} has unsupported mode '{mode}'"
+        let lifecycle=observation.lifecycle.Trim().ToLowerInvariant()
+        if not(allowedLifecycle.Contains lifecycle) then
+            invalidArg "observations" $"Post observation {observation.observationId} has unsupported lifecycle '{lifecycle}'"

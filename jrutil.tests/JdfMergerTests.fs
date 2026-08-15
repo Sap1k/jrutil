@@ -73,6 +73,27 @@ type JdfMergerTests() =
         merger
 
     [<TestMethod>]
+    member _.``Post observations remap to canonical stops deterministically``() =
+        let firstStop = stop 1L "Candidate stop" None None [||]
+        let secondStop = stop 2L "Candidate stop" None None [||]
+        let observation stopId id source : PostCandidateEvidence = {
+            stopId=stopId;candidateId=id;observationId=id;sourceKind=source
+            sourceObjectId=Some id;observedAt=None;lat=50M;lon=14M;supportWeight=1M
+            rawTags="";explicitModes="road";deniedModes="";lifecycle="active" }
+        let first = {
+            emptyBatch [| firstStop |] [| precise 1L 50M 14M |] [||] with
+                postCandidateEvidence = [| observation 1L "catalogue:a" "catalogue" |]
+        }
+        let second = {
+            emptyBatch [| secondStop |] [| precise 2L 50M 14M |] [||] with
+                postCandidateEvidence = [| observation 2L "osm:b" "osm" |]
+        }
+        let result = (merge [ first; second ]).batch
+        assertEqual 2 result.postCandidateEvidence.Length
+        result.postCandidateEvidence |> Array.iter(fun observation ->
+            assertEqual result.stops.[0].id observation.stopId)
+
+    [<TestMethod>]
     member _.``Expanded CIS stop name replaces abbreviated alias``() =
         let abbreviated = stop 1L "Ústí n.L." (Some "hl.nádr.") None [| Some 1; None; None; None; None; None |]
         let expanded = stop 2L "Ústí nad Labem" (Some "Hlavní nádraží") None [| Some 2; None; None; None; None; None |]
