@@ -4,17 +4,24 @@
 module JrUtil.JdfToGtfs
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.IO
 open System.Security.Cryptography
+open System.Text
 open System.Text.RegularExpressions
+open System.Threading
+open System.Threading.Tasks
 open FSharp.Data
+open NetTopologySuite.Geometries
 open NodaTime
 open NodaTime.Calendars
 open Serilog
 
 open JrUtil
 open JrUtil.Holidays
+open JrUtil.GeoData.Common
+open JrUtil.GeoData.Osm
 
 type InternationalRoutePolicy =
     | KeepAll
@@ -389,6 +396,354 @@ let stopPostNumbersById (jdfBatch: JdfModel.JdfBatch) =
             None)
     |> Map
 
+type PostResolution =
+    | Physical of candidateId: string
+    | Side of sideGroupId: string * representativeCandidateId: string
+    | Centroid
+
+type DerivedPostSelection = {
+    locationId: string
+    stopId: int64
+    candidateIds: string array
+    sideGroupId: string option
+    representativeCandidateId: string option
+    resolution: PostResolution
+    lat: decimal
+    lon: decimal
+    selectionKind: string
+    score: float
+    margin: float option
+}
+
+type PostSideGroup = {
+    sideGroupId: string
+    stopId: int64
+    mode: JdfModel.TransportMode
+    corridorFaceId: string
+    sector: string
+    representativeCandidateId: string
+    memberCandidateIds: string array
+    compactnessMetres: float
+    repeatedPatternSupport: int
+}
+
+type DerivedPostContext = {
+    previousStopId: int64 option
+    nextStopId: int64 option
+    sameStopBlockRole: string
+}
+
+[<Struct>]
+type PostPatternContextKey = {
+    stopId: int64
+    mode: JdfModel.TransportMode
+    lineId: string
+    routeDistinction: int
+    direction: int
+    patternHash: string
+    position: int
+    sameStopBlockRole: string
+}
+
+type CandidateModalityEstimate = {
+    candidateId: string
+    supportedModes: string array
+    explicitlyDeniedModes: string array
+    status: string
+    roadSupport: int
+    trolleybusSupport: int
+    tramSupport: int
+    distinctSupportingPatterns: int
+    evidenceMethod: string
+    confidence: float
+}
+
+type PhysicalPostHypothesis = {
+    hypothesisId: string
+    stopId: int64
+    memberObservationIds: string array
+    memberCandidateIds: string array
+    representativeCandidateId: string
+    lat: decimal
+    lon: decimal
+    sources: string array
+}
+
+type DerivedPostScore = {
+    context: PostPatternContextKey
+    movementFamilyId: string
+    candidateId: string
+    eligible: bool
+    alignment: float
+    side: float
+    proximity: float
+    routedFit: float
+    routedExcessMetres: float option
+    corridorId: string option
+    ingressThreadId: string option
+    egressThreadId: string option
+    corridorFaceId: string option
+    routingAvailability: string
+    alternativeCorridorCount: int
+    alternativeCostGap: float option
+    snapEdgeId: int option
+    snapFraction: float option
+    corridorDistance: float option
+    signedLateralOffset: float option
+    corridorHeading: float option
+    attachmentHeading: float option
+    tiedCorridorsAgree: bool
+    topologyFailureReason: string option
+    routeDistinction: int
+    sourceAdjustment: float
+    modalityAdjustment: float
+    popularityPrior: float
+    total: float
+    rejectionReason: string option
+}
+
+type PostEstimationPlan = {
+    authored: Map<int64 * string, DerivedPostSelection>
+    calls: IReadOnlyDictionary<PostPatternContextKey, DerivedPostSelection>
+    authoredContexts: Map<int64 * string, DerivedPostContext array>
+    callContexts: IReadOnlyDictionary<PostPatternContextKey, DerivedPostContext>
+    movementFamilyIds: IReadOnlyDictionary<PostPatternContextKey,string>
+    locations: DerivedPostSelection array
+    inferredLocations: DerivedPostSelection array
+    physicalHypotheses: PhysicalPostHypothesis array
+    modalityEstimates: CandidateModalityEstimate array
+    sideGroups: PostSideGroup array
+    scoreCount: int64
+    scoreRows: unit -> seq<DerivedPostScore>
+    cleanupScoreRows: unit -> unit
+    unresolvedPatternContexts: PostPatternContextKey array
+    tripPatternHashes: IReadOnlyDictionary<struct (string * int * int64), string>
+    candidateStopCount: int
+    singleCandidateSkips: int
+    unresolvedContexts: int
+    sameStopBlocks: int
+    distinctPairChoices: int
+    unresolvedBlockEdges: int
+}
+
+let private emptyPostEstimationPlan = {
+    authored = Map.empty
+    calls = Dictionary<PostPatternContextKey, DerivedPostSelection>()
+    authoredContexts = Map.empty
+    callContexts = Dictionary<PostPatternContextKey, DerivedPostContext>()
+    movementFamilyIds = Dictionary<PostPatternContextKey,string>()
+    locations = [||]
+    inferredLocations = [||]
+    physicalHypotheses = [||]
+    modalityEstimates = [||]
+    sideGroups = [||]
+    scoreCount = 0L
+    scoreRows = fun () -> Seq.empty
+    cleanupScoreRows = ignore
+    unresolvedPatternContexts = [||]
+    tripPatternHashes = Dictionary<struct (string * int * int64), string>()
+    candidateStopCount = 0; singleCandidateSkips = 0
+    unresolvedContexts = 0; sameStopBlocks = 0; distinctPairChoices = 0
+    unresolvedBlockEdges = 0
+}
+
+/// Adapts the inference-domain result to the converter's publishing plan.
+/// Policy evaluation remains entirely in JdfPostInferenceEvaluator; this
+/// function only translates already-decided assignments and diagnostics.
+let postEstimationPlanFromInferenceResult
+        (result:JdfPostInference.PostInferenceResult) : PostEstimationPlan =
+    JdfPostInferencePolicy.PostInferencePhaseProbe.record "result-adaptation"
+    let disposeResult () = (result :> IDisposable).Dispose()
+    try
+        let hypothesesById =
+            result.Hypotheses
+            |> Array.map(fun value -> value.hypothesisId,value)
+            |> Map.ofArray
+        let sideGroupsById =
+            result.SideGroups
+            |> Array.map(fun value -> value.sideGroupId,value)
+            |> Map.ofArray
+        let physicalHypotheses =
+            result.Hypotheses
+            |> Array.map(fun value ->
+                ({ hypothesisId=value.hypothesisId
+                   stopId=value.stopId
+                   memberObservationIds=value.memberObservationIds
+                   memberCandidateIds=value.memberRoutePointIds
+                   representativeCandidateId=value.representativeRoutePointId
+                   lat=decimal value.latitude
+                   lon=decimal value.longitude
+                   sources=[||] } : PhysicalPostHypothesis))
+        let sideGroups =
+            result.SideGroups
+            |> Array.map(fun value ->
+                ({ sideGroupId=value.sideGroupId
+                   stopId=value.stopId
+                   mode=parseTransportMode "inference result mode" value.mode
+                   corridorFaceId=value.corridorFaceId
+                   sector=value.sector
+                   representativeCandidateId=value.representativeHypothesisId
+                   memberCandidateIds=value.memberHypothesisIds
+                   compactnessMetres=value.compactnessMetres
+                   repeatedPatternSupport=value.support } : PostSideGroup))
+        let selectionFor (assignment:JdfPostInference.ContextPostAssignment) =
+            match assignment.selectedLocationId,assignment.selectedHypothesisId with
+            | Some locationId,Some hypothesisId ->
+                match assignment.selectedSideGroupId with
+                | Some groupId ->
+                    let group=sideGroupsById.[groupId]
+                    Some ({ locationId=locationId;stopId=assignment.stopId
+                            candidateIds=[|group.representativeHypothesisId|]
+                            sideGroupId=Some groupId
+                            representativeCandidateId=Some group.representativeHypothesisId
+                            resolution=Side(groupId,group.representativeHypothesisId)
+                            lat=decimal group.latitude;lon=decimal group.longitude
+                            selectionKind="side"
+                            score=assignment.score |> Option.defaultValue 0.0
+                            margin=assignment.margin } : DerivedPostSelection)
+                | None ->
+                    let hypothesis=hypothesesById.[hypothesisId]
+                    Some ({ locationId=locationId;stopId=assignment.stopId
+                            candidateIds=[|hypothesisId|];sideGroupId=None
+                            representativeCandidateId=Some hypothesisId
+                            resolution=Physical hypothesisId
+                            lat=decimal hypothesis.latitude;lon=decimal hypothesis.longitude
+                            selectionKind="physical"
+                            score=assignment.score |> Option.defaultValue 0.0
+                            margin=assignment.margin } : DerivedPostSelection)
+            | _ -> None
+        let calls=Dictionary<PostPatternContextKey,DerivedPostSelection>()
+        let callContexts=Dictionary<PostPatternContextKey,DerivedPostContext>()
+        let movementFamilyIds=Dictionary<PostPatternContextKey,string>()
+        let unresolved=ResizeArray<PostPatternContextKey>()
+        let selectionsByLocation=Dictionary<string,DerivedPostSelection>(StringComparer.Ordinal)
+        let authoredContexts=ResizeArray<(int64*string)*DerivedPostContext>()
+        for assignment in result.Assignments.ReadRows() do
+            let contextKey:PostPatternContextKey = {
+                stopId=assignment.stopId
+                mode=parseTransportMode "inference result mode" assignment.mode
+                lineId=assignment.lineId;routeDistinction=assignment.routeDistinction
+                direction=assignment.direction;patternHash=assignment.patternHash
+                position=assignment.patternPosition
+                sameStopBlockRole=assignment.sameStopBlockRole }
+            let context:DerivedPostContext = {
+                previousStopId=assignment.previousStopId
+                nextStopId=assignment.nextStopId
+                sameStopBlockRole=assignment.sameStopBlockRole }
+            match assignment.assignmentKind,assignment.authoredPostKey with
+            | "authored",Some authoredKey ->
+                authoredContexts.Add((assignment.stopId,authoredKey),context)
+            | "unlabelled",_ ->
+                callContexts.[contextKey] <- context
+                movementFamilyIds.[contextKey] <- assignment.movementFamilyId
+                match selectionFor assignment with
+                | Some selection ->
+                    calls.[contextKey] <- selection
+                    selectionsByLocation.TryAdd(selection.locationId,selection) |> ignore
+                | None -> unresolved.Add(contextKey)
+            | _ -> ()
+        let inferredLocations =
+            selectionsByLocation.Values |> Seq.sortBy _.locationId |> Seq.toArray
+        let authored =
+            result.AuthoredPositions
+            |> Array.choose(fun value ->
+                match selectionsByLocation.TryGetValue(value.locationId) with
+                | true,selection -> Some((value.stopId,value.authoredPostKey),selection)
+                | _ -> None)
+            |> Map.ofArray
+        let authoredContextMap =
+            authoredContexts
+            |> Seq.groupBy fst
+            |> Seq.map(fun (key,values) ->
+                key,
+                (values
+                 |> Seq.map snd
+                 |> Seq.distinct
+                 |> Seq.sortBy(fun value ->
+                     value.sameStopBlockRole,value.previousStopId,value.nextStopId)
+                 |> Seq.toArray))
+            |> Map.ofSeq
+        let scoreRows () = seq {
+            use assignments=result.Assignments.ReadRows().GetEnumerator()
+            let mutable hasAssignment=assignments.MoveNext()
+            for score in result.DiagnosticScores.ReadRows() do
+                while hasAssignment && assignments.Current.contextId<>score.contextId do
+                    hasAssignment<-assignments.MoveNext()
+                if not hasAssignment then
+                    invalidOp $"Derived post score references an unknown context: {score.contextId}"
+                let assignment=assignments.Current
+                let context:PostPatternContextKey = {
+                    stopId=assignment.stopId
+                    mode=parseTransportMode "inference result mode" assignment.mode
+                    lineId=assignment.lineId;routeDistinction=assignment.routeDistinction
+                    direction=assignment.direction;patternHash=assignment.patternHash
+                    position=assignment.patternPosition
+                    sameStopBlockRole=assignment.sameStopBlockRole }
+                yield ({ context=context;movementFamilyId=assignment.movementFamilyId
+                         candidateId=score.candidateId;eligible=score.eligible
+                         alignment=score.alignment;side=score.side;proximity=score.proximity
+                         routedFit=score.routedExcess;routedExcessMetres=score.routedExcessMetres
+                         corridorId=score.corridorId;ingressThreadId=score.ingressThreadId
+                         egressThreadId=score.egressThreadId;corridorFaceId=score.corridorFaceId
+                         routingAvailability=score.routingAvailability
+                         alternativeCorridorCount=score.alternativeCorridorCount
+                         alternativeCostGap=score.alternativeCostGap
+                         snapEdgeId=score.snapEdgeId;snapFraction=score.snapFraction
+                         corridorDistance=score.corridorDistance
+                         signedLateralOffset=score.signedLateralOffset
+                         corridorHeading=score.corridorHeading
+                         attachmentHeading=score.attachmentHeading
+                         tiedCorridorsAgree=score.tiedCorridorsAgree
+                         topologyFailureReason=score.topologyFailureReason
+                         routeDistinction=assignment.routeDistinction
+                         sourceAdjustment=score.sourceAdjustment
+                         modalityAdjustment=score.modalityAdjustment
+                         popularityPrior=score.popularityAdjustment
+                         total=score.total;rejectionReason=score.rejectionReason }
+                       : DerivedPostScore)
+        }
+        { authored=authored;calls=calls;authoredContexts=authoredContextMap
+          callContexts=callContexts;movementFamilyIds=movementFamilyIds
+          locations=inferredLocations;inferredLocations=inferredLocations
+          physicalHypotheses=physicalHypotheses;modalityEstimates=[||]
+          sideGroups=sideGroups;scoreCount=result.DiagnosticScores.Count
+          scoreRows=scoreRows;cleanupScoreRows=disposeResult
+          unresolvedPatternContexts=unresolved.ToArray()
+          tripPatternHashes=Dictionary<struct(string*int*int64),string>()
+          candidateStopCount=result.Counters.candidateStopCount;singleCandidateSkips=0
+          unresolvedContexts=result.Counters.unresolvedContexts
+          sameStopBlocks=result.Counters.sameStopBlocks
+          distinctPairChoices=result.Counters.distinctPairChoices
+          unresolvedBlockEdges=result.Counters.unresolvedBlockEdges }
+    with _ ->
+        disposeResult()
+        reraise()
+
+let private authoredPostKey (call: JdfModel.TripStop) =
+    match call.stopPostId, call.stopPostNum |> Option.bind nonEmptyTrimmed with
+    | Some value, _ -> Some $"id:{value}"
+    | None, Some value -> Some $"num:{value}"
+    | _ -> None
+
+let private completePatternHash (calls: JdfModel.TripStop array) =
+    calls
+    |> Array.map (fun call -> string call.stopId)
+    |> String.concat ","
+    |> Encoding.UTF8.GetBytes
+    |> SHA256.HashData
+    |> Convert.ToHexString
+    |> fun value -> value.ToLowerInvariant()
+
+let private callIsUsable (call: JdfModel.TripStop) =
+    match call.departureTime, call.arrivalTime with
+    | Some JdfModel.Passing, _ | Some JdfModel.NotPassing, _ -> false
+    | None, None -> false
+    | _ -> true
+
+let buildPostEstimationPlan (batch: JdfModel.JdfBatch) =
+    ignore batch
+    emptyPostEstimationPlan
+
 // TODO: Naming in this whole module
 let convertToGtfsAgency: JdfModel.Agency -> GtfsModel.Agency = fun jdfAgency ->
     {
@@ -411,7 +766,11 @@ let convertToGtfsAgency: JdfModel.Agency -> GtfsModel.Agency = fun jdfAgency ->
         email = jdfAgency.email
     }
 
-let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+let private inferredPostId stopIdsCis stopId (selection: DerivedPostSelection) =
+    $"{jdfStopId stopIdsCis stopId}:{selection.locationId}"
+
+let private getGtfsStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
+                                    (jdfBatch: JdfModel.JdfBatch) =
     let stopLocationsById =
         jdfBatch.stopLocations
         |> Seq.groupBy (fun sl -> sl.stopId)
@@ -500,6 +859,7 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     let gtfsStopPosts =
         jdfBatch.stopPosts |> Array.map (fun jdfStopPost ->
             let parentStop = gtfsStopsById.[jdfStopId stopIdsCis jdfStopPost.stopId]
+            let selection = plan.authored |> Map.tryFind (jdfStopPost.stopId, $"id:{jdfStopPost.stopPostId}")
             { parentStop with
 
                 id = jdfStopPostId stopIdsCis
@@ -515,20 +875,42 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                         |> Map.tryFind (jdfStopPost.stopId,
                                         jdfStopPost.stopPostId))
                     |> Option.orElse (Some (string jdfStopPost.stopPostId))
+                lat = selection |> Option.map (fun value -> value.lat) |> Option.orElse parentStop.lat
+                lon = selection |> Option.map (fun value -> value.lon) |> Option.orElse parentStop.lon
             }: GtfsModel.Stop)
     let gtfsNumberedStopPosts =
         derivedStopPosts jdfBatch
         |> Array.map (fun (stopId, stopPostNum) ->
             let parentStop = gtfsStopsById.[jdfStopId stopIdsCis stopId]
+            let selection = plan.authored |> Map.tryFind (stopId, $"num:{stopPostNum}")
             { parentStop with
                 id = jdfStopPostNumId stopIdsCis stopId stopPostNum
                 locationType = Some GtfsModel.Stop
                 parentStation = Some parentStop.id
                 platformCode = Some stopPostNum
+                lat = selection |> Option.map (fun value -> value.lat) |> Option.orElse parentStop.lat
+                lon = selection |> Option.map (fun value -> value.lon) |> Option.orElse parentStop.lon
             }: GtfsModel.Stop)
+    let inferredPosts =
+        plan.inferredLocations
+        |> Seq.sortBy (fun value -> value.stopId, value.locationId)
+        |> Seq.map (fun selection ->
+            let parentStop = gtfsStopsById.[jdfStopId stopIdsCis selection.stopId]
+            { parentStop with
+                id = inferredPostId stopIdsCis selection.stopId selection
+                locationType = Some GtfsModel.Stop
+                parentStation = Some parentStop.id
+                platformCode = None
+                lat = Some selection.lat
+                lon = Some selection.lon
+            }: GtfsModel.Stop)
+        |> Seq.toArray
 
     Array.concat [ gtfsStops; gtfsUnspecifiedStops
-                   gtfsStopPosts; gtfsNumberedStopPosts ]
+                   gtfsStopPosts; gtfsNumberedStopPosts; inferredPosts ]
+
+let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+    getGtfsStopsWithPlan stopIdsCis (buildPostEstimationPlan jdfBatch) jdfBatch
 
 let getGtfsRoutesWithPublicLines
         (publicLineNumbers: Map<string * int, string option>)
@@ -633,14 +1015,20 @@ let gtfsCalendarBitmap (calendar: GtfsModel.CalendarEntry) =
         calendar.weekdayService.[dow])
     |> Seq.toArray
 
-// Returns triple of trips with empty calendar (to delete), calendar entries
-// and calendar exceptions
-let getGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
-    let tripsByRoute =
-        jdfBatch.trips
-        |> Array.groupBy (fun t -> t.routeId, t.routeDistinction)
-        |> Map
+type CalendarPreparation = {
+    tripsToDelete: Set<string>
+    calendar: GtfsModel.CalendarEntry array
+    calendarExceptions: GtfsModel.CalendarException array
+}
 
+// Computes the expensive per-trip service bitmap exactly once. Bundle
+// conversion carries this result through international filtering instead of
+// rebuilding every bitmap for the retained batch.
+let prepareGtfsCalendarWithWorkersAndProgress
+        maximumWorkers
+        (progress: int64 -> int64 option -> unit)
+        (jdfBatch: JdfModel.JdfBatch) =
+    if maximumWorkers <= 0 then invalidArg "maximumWorkers" "Calendar worker count must be positive"
     let notesByTrip =
         jdfBatch.serviceNotes
         |> Array.groupBy (fun sn -> sn.routeId, sn.routeDistinction, sn.tripId)
@@ -651,8 +1039,7 @@ let getGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
         |> Array.map (fun r -> (r.id, r.idDistinction), r)
         |> Map
 
-    jdfBatch.trips
-    |> Seq.map (fun jdfTrip ->
+    let calculate (jdfTrip: JdfModel.Trip) =
         let jdfRoute = routeById.[(jdfTrip.routeId, jdfTrip.routeDistinction)]
         let attrs = Jdf.parseAttributes jdfBatch jdfTrip.attributes
 
@@ -700,12 +1087,12 @@ let getGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
         // Pick the most efficient representation (calendar + exceptions vs
         // just exceptions)
         if bitmapTrueCount = 0 then
-            seq { tripId }, Seq.empty, Seq.empty
+            [|tripId|], [||], [||]
         elif bitmapDiffCount > bitmapTrueCount then
-            Seq.empty, Seq.empty,
+            [||], [||],
             bitmap
-            |> Seq.indexed
-            |> Seq.choose (fun (i, s) ->
+            |> Array.indexed
+            |> Array.choose (fun (i, s) ->
                 if s then Some ({
                     id = tripId
                     date = jdfRoute.timetableValidFrom.PlusDays(i)
@@ -713,20 +1100,72 @@ let getGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
                 }: GtfsModel.CalendarException)
                 else None)
         else
-            Seq.empty, seq { calendarEntry },
+            [||], [|calendarEntry|],
             Seq.zip bitmap calendarBitmap
             |> Seq.indexed
             |> Seq.choose (fun (i, (s, sc)) ->
-                if s <> sc then Some {
+                if s <> sc then Some ({
                     id = tripId
                     date = jdfRoute.timetableValidFrom.PlusDays(i)
                     exceptionType = if s then GtfsModel.ServiceAdded
                                     else GtfsModel.ServiceRemoved
-                }
+                }: GtfsModel.CalendarException)
                 else None)
-    )
-    |> Utils.concatTo3
-    |> (fun (ets, ces, cexs) -> set ets, ces.ToArray(), cexs.ToArray())
+            |> Seq.toArray
+    let values = Array.zeroCreate jdfBatch.trips.Length
+    let mutable calculatedTrips = 0L
+    let calendarProgressLock = obj()
+    let mutable lastCalendarProgress = 0L
+    let calculateAt index =
+        values.[index] <- calculate jdfBatch.trips.[index]
+        let count = Interlocked.Increment(&calculatedTrips)
+        if count % 5_000L = 0L || count = int64 jdfBatch.trips.Length then
+            lock calendarProgressLock (fun () ->
+                if count > lastCalendarProgress then
+                    lastCalendarProgress <- count
+                    progress count (Some (int64 jdfBatch.trips.Length)))
+    if maximumWorkers = 1 || jdfBatch.trips.Length <= 1 then
+        for index = 0 to jdfBatch.trips.Length-1 do calculateAt index
+    else
+            let options = ParallelOptions(MaxDegreeOfParallelism = maximumWorkers)
+            Parallel.For(0, jdfBatch.trips.Length, options, calculateAt)
+            |> ignore
+    let tripsToDelete = ResizeArray<string>()
+    let calendar = ResizeArray<GtfsModel.CalendarEntry>()
+    let exceptions = ResizeArray<GtfsModel.CalendarException>()
+    for deleted, entries, tripExceptions in values do
+        tripsToDelete.AddRange(deleted)
+        calendar.AddRange(entries)
+        exceptions.AddRange(tripExceptions)
+    {
+        tripsToDelete = set tripsToDelete
+        calendar = calendar.ToArray()
+        calendarExceptions = exceptions.ToArray()
+    }
+
+let prepareGtfsCalendarWithWorkers maximumWorkers (jdfBatch: JdfModel.JdfBatch) =
+    prepareGtfsCalendarWithWorkersAndProgress maximumWorkers (fun _ _ -> ()) jdfBatch
+
+let prepareGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
+    prepareGtfsCalendarWithWorkers 1 jdfBatch
+
+// Retained for source compatibility with standalone callers.
+let getGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
+    let prepared = prepareGtfsCalendar jdfBatch
+    prepared.tripsToDelete, prepared.calendar, prepared.calendarExceptions
+
+let filterCalendarPreparation (batch: JdfModel.JdfBatch)
+                              (prepared: CalendarPreparation) =
+    let retained =
+        batch.trips
+        |> Seq.map (fun trip -> jdfTripId trip.routeId trip.routeDistinction trip.id)
+        |> HashSet
+    {
+        tripsToDelete = prepared.tripsToDelete |> Set.filter retained.Contains
+        calendar = prepared.calendar |> Array.filter (fun value -> retained.Contains(value.id))
+        calendarExceptions =
+            prepared.calendarExceptions |> Array.filter (fun value -> retained.Contains(value.id))
+    }
 
 let private callIsEmitted (call: JdfModel.TripStop) =
     match call.departureTime with
@@ -771,25 +1210,28 @@ type private InternationalTripDisposition =
     | RejectedCrossBorderTrip of reason: string * span: decimal option * depth: decimal option
     | ForeignOnlyTrip
 
-let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
-                                  (overrides: InternationalRouteOverride array)
-                                  (batch: JdfModel.JdfBatch) =
+let private applyInternationalRoutePolicyInternal
+        maximumWorkers
+        (progress: string -> int64 -> int64 option -> unit)
+        (tripsToDelete: Set<string>)
+        (policy: InternationalRoutePolicy)
+        (overrides: InternationalRouteOverride array)
+        (batch: JdfModel.JdfBatch) =
     if policy = KeepAll then { batch = batch; decisions = [||] } else
 
     validateInternationalRouteOverrideConflicts overrides
 
-    let tripsToDelete, _, _ = getGtfsCalendar batch
-    let activeTripKeys =
-        batch.trips
-        |> Seq.choose (fun trip ->
-            let gtfsId = jdfTripId trip.routeId trip.routeDistinction trip.id
-            if tripsToDelete.Contains gtfsId then None
-            else Some (trip.routeId, trip.routeDistinction, trip.id))
-        |> Set
-    let activeTripsByRoute =
+    let activeTripKeys = HashSet<struct (string * int * int64)>()
+    for trip in batch.trips do
+        let gtfsId = jdfTripId trip.routeId trip.routeDistinction trip.id
+        if not (tripsToDelete.Contains gtfsId) then
+            activeTripKeys.Add(struct (trip.routeId, trip.routeDistinction, trip.id)) |> ignore
+    let activeTripContains routeId distinction tripId =
+        activeTripKeys.Contains(struct (routeId, distinction, tripId))
+    let activeTripCountsByRoute =
         activeTripKeys
-        |> Seq.groupBy (fun (routeId, routeDistinction, _) -> routeId, routeDistinction)
-        |> Seq.map (fun (routeKey, trips) -> routeKey, trips |> Seq.toArray)
+        |> Seq.map (fun struct (routeId, distinction, _) -> routeId, distinction)
+        |> Seq.countBy id
         |> Map
     let stopCountries =
         batch.stops
@@ -802,14 +1244,48 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
                 | _ -> None
             stop.id, country)
         |> Map
-    let callsByTrip =
-        batch.tripStops
-        |> Seq.filter (fun call ->
-            activeTripKeys.Contains(call.routeId, call.routeDistinction, call.tripId)
-            && callIsEmitted call)
-        |> Seq.groupBy (fun call -> call.routeId, call.routeDistinction, call.tripId)
-        |> Seq.map (fun (key, calls) -> key, calls |> Seq.toArray)
+    // Only these routes need expensive trip-call country classification.
+    // Unknown stop countries deliberately remain candidates for inspection.
+    let potentiallyInternationalRoutes =
+        let values = HashSet<struct (string * int)>()
+        for route in batch.routes do
+            if routeIsDeclaredInternational route then
+                values.Add(struct (route.id, route.idDistinction)) |> ignore
+        for routeStop in batch.routeStops do
+            if stopCountries |> Map.tryFind routeStop.stopId |> Option.flatten <> Some "CZ" then
+                values.Add(struct (routeStop.routeId, routeStop.routeDistinction)) |> ignore
+        values
+    let isPotentialRoute routeId distinction =
+        potentiallyInternationalRoutes.Contains(struct (routeId, distinction))
+    let activeTripsByRoute =
+        activeTripKeys
+        |> Seq.choose (fun struct (routeId, distinction, tripId) ->
+            if isPotentialRoute routeId distinction then
+                Some ((routeId, distinction), (routeId, distinction, tripId))
+            else None)
+        |> Seq.groupBy fst
+        |> Seq.map (fun (routeKey, trips) -> routeKey, trips |> Seq.map snd |> Seq.toArray)
         |> Map
+    let callsByTrip = Dictionary<struct (string * int * int64), ResizeArray<JdfModel.TripStop>>()
+    for callIndex = 0 to batch.tripStops.Length-1 do
+        let call = batch.tripStops.[callIndex]
+        if isPotentialRoute call.routeId call.routeDistinction
+           && activeTripContains call.routeId call.routeDistinction call.tripId
+           && callIsEmitted call then
+            let key = struct (call.routeId, call.routeDistinction, call.tripId)
+            match callsByTrip.TryGetValue(key) with
+            | true, values -> values.Add(call)
+            | _ ->
+                let values = ResizeArray()
+                values.Add(call)
+                callsByTrip.[key] <- values
+        if (callIndex + 1) % 1_000_000 = 0 then
+            progress "international-calls" (int64 (callIndex + 1)) (Some (int64 batch.tripStops.Length))
+    progress "international-calls" (int64 batch.tripStops.Length) (Some (int64 batch.tripStops.Length))
+    let callsForTrip (routeId, distinction, tripId) =
+        match callsByTrip.TryGetValue(struct (routeId, distinction, tripId)) with
+        | true, values -> values.ToArray()
+        | _ -> [||]
     let integratedRoutes =
         batch.routeIntegrations
         |> Seq.map (fun integration -> integration.routeId, integration.routeDistinction)
@@ -861,14 +1337,15 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
 
     let classify (route: JdfModel.Route) =
         let routeKey = route.id, route.idDistinction
+        let routeNeedsClassification = isPotentialRoute route.id route.idDistinction
         let routeTrips =
             activeTripsByRoute
             |> Map.tryFind routeKey
             |> Option.defaultValue [||]
             |> Seq.map (fun key -> key, classifyTrip (integratedRoutes.Contains routeKey)
-                                            (callsByTrip |> Map.tryFind key |> Option.defaultValue [||]))
+                                            (callsForTrip key))
             |> Seq.toArray
-        let calls = routeTrips |> Seq.collect (fun (key, _) -> callsByTrip |> Map.tryFind key |> Option.defaultValue [||]) |> Seq.toArray
+        let calls = routeTrips |> Seq.collect (fun (key, _) -> callsForTrip key) |> Seq.toArray
         let countriesWithUnknown =
             calls
             |> Seq.map (fun call -> stopCountries |> Map.tryFind call.stopId |> Option.flatten)
@@ -877,8 +1354,12 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
         let foreignCountries = countries |> Set.ofArray |> Set.remove "CZ"
         let integrated = integratedRoutes.Contains routeKey
         let isPotentiallyInternational =
-            not foreignCountries.IsEmpty || routeIsDeclaredInternational route
-        let domesticCount = routeTrips |> Array.sumBy (fun (_, value) -> if value = DomesticTrip then 1 else 0)
+            routeNeedsClassification
+            && (not foreignCountries.IsEmpty || routeIsDeclaredInternational route)
+        let domesticCount =
+            if routeNeedsClassification then
+                routeTrips |> Array.sumBy (fun (_, value) -> if value = DomesticTrip then 1 else 0)
+            else activeTripCountsByRoute |> Map.tryFind routeKey |> Option.defaultValue 0
         let qualifying = routeTrips |> Array.choose (fun (_, value) -> match value with QualifyingCrossBorderTrip(span, depth) -> Some(span, depth) | _ -> None)
         let rejectedCount = routeTrips |> Array.sumBy (fun (_, value) -> match value with RejectedCrossBorderTrip _ -> 1 | _ -> 0)
         let rejectionReasons =
@@ -921,7 +1402,25 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
                   foreignOnlyTrips = foreignOnlyCount }
         routeKey, routeTrips, decision
 
-    let classifications = batch.routes |> Array.map classify
+    let classifications = Array.zeroCreate batch.routes.Length
+    let mutable classifiedRoutes = 0L
+    let classificationProgressLock = obj()
+    let mutable lastClassificationProgress = 0L
+    let classifyAt index =
+        classifications.[index] <- classify batch.routes.[index]
+        let count = Interlocked.Increment(&classifiedRoutes)
+        if count % 250L = 0L || count = int64 batch.routes.Length then
+            lock classificationProgressLock (fun () ->
+                if count > lastClassificationProgress then
+                    lastClassificationProgress <- count
+                    progress "international-routes" count (Some (int64 batch.routes.Length)))
+    if maximumWorkers <= 1 || batch.routes.Length <= 1 then
+        for index = 0 to batch.routes.Length-1 do
+            classifyAt index
+    else
+        let parallelOptions = ParallelOptions(MaxDegreeOfParallelism = maximumWorkers)
+        Parallel.For(0, batch.routes.Length, parallelOptions, classifyAt)
+        |> ignore
     let decisions = classifications |> Array.map (fun (_, _, decision) -> decision)
     let decisionsByRoute =
         decisions
@@ -939,7 +1438,8 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
     let tripAllowed (trip: JdfModel.Trip) =
         let routeKey = trip.routeId, trip.routeDistinction
         if not (routeKept trip.routeId trip.routeDistinction) then false
-        elif not (activeTripKeys.Contains(trip.routeId, trip.routeDistinction, trip.id)) then true
+        elif not (activeTripContains trip.routeId trip.routeDistinction trip.id) then true
+        elif not (isPotentialRoute trip.routeId trip.routeDistinction) then true
         else
             match overridesByKeptRoute |> Map.tryFind routeKey, dispositionByTrip.[trip.routeId, trip.routeDistinction, trip.id] with
             | Some KeepRoute, ForeignOnlyTrip -> false
@@ -947,12 +1447,11 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
             | _, DomesticTrip | _, QualifyingCrossBorderTrip _ -> true
             | _ -> false
     let keptTrips = batch.trips |> Array.filter tripAllowed
-    let keptTripKeys =
-        keptTrips
-        |> Seq.map (fun trip -> trip.routeId, trip.routeDistinction, trip.id)
-        |> Set
+    let keptTripKeys = HashSet<struct (string * int * int64)>()
+    for trip in keptTrips do
+        keptTripKeys.Add(struct (trip.routeId, trip.routeDistinction, trip.id)) |> ignore
     let tripKept routeId routeDistinction tripId =
-        keptTripKeys.Contains(routeId, routeDistinction, tripId)
+        keptTripKeys.Contains(struct (routeId, routeDistinction, tripId))
     let routeStops =
         batch.routeStops
         |> Array.filter (fun stop -> routeKept stop.routeId stop.routeDistinction)
@@ -996,8 +1495,52 @@ let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
             reservationOptions = batch.reservationOptions |> Array.filter (fun value -> tripKept value.routeId value.routeDistinction value.tripId)
             stopLocations = batch.stopLocations |> Array.filter (fun value -> retainedStopIds.Contains value.stopId)
             stopLocationSources = batch.stopLocationSources |> Array.filter (fun value -> retainedStopIds.Contains value.stopId)
-    }
+            postCandidateEvidence =
+                batch.postCandidateEvidence
+                |> Array.filter (fun value -> retainedStopIds.Contains value.stopId)
+            routingDemands =
+                batch.routingDemands
+                |> Array.filter (fun value ->
+                    value.previousStopId
+                    |> Option.map retainedStopIds.Contains
+                    |> Option.defaultValue true
+                    && (value.nextStopId
+                        |> Option.map retainedStopIds.Contains
+                        |> Option.defaultValue true))
+        }
     { batch = filteredBatch; decisions = decisions }
+
+let applyInternationalRoutePolicyWithCalendar
+        (policy: InternationalRoutePolicy)
+        (overrides: InternationalRouteOverride array)
+        (calendar: CalendarPreparation)
+        (batch: JdfModel.JdfBatch) =
+    applyInternationalRoutePolicyInternal 1 (fun _ _ _ -> ()) calendar.tripsToDelete policy overrides batch
+
+let applyInternationalRoutePolicyWithCalendarAndWorkers
+        maximumWorkers
+        (policy: InternationalRoutePolicy)
+        (overrides: InternationalRouteOverride array)
+        (calendar: CalendarPreparation)
+        (batch: JdfModel.JdfBatch) =
+    if maximumWorkers <= 0 then invalidArg "maximumWorkers" "Worker count must be positive"
+    applyInternationalRoutePolicyInternal maximumWorkers (fun _ _ _ -> ()) calendar.tripsToDelete policy overrides batch
+
+let applyInternationalRoutePolicyWithCalendarWorkersAndProgress
+        maximumWorkers
+        (progress: string -> int64 -> int64 option -> unit)
+        (policy: InternationalRoutePolicy)
+        (overrides: InternationalRouteOverride array)
+        (calendar: CalendarPreparation)
+        (batch: JdfModel.JdfBatch) =
+    if maximumWorkers <= 0 then invalidArg "maximumWorkers" "Worker count must be positive"
+    applyInternationalRoutePolicyInternal maximumWorkers progress calendar.tripsToDelete policy overrides batch
+
+let applyInternationalRoutePolicy (policy: InternationalRoutePolicy)
+                                  (overrides: InternationalRouteOverride array)
+                                  (batch: JdfModel.JdfBatch) =
+    let calendar = prepareGtfsCalendar batch
+    applyInternationalRoutePolicyWithCalendar policy overrides calendar batch
 
 let logInternationalRouteDecisions (policy: InternationalRoutePolicy)
                                    (decisions: InternationalRouteDecision array) =
@@ -1059,8 +1602,14 @@ type private StopTimeAttributeFlags =
     | ExitOnlyFlag = 8
     | BoardingOnlyFlag = 16
 
-let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
-                                     (jdfBatch: JdfModel.JdfBatch) =
+type StreamingStopTimeRow = {
+    stopTime: GtfsModel.StopTime
+    sourceRouteStopId: int64
+}
+
+let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
+                                        (postPlan: PostEstimationPlan)
+                                        (jdfBatch: JdfModel.JdfBatch) =
     let periods = Dictionary<int64, Period>()
     let periodOptions = Dictionary<int64, Period option>()
     let periodForSeconds seconds =
@@ -1090,7 +1639,8 @@ let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
     let unspecifiedStopIds = Dictionary<int64, string>()
     let stopPostIds = Dictionary<struct (int64 * int64), string>()
     let stopPostNumberIds = Dictionary<struct (int64 * string), string>()
-    let convertedStopId (call: JdfModel.TripStop) =
+    let convertedStopId (inferredSelection: DerivedPostSelection option)
+                        (call: JdfModel.TripStop) =
         match call.stopPostId, call.stopPostNum |> Option.bind nonEmptyTrimmed with
         | Some stopPostId, _ ->
             let key = struct (call.stopId, stopPostId)
@@ -1109,12 +1659,15 @@ let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
                 stopPostNumberIds.[key] <- value
                 value
         | None, None ->
-            match unspecifiedStopIds.TryGetValue(call.stopId) with
-            | true, value -> value
-            | _ ->
-                let value = jdfUnspecifiedStopId stopIdCis call.stopId
-                unspecifiedStopIds.[call.stopId] <- value
-                value
+            match inferredSelection with
+            | Some selection -> inferredPostId stopIdCis call.stopId selection
+            | None ->
+                match unspecifiedStopIds.TryGetValue(call.stopId) with
+                | true, value -> value
+                | _ ->
+                    let value = jdfUnspecifiedStopId stopIdCis call.stopId
+                    unspecifiedStopIds.[call.stopId] <- value
+                    value
 
     let attributeFlagsById = Dictionary<int, StopTimeAttributeFlags>()
     for attribute in jdfBatch.attributeRefs do
@@ -1144,11 +1697,99 @@ let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
     for stop in jdfBatch.stops do
         stopFlagsById.[stop.id] <- flagsForAttributes stop.attributes
 
+    let preciseStopIds =
+        jdfBatch.stopLocations
+        |> Seq.choose (fun location ->
+            if location.precision = JdfModel.StopPrecise then Some location.stopId else None)
+        |> HashSet
+    let modesByRoute = Dictionary<struct (string * int), JdfModel.TransportMode>()
+    for route in jdfBatch.routes do
+        modesByRoute.[struct (route.id, route.idDistinction)] <- route.transportMode
+
+    let inferredSelectionsForTrip routeId routeDistinction mode
+                                      (orderedCalls: JdfModel.TripStop array) =
+        let result = Dictionary<int64, DerivedPostSelection>()
+        if postPlan.calls.Count > 0 then
+            let usable = orderedCalls |> Array.filter callIsUsable
+            let patternHash =
+                if usable.Length = 0 then completePatternHash usable
+                else
+                    match postPlan.tripPatternHashes.TryGetValue(
+                              struct (routeId, routeDistinction, usable.[0].tripId)) with
+                    | true, value -> value
+                    | _ -> completePatternHash usable
+            let direction = if usable.Length > 0 && Jdf.tripIsReverse usable.[0].tripId then 1 else 0
+            let mutable start = 0
+            while start < usable.Length do
+                let stopId = usable.[start].stopId
+                let mutable finish = start + 1
+                while finish < usable.Length && usable.[finish].stopId = stopId do
+                    finish <- finish + 1
+                let blockLength = finish - start
+                let previousStopId =
+                    seq { start - 1 .. -1 .. 0 }
+                    |> Seq.tryPick (fun index ->
+                        let candidate = usable.[index].stopId
+                        if candidate <> stopId && preciseStopIds.Contains(candidate)
+                        then Some candidate else None)
+                let nextStopId =
+                    seq { finish .. usable.Length - 1 }
+                    |> Seq.tryPick (fun index ->
+                        let candidate = usable.[index].stopId
+                        if candidate <> stopId && preciseStopIds.Contains(candidate)
+                        then Some candidate else None)
+                for index = start to finish - 1 do
+                    let call = usable.[index]
+                    if authoredPostKey call |> Option.isNone then
+                        let previous, next, role =
+                            if blockLength = 1 then previousStopId, nextStopId, "through"
+                            elif index = start then previousStopId, None, "incoming"
+                            elif index = finish - 1 then None, nextStopId, "outgoing"
+                            else None, None, "interior"
+                        let contextKey = {
+                            stopId = stopId; mode = mode; lineId = routeId
+                            routeDistinction = routeDistinction; direction = direction
+                            patternHash = patternHash; position = index
+                            sameStopBlockRole = role
+                        }
+                        match postPlan.calls.TryGetValue(contextKey) with
+                        | true, selection -> result.[call.routeStopId] <- selection
+                        | _ -> ()
+                start <- finish
+        result
+
     let tripKey (call: JdfModel.TripStop) =
         call.routeId, call.routeDistinction, call.tripId
     let tripStopGroups =
         if adjacentTripGroups then
-            jdfBatch.tripStops |> Utils.groupAdjacentBy tripKey
+            let calls = jdfBatch.tripStops
+            let spans = ResizeArray<struct (string * int * int64 * int * int * string)>()
+            let mutable startIndex = 0
+            while startIndex < calls.Length do
+                let first = calls.[startIndex]
+                let mutable endIndex = startIndex + 1
+                while endIndex < calls.Length
+                      && calls.[endIndex].routeId = first.routeId
+                      && calls.[endIndex].routeDistinction = first.routeDistinction
+                      && calls.[endIndex].tripId = first.tripId do
+                    endIndex <- endIndex + 1
+                spans.Add(struct (
+                    first.routeId, first.routeDistinction, first.tripId,
+                    startIndex, endIndex-startIndex,
+                    jdfTripId first.routeId first.routeDistinction first.tripId))
+                startIndex <- endIndex
+            spans.Sort(Comparer<struct (string * int * int64 * int * int * string)>.Create(
+                fun struct (leftRoute,leftDistinction,leftTrip,_,_,leftId)
+                    struct (rightRoute,rightDistinction,rightTrip,_,_,rightId) ->
+                    let byId = StringComparer.Ordinal.Compare(leftId,rightId)
+                    if byId <> 0 then byId
+                    else compare (leftRoute,leftDistinction,leftTrip)
+                                 (rightRoute,rightDistinction,rightTrip)))
+            spans
+            |> Seq.map (fun struct (routeId,distinction,tripId,start,count,_) ->
+                let tripCalls = Array.zeroCreate<JdfModel.TripStop> count
+                Array.Copy(calls,start,tripCalls,0,count)
+                (routeId,distinction,tripId),tripCalls)
         else
             jdfBatch.tripStops
             |> Seq.groupBy tripKey
@@ -1165,13 +1806,19 @@ let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
         assert (jdfTripStops.Length >= 2)
         let isReverseTrip = jdfTripStops.[0].tripId % 2L = 0L
         let gtfsTripId = jdfTripId routeId routeDistinction tripId
+        let orderedCalls =
+            jdfTripStops
+            |> Array.sortBy (fun call ->
+                call.routeStopId * (if isReverseTrip then -1L else 1L))
+        let inferredSelections =
+            inferredSelectionsForTrip
+                routeId routeDistinction
+                modesByRoute.[struct (routeId, routeDistinction)] orderedCalls
 
         let mutable lastTimeDT: LocalTime option = None
         let mutable dayOffsetSeconds = 0L
 
-        jdfTripStops
-        |> Seq.sortBy (fun ts ->
-            ts.routeStopId * (if isReverseTrip then -1L else 1L))
+        orderedCalls
         |> Seq.mapi (fun i jdfTripStop ->
             match jdfTripStop.departureTime with
             | Some JdfModel.Passing | Some JdfModel.NotPassing -> None
@@ -1234,7 +1881,10 @@ let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
                     tripId = gtfsTripId
                     arrivalTime = arrTime |> Option.orElse depTime
                     departureTime = depTime |> Option.orElse arrTime
-                    stopId = convertedStopId jdfTripStop
+                    stopId =
+                        match inferredSelections.TryGetValue(jdfTripStop.routeStopId) with
+                        | true, selection -> convertedStopId (Some selection) jdfTripStop
+                        | _ -> convertedStopId None jdfTripStop
                     stopSequence = i
                     headsign = None
                     pickupType =
@@ -1251,16 +1901,20 @@ let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis
                     timepoint = exactTimepoint
                     stopZoneIds = None
                 }
-                Some stopTime
+                Some { stopTime = stopTime; sourceRouteStopId = jdfTripStop.routeStopId }
         )
         |> Seq.choose id
     )
+
+let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis postPlan jdfBatch =
+    getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis postPlan jdfBatch
+    |> Seq.map (fun value -> value.stopTime)
 
 // Standalone conversion preserves support for unusual JDF files whose trip
 // calls are not contiguous. The merged national bundle has canonical adjacent
 // trip groups and uses the bounded implementation directly.
 let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
-    getGtfsStopTimesInternal false stopIdCis jdfBatch
+    getGtfsStopTimesInternal false stopIdCis (buildPostEstimationPlan jdfBatch) jdfBatch
 
 let getCzRoutes (publicLineNumbers: Map<string * int, string option>)
                 (jdfBatch: JdfModel.JdfBatch) =
@@ -1292,7 +1946,8 @@ let getCzTrips (tripsToDelete: Set<string>)
             }: GtfsModel.CzTrip))
     |> Seq.toArray
 
-let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+let private getCzStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
+                               (jdfBatch: JdfModel.JdfBatch) =
     let cisStopId stopId = if stopIdsCis then Some stopId else None
     let sourceStopId stopId = sprintf "jdf:stop:%d" stopId
     let sourcePostId stopId stopPostId =
@@ -1359,7 +2014,24 @@ let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                 aswId = None
                 sourceIds = Some (sourcePostNum stopId stopPostNum)
             }: GtfsModel.CzStop)
-    Array.concat [stops; unspecifiedStops; stopPosts; numberedStopPosts]
+    let inferredPosts =
+        plan.inferredLocations
+        |> Seq.sortBy (fun value -> value.stopId, value.locationId)
+        |> Seq.map (fun (selection: DerivedPostSelection) ->
+            let inferredCisStopId = cisStopId selection.stopId
+            ({
+                stopId = inferredPostId stopIdsCis selection.stopId selection
+                stopPlaceId = jdfStopId stopIdsCis selection.stopId
+                cisStopId = inferredCisStopId
+                postId = None
+                aswId = None
+                sourceIds = None
+            }: GtfsModel.CzStop))
+        |> Seq.toArray
+    Array.concat [stops; unspecifiedStops; stopPosts; numberedStopPosts; inferredPosts]
+
+let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
+    getCzStopsWithPlan stopIdsCis (buildPostEstimationPlan jdfBatch) jdfBatch
 
 let getCzStopZones stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.routeStops
@@ -1412,9 +2084,10 @@ let private feedInfo (jdfVersion: JdfModel.JdfVersion)
     Gtfs.obehyFeedInfo version startDate endDate
 
 let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
+                             (postPlan: PostEstimationPlan)
                              tripsToDelete calendar calendarExceptions publicLineNumbers
                              (referencedStopIds: Set<string>) stopTimes =
-    let allStops = getGtfsStops stopIdsCis jdfBatch
+    let allStops = getGtfsStopsWithPlan stopIdsCis postPlan jdfBatch
     let requiredParentIds =
         allStops
         |> Seq.filter (fun stop -> referencedStopIds.Contains stop.id)
@@ -1438,7 +2111,7 @@ let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
         czRoutes = Some (getCzRoutes publicLineNumbers jdfBatch)
         czTrips = Some (getCzTrips tripsToDelete jdfBatch)
         czStops =
-            getCzStops stopIdsCis jdfBatch
+            getCzStopsWithPlan stopIdsCis postPlan jdfBatch
             |> Array.filter (fun stop -> retainedStopIds.Contains stop.stopId)
             |> Some
         czStopZones =
@@ -1457,13 +2130,14 @@ let private getGtfsFeedInternal warnUnhandledNotes adjacentTripGroups stopIdsCis
 
     let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar jdfBatch
     let publicLineNumbers = getPublicLineNumbers jdfBatch
+    let postPlan = emptyPostEstimationPlan
     let stopTimes =
-        getGtfsStopTimesInternal adjacentTripGroups stopIdsCis jdfBatch
+        getGtfsStopTimesInternal adjacentTripGroups stopIdsCis postPlan jdfBatch
         |> Seq.filter (fun ts ->
             tripsToDelete |> Set.contains ts.tripId |> not)
         |> Seq.toArray
     let referencedStopIds = stopTimes |> Seq.map (fun stopTime -> stopTime.stopId) |> Set
-    assembleGtfsFeed stopIdsCis jdfBatch tripsToDelete calendar calendarExceptions
+    assembleGtfsFeed stopIdsCis jdfBatch postPlan tripsToDelete calendar calendarExceptions
                      publicLineNumbers referencedStopIds stopTimes
 
 type StreamingFeedPreparation = {
@@ -1474,37 +2148,68 @@ type StreamingFeedPreparation = {
     calendar: GtfsModel.CalendarEntry array
     calendarExceptions: GtfsModel.CalendarException array
     publicLineNumbers: Map<string * int, string option>
+    postPlan: PostEstimationPlan
 }
 
 let private prepareGtfsFeedForStreamingInternal
-    warnUnhandledNotes adjacentTripGroups stopIdsCis (batch: JdfModel.JdfBatch) =
+    warnUnhandledNotes adjacentTripGroups stopIdsCis
+    (calendarPreparation: CalendarPreparation option) (batch: JdfModel.JdfBatch) =
     if warnUnhandledNotes then warnUnhandledServiceNotes batch ()
-    let tripsToDelete, calendar, calendarExceptions = getGtfsCalendar batch
+    let calendarPreparation =
+        calendarPreparation |> Option.defaultWith (fun () -> prepareGtfsCalendar batch)
     {
         adjacentTripGroups = adjacentTripGroups
         stopIdsCis = stopIdsCis
         batch = batch
-        tripsToDelete = tripsToDelete
-        calendar = calendar
-        calendarExceptions = calendarExceptions
+        tripsToDelete = calendarPreparation.tripsToDelete
+        calendar = calendarPreparation.calendar
+        calendarExceptions = calendarPreparation.calendarExceptions
         publicLineNumbers = getPublicLineNumbers batch
+        postPlan = emptyPostEstimationPlan
     }
 
 let prepareGtfsFeedForStreaming warnUnhandledNotes stopIdsCis batch =
-    prepareGtfsFeedForStreamingInternal warnUnhandledNotes false stopIdsCis batch
+    prepareGtfsFeedForStreamingInternal warnUnhandledNotes false stopIdsCis None batch
 
 let prepareGtfsFeedForStreamingBundle stopIdsCis batch =
-    prepareGtfsFeedForStreamingInternal false true stopIdsCis batch
+    prepareGtfsFeedForStreamingInternal false true stopIdsCis None batch
+
+let prepareGtfsFeedForStreamingBundleWithCalendar stopIdsCis calendar batch =
+    prepareGtfsFeedForStreamingInternal false true stopIdsCis (Some calendar) batch
+
+// Evidence replay has already performed every post-inference decision.  Keep
+// construction of the ordinary GTFS preparation separate so a replay-backed
+// conversion cannot accidentally invoke the legacy geometry estimator while
+// replacing its result afterwards.
+let prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan
+        stopIdsCis (calendar:CalendarPreparation) (postPlan:PostEstimationPlan) batch =
+    JdfPostInferencePolicy.PostInferencePhaseProbe.record "gtfs-conversion"
+    {
+        adjacentTripGroups = true
+        stopIdsCis = stopIdsCis
+        batch = batch
+        tripsToDelete = calendar.tripsToDelete
+        calendar = calendar.calendar
+        calendarExceptions = calendar.calendarExceptions
+        publicLineNumbers = getPublicLineNumbers batch
+        postPlan = postPlan
+    }
 
 let getStreamingBundleStopTimes preparation =
     getGtfsStopTimesInternal
-        preparation.adjacentTripGroups preparation.stopIdsCis preparation.batch
+        preparation.adjacentTripGroups preparation.stopIdsCis preparation.postPlan preparation.batch
     |> Seq.filter (fun stopTime ->
         not (preparation.tripsToDelete.Contains stopTime.tripId))
 
+let getStreamingBundleStopTimeRows preparation =
+    getGtfsStopTimeRowsInternal
+        preparation.adjacentTripGroups preparation.stopIdsCis preparation.postPlan preparation.batch
+    |> Seq.filter (fun value ->
+        not (preparation.tripsToDelete.Contains value.stopTime.tripId))
+
 let finishStreamingBundleFeed preparation (referencedStopIds: Set<string>) =
     assembleGtfsFeed
-        preparation.stopIdsCis preparation.batch preparation.tripsToDelete
+        preparation.stopIdsCis preparation.batch preparation.postPlan preparation.tripsToDelete
         preparation.calendar preparation.calendarExceptions preparation.publicLineNumbers
         referencedStopIds [||]
 

@@ -49,7 +49,23 @@ type JdfParserTests() =
     member _.``JDF ZIP writer is deterministic uncompressed and path parser compatible``() =
         let fixturePath =
             Path.Combine(__SOURCE_DIRECTORY__, "data", "jdf", "obehy_extensions")
-        let source = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
+        let parsedFixture = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
+        let source = {
+            parsedFixture with
+                postCandidateEvidence = [| ({
+                    stopId = 100L; candidateId = "candidate-a"; observationId = "osm:node:1"
+                    sourceKind = "osm"; sourceObjectId = Some "osm:node:1"
+                    observedAt = Some "2026-08-10"; lat = 50M; lon = 14M
+                    supportWeight = 1M; rawTags = "highway=bus_stop"
+                    explicitModes = "road"; deniedModes = ""; lifecycle = "active"
+                } : JdfModel.PostCandidateEvidence) |]
+                routingDemands = [| ({
+                    demandId = "demand-a"; modeFamily = "both"
+                    previousStopId = Some 100L; nextStopId = Some 200L
+                    previousLat = Some 50M; previousLon = Some 14M
+                    nextLat = Some 50.1M; nextLon = Some 14.1M; searchClass = "local"
+                } : JdfModel.RoutingDemand) |]
+        }
         let root =
             Path.Combine(Path.GetTempPath(), "jrutil-jdf-zip-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
@@ -63,6 +79,10 @@ type JdfParserTests() =
             let second = write "second.zip"
             CollectionAssert.AreEqual(File.ReadAllBytes(first), File.ReadAllBytes(second))
             use archive = ZipFile.OpenRead(first)
+            assertEqual true (archive.GetEntry("JrutilPostCandidates.txt") = null)
+            assertEqual true (archive.GetEntry("JrutilPostCandidateEvidence.txt") <> null)
+            assertEqual true (archive.GetEntry("JrutilPostCandidateGeometry.txt") = null)
+            assertEqual true (archive.GetEntry("JrutilRoutingDemands.txt") <> null)
             for entry in archive.Entries do
                 assertEqual entry.Length entry.CompressedLength
                 assertEqual 1980 entry.LastWriteTime.Year
@@ -70,5 +90,7 @@ type JdfParserTests() =
             assertEqual source.version parsed.version
             assertEqual source.stops parsed.stops
             assertEqual source.tripStops parsed.tripStops
+            assertEqual source.postCandidateEvidence parsed.postCandidateEvidence
+            assertEqual source.routingDemands parsed.routingDemands
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)

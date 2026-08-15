@@ -6,6 +6,8 @@ module JrUtil.GeoData.ExternalCsv
 open System
 open System.Globalization
 open System.IO
+open System.Security.Cryptography
+open System.Text
 open FSharp.Data
 open NetTopologySuite.Geometries
 
@@ -30,6 +32,7 @@ type OtherStopRow = {
     Region: string option
     Country: string option
     Source: string option
+    SourceObjectId: string option
 }
 
 let otherStopRowsForJdfMatch (otherStopRows: OtherStopRow seq) =
@@ -43,6 +46,24 @@ let otherStopRowsForJdfMatch (otherStopRows: OtherStopRow seq) =
             point = pointWgs84ToEtrs89Ex
                  <| wgs84Factory.CreatePoint(Coordinate(s.Lon, s.Lat))
             source = s.Source
+            candidateObservation =
+                s.Source
+                |> Option.map (fun source -> {
+                    observationId =
+                        s.SourceObjectId
+                        |> Option.defaultValue
+                            (String.Format(
+                                CultureInfo.InvariantCulture,
+                                "{0}|{1:F6}|{2:F6}", source, s.Lat, s.Lon))
+                    sourceKind = "external"
+                    sourceObjectId = s.SourceObjectId
+                    observedAt = None
+                    rawTags = ""
+                    explicitModes = ""
+                    deniedModes = ""
+                    lifecycle = "active"
+                    supportWeight = 1M
+                })
         }
     })
     |> Seq.toArray
@@ -53,6 +74,7 @@ let otherStopsForJdfMatch (otherStops: OtherStops) =
         Name = row.Name; Lat = row.Lat; Lon = row.Lon
         Region = row.Region; Country = row.Country
         Source = Some "external:legacy"
+        SourceObjectId = None
     })
     |> otherStopRowsForJdfMatch
 
@@ -100,6 +122,15 @@ let otherStopsFromPath path =
                 Region = optionalText columns.[3]
                 Country = optionalText columns.[4]
                 Source = Some $"external:{Path.GetFileNameWithoutExtension(file)}"
+                SourceObjectId =
+                    let relative = Path.GetRelativePath(path, file).Replace('\\', '/')
+                    let joinedColumns = String.Join("|", columns)
+                    let identity = $"{relative}|{joinedColumns}"
+                    let digest =
+                        SHA256.HashData(Encoding.UTF8.GetBytes(identity))
+                        |> Convert.ToHexString
+                        |> fun value -> value.ToLowerInvariant()
+                    Some $"external:{relative}:sha256:{digest}"
             }))
     |> Seq.distinctBy (fun s -> s.Name, s.Lat, s.Lon, s.Region, s.Country)
     |> Seq.toArray

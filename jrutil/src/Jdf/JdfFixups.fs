@@ -9,6 +9,9 @@ open System
 open System.Collections.Concurrent
 open System.Collections.Generic
 open System.IO
+open System.Globalization
+open System.Security.Cryptography
+open System.Text
 open System.Text.RegularExpressions
 open System.Threading
 open NetTopologySuite.Geometries
@@ -23,12 +26,25 @@ open JrUtil.GeoData.CzRegions
 open JrUtil.GeoData.EurTowns
 open JrUtil.GeoData.StopMatcher
 
+type CandidateObservation = {
+    observationId: string
+    sourceKind: string
+    sourceObjectId: string option
+    observedAt: string option
+    rawTags: string
+    explicitModes: string
+    deniedModes: string
+    lifecycle: string
+    supportWeight: decimal
+}
+
 type JdfStopGeodata = {
     regionId: string option
     country: string option
     // The CRS is assumed to be ETRS89-Extended
     point: Point
     source: string option
+    candidateObservation: CandidateObservation option
 }
 type JdfStopToMatch = StopToMatch<JdfStopGeodata>
 
@@ -248,7 +264,22 @@ let matchesCzTownByName town =
     matchCzTownByNameRaw town
     |> Seq.exists (fun m -> m.score = 1.0f)
 
-let topStopMatch (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
+let private validCandidateGroup (stop: Stop) candidates =
+    if candidates |> Array.isEmpty then None
+    elif candidates
+         |> Array.map (fun m -> m.stop.data.regionId, m.stop.data.country)
+         |> set
+         |> Set.count > 1 then None
+    else
+        let points = candidates |> Array.map (fun m -> m.stop.data.point)
+        let radius = pointsRadius points
+        if radius < maxRadiusMetres then Some candidates
+        else
+            Log.Debug("Not considering match for stop {StopId} since radius {Radius:n1} is too high",
+                      stop.id, radius)
+            None
+
+let selectedExactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
     let preciseMatches =
         exactMatches stop matches
     let checkedMatches =
@@ -258,49 +289,98 @@ let topStopMatch (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
             |> Option.map (fun source ->
                 not (source.StartsWith("osm:", StringComparison.Ordinal)))
             |> Option.defaultValue true)
-    let select candidates =
-        if candidates |> Array.isEmpty then None
-        // Sanity check - if stops are close together, they need to be in the
-        // same region and country.
-        else if candidates
-                |> Array.map (fun m -> m.stop.data.regionId, m.stop.data.country)
-                |> set
-                |> Set.count > 1 then None
-        else
-            let points = candidates |> Array.map (fun m -> m.stop.data.point)
-            let radius = pointsRadius points
-            if radius < maxRadiusMetres
-            then Some {
-                name = candidates.[0].stop.name
-                data = {
-                    regionId = candidates.[0].stop.data.regionId
-                    country = candidates.[0].stop.data.country
-                    point =
-                        etrs89ExFactory.CreateGeometryCollection(
-                            points |> Array.map (fun p -> p :> _))
-                            .Centroid
-                    source =
-                        candidates
-                        |> Seq.choose (fun m -> m.stop.data.source)
-                        |> Seq.distinct
-                        |> Seq.sort
-                        |> String.concat "+"
-                        |> function "" -> None | value -> Some value
-                }
-            }
-            else
-                Log.Debug("Not considering match for stop {StopId} since \
-                          radius {Radius:n1} is too high",
-                          stop.id, radius)
-                None
-
     // Checked catalogues get the first chance, but an ambiguous checked set
     // must not suppress an otherwise usable OSM fallback.
-    select checkedMatches
+    validCandidateGroup stop checkedMatches
     |> Option.orElseWith (fun () ->
         preciseMatches
         |> Array.filter (fun match_ -> not (checkedMatches |> Array.contains match_))
-        |> select)
+        |> validCandidateGroup stop)
+
+let topStopMatch (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
+    selectedExactMatches stop matches
+    |> Option.map (fun candidates ->
+        let points = candidates |> Array.map (fun m -> m.stop.data.point)
+        {
+            name = candidates.[0].stop.name
+            data = {
+                regionId = candidates.[0].stop.data.regionId
+                country = candidates.[0].stop.data.country
+                point =
+                    etrs89ExFactory.CreateGeometryCollection(
+                        points |> Array.map (fun p -> p :> _))
+                        .Centroid
+                source =
+                    candidates
+                    |> Seq.choose (fun m -> m.stop.data.source)
+                    |> Seq.distinct
+                    |> Seq.sort
+                    |> String.concat "+"
+                    |> function "" -> None | value -> Some value
+                candidateObservation = None
+            }
+        })
+
+let private candidateId (point: Point) (observations: CandidateObservation array) =
+    let wgs = transformPoint etrs89ExSrid wgs84Srid etrs89ExToWgs84 point
+    let sourceIdentities =
+        observations
+        |> Array.choose (fun value -> value.sourceObjectId)
+        |> Array.distinct
+        |> Array.sort
+    let identity =
+        if sourceIdentities.Length > 0 then String.Join("|", sourceIdentities)
+        else
+            String.Format(
+                CultureInfo.InvariantCulture,
+                "{0:F6},{1:F6}",
+                wgs.Y,
+                wgs.X)
+    SHA256.HashData(Encoding.UTF8.GetBytes(identity))
+    |> Convert.ToHexString
+    |> fun value -> value.ToLowerInvariant()
+
+let private candidateMatches (stop: Stop) matches =
+    selectedExactMatches stop matches
+    |> Option.map (fun selected ->
+        let selectedPoints = selected |> Array.map (fun value -> value.stop.data.point)
+        let centre =
+            etrs89ExFactory.CreateGeometryCollection(
+                selectedPoints |> Array.map (fun value -> value :> Geometry)).Centroid
+        let countries =
+            selected
+            |> Array.choose (fun value -> value.stop.data.country)
+            |> Set
+        exactMatches stop matches
+        |> Array.filter (fun value ->
+            value.stop.data.point.Distance(centre) <= maxRadiusMetres
+            && (countries.IsEmpty
+                || value.stop.data.country.IsNone
+                || countries.Contains(value.stop.data.country.Value))))
+    |> Option.defaultValue [||]
+
+let private clusteredPostCandidates stopId candidates =
+    // Fixing preserves source facts only. Physical clustering is a policy
+    // decision and therefore belongs exclusively to the v2 evaluator.
+    candidates
+    |> Seq.choose(fun matched ->
+        matched.stop.data.candidateObservation
+        |> Option.map(fun observation -> observation,matched.stop.data.point,
+                                          matched.stop.data.source))
+    |> Seq.distinctBy(fun (observation,_,_) -> observation.observationId)
+    |> Seq.sortBy(fun (observation,_,_) -> observation.observationId)
+    |> Seq.map(fun (observation,point,source) ->
+        let wgs=transformPoint etrs89ExSrid wgs84Srid etrs89ExToWgs84 point
+        let id=candidateId point [|observation|]
+        ignore source
+        ({
+            stopId=stopId;candidateId=id;observationId=observation.observationId
+            sourceKind=observation.sourceKind;sourceObjectId=observation.sourceObjectId
+            observedAt=observation.observedAt;lat=decimal wgs.Y;lon=decimal wgs.X
+            supportWeight=observation.supportWeight;rawTags=observation.rawTags
+            explicitModes=observation.explicitModes;deniedModes=observation.deniedModes
+            lifecycle=observation.lifecycle } : PostCandidateEvidence))
+    |> Seq.toArray
 
 let matchConflictsWithEurCity (m: StopToMatch<JdfStopGeodata>) =
     // Some Czech towns share names with ones with other countries. Since we
@@ -841,7 +921,19 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
         |> ifUnfinished (fillStopRegionsFromPrevious (Array.rev tripsMatrix2))
         |> Seq.toArray
 
-    { jdfBatch with stops = augmentedStops |> Array.map fst },
+    let clusteredCandidates =
+        stopsWithAllMatches
+        |> Array.collect (fun (stop, _, matches) ->
+            candidateMatches stop matches
+            |> function
+                | [||] -> None
+                | values -> Some values
+            |> Option.map (clusteredPostCandidates stop.id)
+            |> Option.defaultValue [||])
+    let postCandidateEvidence = clusteredCandidates
+    { jdfBatch with
+        stops = augmentedStops |> Array.map fst
+        postCandidateEvidence = postCandidateEvidence },
     augmentedStops |> Array.map snd
 
 let private stopLocationFromMatch (stop: Stop) (match_: JdfStopToMatch) =

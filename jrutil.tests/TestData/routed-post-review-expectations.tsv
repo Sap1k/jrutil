@@ -1,0 +1,11 @@
+stop_id	stop_name	expectation	minimum_distinct_faces	minimum_evidence_faces	allow_physical_under_tied_corridors	allow_centroid_fallback
+333	Praha, Spojovací	Resolve road-bus and tram movements independently; retain genuinely shared observations.	2	2	false	false
+3832	Varnsdorf, aut. nádr.	Evidence must contain both station sides; resolve both sides or conservatively use Centroid, never a physical post.	2	2	false	true
+4410	Děčín, Hlavní nádraží	Resolve the two station sides without assigning physical posts.	2	2	false	false
+4411	Děčín, aut.nádr.	Conflicting station corridors must resolve to a stable face or centroid, never a physical post.	0	0	false	true
+7050	Košťany, Kamenný Pahorek	Consolidate duplicate observations into four routed physical faces.	4	4	true	false
+7056	Lahošť	Equivalent movements reuse the established post across the bend ambiguity.	2	2	true	false
+7057	Duchcov, žel.st.	Ordinary movements reuse the two-post split; line 586001 retains its branch-specific third face.	3	3	true	false
+7058	Duchcov, Teplická	Resolve two directional hypotheses and reject the unsupported obsolete remote observation.	2	2	true	false
+7064	Osek, Kolonie	Consolidate duplicates while preserving the two one-way carriageways.	2	2	true	false
+25182	Duchcov, Nerudova	Choose the correct absolute side and reuse it across equivalent movements.	2	2	true	false

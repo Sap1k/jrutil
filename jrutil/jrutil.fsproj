@@ -39,9 +39,14 @@
     <Compile Include="src/Jdf/JdfStopReconciliation.fs" />
     <Compile Include="src/Jdf/JdfMerger.fs" />
     <Compile Include="src/Jdf/JdfFixups.fs" />
+    <Compile Include="src/GeoData/Osm.fs" />
+    <Compile Include="src/Jdf/JdfPostInferencePolicy.fs" />
+    <Compile Include="src/Jdf/JdfPostInference.fs" />
+    <Compile Include="src/Jdf/JdfPostEvidence.fs" />
+    <Compile Include="src/Jdf/JdfPostEvidenceStore.fs" />
+    <Compile Include="src/Jdf/JdfPostInferenceEvaluator.fs" />
     <Compile Include="src/Jdf/JdfToGtfs.fs" />
     <Compile Include="src/Jdf/JdfBundle.fs" />
-    <Compile Include="src/GeoData/Osm.fs" />
     <Compile Include="src/GeoData/ExternalCsv.fs" />
     <Compile Include="src/CzPtt/KadrEnumWs.fs" />
     <Compile Include="src/CzPtt/CzPtt.fs" />

@@ -1,0 +1,21 @@
+# Mandatory routed-post quality corpus. IDs are merged-snapshot scoped: before every
+# acceptance replay, re-resolve and review them against Zastavky.txt by stop name.
+# 7050 Košťany, Kamenný Pahorek: four routed faces.
+7050
+# 7064 Osek, Kolonie: opposing one-way roads.
+7064
+# Station controls: never force a physical candidate. Varnsdorf may fall back to
+# Centroid; Děčín hlavní nádraží must resolve its two sides.
+3832
+4410
+4411
+# 7058 Duchcov, Teplická: two distant valid posts plus obsolete outlier.
+7058
+# 25182 Duchcov, Nerudova: stable correct side across equivalent patterns.
+25182
+# 7056 Lahošť: established-post consensus resolves the bend ambiguity.
+7056
+# 7057 Duchcov, žel.st.: line 586001 branch face plus ordinary pair.
+7057
+# 333 Praha, Spojovací: independently routed bus/tram faces.
+333

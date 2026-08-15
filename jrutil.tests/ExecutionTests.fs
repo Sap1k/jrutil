@@ -14,11 +14,23 @@ open JrUtil.Tests.Asserts
 [<TestClass>]
 type ExecutionTests() =
     [<TestMethod>]
-    member _.``Automatic memory budget respects capacity and live availability``() =
+    member _.``Candidate collection does not require a routing PBF``() =
+        assertEqual
+            { collectEvidence = true; runRoutedInference = false }
+            (estimatedPostActivation false false)
+        assertEqual
+            { collectEvidence = true; runRoutedInference = true }
+            (estimatedPostActivation false true)
+        assertEqual
+            { collectEvidence = false; runRoutedInference = false }
+            (estimatedPostActivation true true)
+
+    [<TestMethod>]
+    member _.``Automatic memory budget is relaxed on low-memory hosts``() =
         let baseline = 512L * MiB
-        assertEqual (10L * GiB)
+        assertEqual (53L * GiB / 4L)
             (autoMemoryBudgetBytes (16L * GiB) (14L * GiB) baseline)
-        assertEqual (15L * GiB / 2L)
+        assertEqual (47L * GiB / 4L)
             (autoMemoryBudgetBytes (16L * GiB) (11L * GiB) baseline)
         assertEqual (24L * GiB)
             (autoMemoryBudgetBytes (32L * GiB) (30L * GiB) baseline)
@@ -26,11 +38,22 @@ type ExecutionTests() =
             (autoMemoryBudgetBytes (64L * GiB) (60L * GiB) baseline)
 
     [<TestMethod>]
-    member _.``Automatic memory budget does not invent unavailable RAM``() =
-        assertEqual (512L * MiB)
+    member _.``Automatic memory budget includes bounded evictable memory``() =
+        assertEqual (33L * GiB / 4L)
             (autoMemoryBudgetBytes (16L * GiB) (4L * GiB) (512L * MiB))
-        assertEqual (256L * MiB)
+        assertEqual (61L * GiB / 16L)
             (autoMemoryBudgetBytes (6L * GiB) 0L (256L * MiB))
+
+    [<TestMethod>]
+    member _.``Low-memory reserve and eviction allowance remain bounded``() =
+        assertEqual (768L * MiB) (automaticMemoryReserveBytes (6L * GiB))
+        assertEqual GiB (automaticMemoryReserveBytes (8L * GiB))
+        assertEqual (2L * GiB) (automaticMemoryReserveBytes (16L * GiB))
+        assertEqual (4L * GiB) (automaticMemoryReserveBytes (32L * GiB))
+        assertEqual (69L * GiB / 16L)
+            (automaticEvictableAllowanceBytes (6L * GiB) 0L (256L * MiB))
+        assertEqual 0L
+            (automaticEvictableAllowanceBytes (32L * GiB) (4L * GiB) GiB)
 
     [<TestMethod>]
     member _.``Sixteen GiB auto budget contracts as other applications consume RAM``() =
@@ -38,9 +61,9 @@ type ExecutionTests() =
         let abundant = autoMemoryBudgetBytes (16L * GiB) (14L * GiB) baseline
         let constrained = autoMemoryBudgetBytes (16L * GiB) (8L * GiB) baseline
         let exhausted = autoMemoryBudgetBytes (16L * GiB) (3L * GiB) baseline
-        assertEqual (10L * GiB) abundant
-        assertEqual (9L * GiB / 2L) constrained
-        assertEqual baseline exhausted
+        assertEqual (53L * GiB / 4L) abundant
+        assertEqual (41L * GiB / 4L) constrained
+        assertEqual (31L * GiB / 4L) exhausted
 
     [<TestMethod>]
     member _.``Memory budget parser accepts binary units and auto``() =
