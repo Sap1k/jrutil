@@ -196,7 +196,7 @@ let private applyDiagnosticPostLabels stopIdsCis (batch: JdfModel.JdfBatch)
                     |> Option.map (fun rank -> $"O{rank}")
             label
             |> Option.map (fun value ->
-                $"{JdfToGtfs.jdfStopId stopIdsCis selection.stopId}:{selection.locationId}", value))
+                JdfToGtfs.inferredPostId stopIdsCis plan selection, value))
         |> Map
     { feed with
         stops =
@@ -919,7 +919,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             let stopId, mode = pair.Key.stopId, pair.Key.mode
             let selection = pair.Value
             let context = postPlan.callContexts.[pair.Key]
-            { targetGtfsStopId = $"{JdfToGtfs.jdfStopId stopIdsCis stopId}:{selection.locationId}"
+            { targetGtfsStopId = JdfToGtfs.inferredPostId stopIdsCis postPlan selection
               assignmentKind="internal"; derivedLocationId=Some selection.locationId
               mode=transportModeCode mode; lineId=Some pair.Key.lineId
               direction=Some pair.Key.direction; patternHash=Some pair.Key.patternHash

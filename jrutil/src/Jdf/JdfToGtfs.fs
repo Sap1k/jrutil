@@ -510,6 +510,7 @@ type PostEstimationPlan = {
     movementFamilyIds: IReadOnlyDictionary<PostPatternContextKey,string>
     locations: DerivedPostSelection array
     inferredLocations: DerivedPostSelection array
+    inferredLocationOrdinals: Map<int64 * string, int>
     physicalHypotheses: PhysicalPostHypothesis array
     modalityEstimates: CandidateModalityEstimate array
     sideGroups: PostSideGroup array
@@ -534,6 +535,7 @@ let private emptyPostEstimationPlan = {
     movementFamilyIds = Dictionary<PostPatternContextKey,string>()
     locations = [||]
     inferredLocations = [||]
+    inferredLocationOrdinals = Map.empty
     physicalHypotheses = [||]
     modalityEstimates = [||]
     sideGroups = [||]
@@ -644,6 +646,17 @@ let postEstimationPlanFromInferenceResult
             | _ -> ()
         let inferredLocations =
             selectionsByLocation.Values |> Seq.sortBy _.locationId |> Seq.toArray
+        let inferredLocationOrdinals =
+            inferredLocations
+            |> Seq.groupBy _.stopId
+            |> Seq.collect (fun (stopId, selections) ->
+                selections
+                |> Seq.map _.locationId
+                |> Seq.distinct
+                |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right))
+                |> Seq.mapi (fun index locationId ->
+                    (stopId, locationId), index + 1))
+            |> Map.ofSeq
         let authored =
             result.AuthoredPositions
             |> Array.choose(fun value ->
@@ -705,6 +718,7 @@ let postEstimationPlanFromInferenceResult
         { authored=authored;calls=calls;authoredContexts=authoredContextMap
           callContexts=callContexts;movementFamilyIds=movementFamilyIds
           locations=inferredLocations;inferredLocations=inferredLocations
+          inferredLocationOrdinals=inferredLocationOrdinals
           physicalHypotheses=physicalHypotheses;modalityEstimates=[||]
           sideGroups=sideGroups;scoreCount=result.DiagnosticScores.Count
           scoreRows=scoreRows;cleanupScoreRows=disposeResult
@@ -766,8 +780,12 @@ let convertToGtfsAgency: JdfModel.Agency -> GtfsModel.Agency = fun jdfAgency ->
         email = jdfAgency.email
     }
 
-let private inferredPostId stopIdsCis stopId (selection: DerivedPostSelection) =
-    $"{jdfStopId stopIdsCis stopId}:{selection.locationId}"
+let inferredPostId stopIdsCis (plan: PostEstimationPlan) (selection: DerivedPostSelection) =
+    match plan.inferredLocationOrdinals |> Map.tryFind (selection.stopId, selection.locationId) with
+    | Some ordinal -> $"{jdfStopId stopIdsCis selection.stopId}:est:{ordinal}"
+    | None ->
+        invalidOp
+            $"Inferred JDF post has no deterministic ordinal: stop={selection.stopId}; location={selection.locationId}"
 
 let private getGtfsStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
                                     (jdfBatch: JdfModel.JdfBatch) =
@@ -897,7 +915,7 @@ let private getGtfsStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
         |> Seq.map (fun selection ->
             let parentStop = gtfsStopsById.[jdfStopId stopIdsCis selection.stopId]
             { parentStop with
-                id = inferredPostId stopIdsCis selection.stopId selection
+                id = inferredPostId stopIdsCis plan selection
                 locationType = Some GtfsModel.Stop
                 parentStation = Some parentStop.id
                 platformCode = None
@@ -1660,7 +1678,7 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
                 value
         | None, None ->
             match inferredSelection with
-            | Some selection -> inferredPostId stopIdCis call.stopId selection
+            | Some selection -> inferredPostId stopIdCis postPlan selection
             | None ->
                 match unspecifiedStopIds.TryGetValue(call.stopId) with
                 | true, value -> value
@@ -2020,7 +2038,7 @@ let private getCzStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
         |> Seq.map (fun (selection: DerivedPostSelection) ->
             let inferredCisStopId = cisStopId selection.stopId
             ({
-                stopId = inferredPostId stopIdsCis selection.stopId selection
+                stopId = inferredPostId stopIdsCis plan selection
                 stopPlaceId = jdfStopId stopIdsCis selection.stopId
                 cisStopId = inferredCisStopId
                 postId = None

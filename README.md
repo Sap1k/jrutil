@@ -72,6 +72,10 @@ namespaces: `jdf:agency:…`, `jdf:route:…`, `jdf:trip:…`, `jdf:stop:…`,
 With `--stop-ids-cis`, stop and post IDs use `cis:stop:…`. Text components are
 URI-escaped before being embedded in an identifier. Deduplicated GTFS service
 patterns use the derived `gtfs:service:<weekday-bitmap>:<ordinal>` namespace.
+Inferred boarding points use `jdf:stop:<stop>:est:<ordinal>`, or the equivalent
+`cis:stop:` prefix. The 1-based ordinal is assigned per parent stop by sorting
+the full internal derived-location IDs; those full IDs remain in diagnostic
+relations for traceability.
 
 JDF stop numbers are not always global CIS identifiers. Pass `--stop-ids-cis`
 only for a batch known to use the national CIS stop registry:
