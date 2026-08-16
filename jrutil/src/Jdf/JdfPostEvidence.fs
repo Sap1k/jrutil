@@ -235,6 +235,17 @@ let private distanceSquared (leftLat,leftLon) (rightLat,rightLon) =
     let dy=(leftLat-rightLat)*110_540.0
     dx*dx+dy*dy
 
+[<Literal>]
+let private MaximumPostCandidateDistanceFromParentCentroidMetres = 300.0
+
+let private candidateIsWithinParentCentroid centroid (candidate:JdfModel.PostCandidateEvidence) =
+    let struct(longitude,latitude)=centroid
+    let maximumDistanceSquared =
+        MaximumPostCandidateDistanceFromParentCentroidMetres
+        * MaximumPostCandidateDistanceFromParentCentroidMetres
+    distanceSquared (float candidate.lat,float candidate.lon) (latitude,longitude)
+    <= maximumDistanceSquared
+
 let private medoidCoordinate (points:PostEvidenceRoutePoint array) =
     points
     |> Array.minBy(fun point ->
@@ -251,8 +262,18 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
     if options.memoryBudgetBytes<1L then invalidArg "options" "memoryBudgetBytes must be positive"
     let temporaryDirectory=Path.Combine(Path.GetTempPath(),"jrutil-post-evidence-capture")
     let storeBudget=max 1L (options.memoryBudgetBytes/6L)
+    let preciseLocations=
+        batch.stopLocations |> Seq.filter(fun value -> value.precision=JdfModel.StopPrecise)
+        |> Seq.groupBy _.stopId
+        |> Seq.map(fun (stopId,values) ->
+            let value=values |> Seq.sortBy(fun item -> item.lat,item.lon) |> Seq.head
+            stopId,struct(float value.lon,float value.lat)) |> Map.ofSeq
     let observationRows =
         batch.postCandidateEvidence
+        |> Seq.filter(fun value ->
+            preciseLocations
+            |> Map.tryFind value.stopId
+            |> Option.exists(fun centroid -> candidateIsWithinParentCentroid centroid value))
         |> Seq.map(fun value ->
             { stopId=value.stopId;routePointId=routePointId value.stopId value.lat value.lon
               observationId=value.observationId;sourceKind=value.sourceKind
@@ -301,12 +322,6 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
         routePointStore.ReadRows()
         |> Utils.groupAdjacentBy _.stopId
         |> Map.ofSeq
-    let preciseLocations=
-        batch.stopLocations |> Seq.filter(fun value -> value.precision=JdfModel.StopPrecise)
-        |> Seq.groupBy _.stopId
-        |> Seq.map(fun (stopId,values) ->
-            let value=values |> Seq.sortBy(fun item -> item.lat,item.lon) |> Seq.head
-            stopId,struct(float value.lon,float value.lat)) |> Map.ofSeq
     let anchors=
         pointsByStop
         |> Map.fold(fun state stopId points -> Map.add stopId (medoidCoordinate points) state) preciseLocations

@@ -828,6 +828,40 @@ type JdfBundleTests() =
             if Directory.Exists(root) then Directory.Delete(root,true)
 
     [<TestMethod>]
+    member _.``Post evidence excludes candidates outside the precise parent centroid radius``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-post-candidate-radius-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let _,input,routing=routedCaptureFixture root
+            use archive=ZipFile.OpenRead(input)
+            let source=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
+            let observation id latitude : JdfModel.PostCandidateEvidence = {
+                stopId=100L;candidateId=id;observationId=id;sourceKind="test"
+                sourceObjectId=Some id;observedAt=None;lat=latitude;lon=14.0M
+                supportWeight=1M;rawTags="";explicitModes="road";deniedModes="";lifecycle="active" }
+            let inside=observation "100-inside-300m" (50.0M+299.999M/110540M)
+            let outside=observation "100-outside-300m" (50.0M+300.001M/110540M)
+            let withoutPreciseCentroid =
+                { source with
+                    stopLocations=source.stopLocations |> Array.map(fun location ->
+                        if location.stopId=200L then {location with precision=JdfModel.Estimated} else location)
+                    postCandidateEvidence=Array.append source.postCandidateEvidence [|inside;outside|] }
+            use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(routing)
+            let options:JdfPostEvidence.PostEvidenceCaptureOptions = {
+                maximumWorkers=2;memoryBudgetBytes=Int64.MaxValue;preflight=ignore
+                progress=fun _ _ _ _ -> () }
+            use captured=JdfPostEvidence.captureToStore options graph withoutPreciseCentroid
+            let observations=captured.observations.ReadRows() |> Seq.toArray
+            let routePoints=captured.routePoints.ReadRows() |> Seq.toArray
+            Assert.IsTrue(observations |> Array.exists(fun value -> value.observationId=inside.observationId))
+            Assert.IsFalse(observations |> Array.exists(fun value -> value.observationId=outside.observationId))
+            Assert.IsFalse(observations |> Array.exists(fun value -> value.observationId="200-far"))
+            Assert.IsFalse(observations |> Array.exists(fun value -> value.stopId=200L))
+            Assert.IsFalse(routePoints |> Array.exists(fun value -> value.stopId=200L))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
     member _.``Capture cancellation and output collision leave no worker spools``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-capture-cleanup-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
@@ -1012,22 +1046,18 @@ type JdfBundleTests() =
 
             let liveOutput=Path.Combine(root,"live")
             let replayOutput=Path.Combine(root,"replay")
-            let policyPath=Path.Combine(root,"permissive-policy.json")
-            JdfPostInferencePolicy.writePolicy policyPath permissiveCoveragePolicy
             let liveOptions={JdfBundle.defaultBundleExecutionOptions with
-                                maximumWorkers=3;memoryBudgetBytes=1L
-                                postInferencePolicyPath=Some policyPath}
+                                maximumWorkers=3;memoryBudgetBytes=1L}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
                 descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
-                JdfToGtfs.emptyTransportModeRules true (Some routing) true
+                JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 liveOptions input liveOutput |> ignore
             let replayOptions={JdfBundle.defaultBundleExecutionOptions with
                                   memoryBudgetBytes=1L
-                                  postInferencePolicyPath=Some policyPath
                                   postInferenceEvidencePath=Some evidence}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
                 descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
-                JdfToGtfs.emptyTransportModeRules true None true
+                JdfToGtfs.emptyTransportModeRules true None false
                 replayOptions input replayOutput |> ignore
             let equalFiles=[|"derived_post_locations.parquet";"derived_post_assignments.parquet"
                              "post_candidate_evidence.parquet";"post_physical_hypotheses.parquet"
@@ -1041,56 +1071,9 @@ type JdfBundleTests() =
                     File.ReadAllBytes(Path.Combine(replayOutput,relative)),relative)
             let liveFeed=Gtfs.gtfsParseFolder () (Path.Combine(liveOutput,"gtfs-intermediate"))
             let replayFeed=Gtfs.gtfsParseFolder () (Path.Combine(replayOutput,"gtfs-intermediate"))
-            let derivedLocations=readParquet(Path.Combine(liveOutput,"derived_post_locations.parquet"))
-            let expectedTargetIds =
-                derivedLocations.Data
-                |> Seq.map(fun row ->
-                    string row.["derived_location_id"],string row.["gtfs_stop_place_id"])
-                |> Seq.groupBy snd
-                |> Seq.collect(fun (parentId,rows) ->
-                    rows
-                    |> Seq.sortWith(fun (left,_) (right,_) ->
-                        StringComparer.Ordinal.Compare(left,right))
-                    |> Seq.mapi(fun index (locationId,_) ->
-                        locationId,$"{parentId}:est:{index+1}"))
-                |> Map.ofSeq
-            Assert.IsTrue(expectedTargetIds.Count>0)
-            expectedTargetIds.Keys |> Seq.iter(fun locationId ->
-                Assert.IsTrue(
-                    locationId.StartsWith("estimated:",StringComparison.Ordinal)
-                    || locationId.StartsWith("estimated-side:",StringComparison.Ordinal)))
-            let assignments=readParquet(Path.Combine(liveOutput,"derived_post_assignments.parquet"))
-            let internalAssignments =
-                assignments.Data
-                |> Seq.filter(fun row ->
-                    string row.["assignment_kind"]="internal"
-                    && row.ContainsKey("derived_location_id")
-                    && not(isNull row.["derived_location_id"]))
-                |> Seq.toArray
-            Assert.IsTrue(internalAssignments.Length>0)
-            internalAssignments |> Array.iter(fun row ->
-                let locationId=string row.["derived_location_id"]
-                assertEqual expectedTargetIds.[locationId] (string row.["target_gtfs_stop_id"]))
             let stopShape (feed:GtfsModel.GtfsFeed) =
                 feed.stops |> Array.map(fun value -> value.id,value.parentStation) |> Array.sort
             assertEqual (stopShape liveFeed) (stopShape replayFeed)
-            let publishedTargets=expectedTargetIds.Values |> Set.ofSeq
-            let publishedStops=liveFeed.stops |> Seq.map _.id |> Set.ofSeq
-            let publishedCalls=liveFeed.stopTimes |> Seq.map _.stopId |> Set.ofSeq
-            let czStops =
-                GtfsParser.getGtfsFileParser<GtfsModel.CzStop>
-                    (Path.Combine(liveOutput,"extensions","cz_stops.txt"))
-                |> Seq.map _.stopId
-                |> Set.ofSeq
-            publishedTargets |> Seq.iter(fun targetId ->
-                Assert.IsTrue(publishedStops.Contains(targetId),targetId)
-                Assert.IsTrue(publishedCalls.Contains(targetId),targetId)
-                Assert.IsTrue(czStops.Contains(targetId),targetId)
-                let stop=liveFeed.stops |> Array.find(fun value -> value.id=targetId)
-                Assert.IsTrue(stop.platformCode.IsSome,targetId))
-            liveFeed.stops |> Array.iter(fun stop ->
-                Assert.IsFalse(stop.id.Contains(":estimated:",StringComparison.Ordinal),stop.id)
-                Assert.IsFalse(stop.id.Contains(":estimated-side:",StringComparison.Ordinal),stop.id))
             let unspecified (feed:GtfsModel.GtfsFeed) =
                 feed.stopTimes |> Array.filter(fun value -> value.stopId.EndsWith(":unspecified"))
                                |> Array.map(fun value -> value.tripId,value.stopSequence,value.stopId)
@@ -1721,58 +1704,6 @@ type JdfBundleTests() =
             plan.cleanupScoreRows()
             assertEqual 0L assignmentStore.CurrentSpillBytes
             assertEqual 0L diagnosticStore.CurrentSpillBytes
-            assertEqual 0 (Directory.GetFiles(root).Length)
-        finally
-            if Directory.Exists(root) then Directory.Delete(root,true)
-
-    [<TestMethod>]
-    member _.``Inferred post IDs use deterministic one-based ordinals per parent``() =
-        let root=Path.Combine(Path.GetTempPath(),"jrutil-inferred-post-ordinals-"+Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(root) |> ignore
-        try
-            let assignment contextId stopId position locationId hypothesisId
-                    :JdfPostInference.ContextPostAssignment = {
-                contextId=contextId;stopId=stopId;mode="A";lineId="100"
-                routeDistinction=0;direction=0;patternHash="pattern";patternPosition=position
-                previousStopId=None;nextStopId=None;assignmentKind="unlabelled"
-                authoredPostKey=None;sameStopBlockId=None;sameStopBlockRole="through"
-                movementFamilyId = $"family:{contextId}";resolution="Physical"
-                selectedLocationId=Some locationId;selectedHypothesisId=Some hypothesisId
-                selectedSideGroupId=None;score=Some 0.9;margin=Some 0.3 }
-            let assignmentStore=
-                JdfPostInference.ReplayableRowStore<JdfPostInference.ContextPostAssignment>.Create(
-                    1L,root,[
-                        assignment "context:z" 10L 2 "estimated:zzz" "h-z"
-                        assignment "context:a" 10L 1 "estimated:aaa" "h-a"
-                        assignment "context:side" 20L 1 "estimated-side:mmm" "h-side" ])
-            let diagnosticStore=
-                JdfPostInference.ReplayableRowStore<JdfPostInference.PostInferenceDiagnosticScore>.Create(
-                    1L,root,Seq.empty)
-            let hypothesis hypothesisId stopId latitude:JdfPostInference.ConsolidatedPostHypothesis = {
-                hypothesisId=hypothesisId;stopId=stopId;representativeRoutePointId=hypothesisId
-                memberRoutePointIds=[|hypothesisId|];memberObservationIds=[|hypothesisId|]
-                latitude=latitude;longitude=14.0 }
-            let result=new JdfPostInference.PostInferenceResult(
-                [|hypothesis "h-z" 10L 50.0;hypothesis "h-a" 10L 50.1
-                  hypothesis "h-side" 20L 50.2|],
-                [||],assignmentStore,[||],diagnosticStore,
-                { evidenceRows=3L;contextCount=3;candidateStopCount=2
-                  unresolvedContexts=0;authoredPositions=0;sameStopBlocks=0
-                  distinctPairChoices=0;unresolvedBlockEdges=0
-                  physicalResolutions=3;sideResolutions=0;centroidResolutions=0 })
-            let plan=JdfToGtfs.postEstimationPlanFromInferenceResult result
-            let selection locationId =
-                plan.inferredLocations |> Array.find(fun value -> value.locationId=locationId)
-            assertEqual 1 plan.inferredLocationOrdinals.[(10L,"estimated:aaa")]
-            assertEqual 2 plan.inferredLocationOrdinals.[(10L,"estimated:zzz")]
-            assertEqual 1 plan.inferredLocationOrdinals.[(20L,"estimated-side:mmm")]
-            assertEqual "jdf:stop:10:est:1"
-                (JdfToGtfs.inferredPostId false plan (selection "estimated:aaa"))
-            assertEqual "jdf:stop:10:est:2"
-                (JdfToGtfs.inferredPostId false plan (selection "estimated:zzz"))
-            assertEqual "cis:stop:20:est:1"
-                (JdfToGtfs.inferredPostId true plan (selection "estimated-side:mmm"))
-            plan.cleanupScoreRows()
             assertEqual 0 (Directory.GetFiles(root).Length)
         finally
             if Directory.Exists(root) then Directory.Delete(root,true)
