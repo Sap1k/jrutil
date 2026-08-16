@@ -23,6 +23,23 @@ type JdfBundleTests() =
     let fixturePath =
         Path.Combine(__SOURCE_DIRECTORY__, "data", "jdf", "obehy_extensions")
 
+    let permissiveCoveragePolicy =
+        let baseline=JdfPostInferencePolicy.conservativeRoutedV4
+        { baseline with
+            policyId="test-permissive-coverage"
+            consolidation={baseline.consolidation with maximumDiameterMetres=25.0}
+            resolution={baseline.resolution with
+                            minimumPlausibleScore=0.45
+                            minimumPhysicalScore=0.70
+                            minimumPhysicalMargin=0.15
+                            materialRoutedAdvantage=0.10}
+            consensus={baseline.consensus with minimumContexts=3;minimumWinningShare=1.0}
+            alternativeCorridors={baseline.alternativeCorridors with
+                                      absoluteTieMetres=25.0;relativeTieFraction=0.05}
+            sideGroups={baseline.sideGroups with
+                            maximumCompactnessMetres=35.0
+                            additionalGroupMinimumContexts=3} }
+
     let descriptor path kind sha bytes =
         File.WriteAllText(path,
             $$"""{
@@ -951,12 +968,12 @@ type JdfBundleTests() =
             JdfBundle.replayPostInferenceEvidence evidence None None None
                 (Some selectedStopsPath) selectedReplayReport
             Assert.IsTrue(File.Exists(Path.Combine(selectedReplayReport,"summary.json")))
-            use first=JdfPostInferenceEvaluator.evaluate store JdfPostInferencePolicy.conservativeRoutedV4
-            use second=JdfPostInferenceEvaluator.evaluate store JdfPostInferencePolicy.conservativeRoutedV4
+            use first=JdfPostInferenceEvaluator.evaluate store permissiveCoveragePolicy
+            use second=JdfPostInferenceEvaluator.evaluate store permissiveCoveragePolicy
             JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
             use publicationOnly=
                 JdfPostInferenceEvaluator.evaluateWithDiagnostics false store
-                    JdfPostInferencePolicy.conservativeRoutedV4
+                    permissiveCoveragePolicy
             let publicationProbes=JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
             let firstAssignments=first.Assignments.ReadRows() |> Seq.toArray
             let firstDiagnostics=first.DiagnosticScores.ReadRows() |> Seq.toArray
@@ -1223,6 +1240,22 @@ type JdfBundleTests() =
         Assert.AreNotEqual(first,second)
 
     [<TestMethod>]
+    member _.``Default post-inference policy is the tuned best-safe policy``() =
+        let policy=JdfPostInferencePolicy.conservativeRoutedV4
+        assertEqual "conservative-routed-v4|tuned-safe-v3|kostany-diagnostic-best-safe" policy.policyId
+        assertEqual 2.0 policy.consolidation.maximumDiameterMetres
+        assertEqual 0.90 policy.resolution.minimumPlausibleScore
+        assertEqual 0.98 policy.resolution.minimumPhysicalScore
+        assertEqual 0.02 policy.resolution.minimumPhysicalMargin
+        assertEqual 0.05 policy.resolution.materialRoutedAdvantage
+        assertEqual 1 policy.consensus.minimumContexts
+        assertEqual 0.67 policy.consensus.minimumWinningShare
+        assertEqual 0.0 policy.alternativeCorridors.absoluteTieMetres
+        assertEqual 0.02 policy.alternativeCorridors.relativeTieFraction
+        assertEqual 75.0 policy.sideGroups.maximumCompactnessMetres
+        assertEqual 2 policy.sideGroups.additionalGroupMinimumContexts
+
+    [<TestMethod>]
     member _.``Every policy sweep key changes exactly its named field``() =
         assertEqual 47 JdfPostInferencePolicy.PolicySweepFields.Length
         let options=JsonSerializerOptions(PropertyNamingPolicy=JsonNamingPolicy.SnakeCaseLower)
@@ -1312,7 +1345,7 @@ type JdfBundleTests() =
             {variantRank=0;relativeCostMetres=Some 0.0;relativeCostFraction=Some 0.0}
             {variantRank=1;relativeCostMetres=Some 20.0;relativeCostFraction=Some 0.20}
             {variantRank=2;relativeCostMetres=Some 100.0;relativeCostFraction=Some 0.01}|]
-        let baseline=JdfPostInferencePolicy.conservativeRoutedV4
+        let baseline=permissiveCoveragePolicy
         CollectionAssert.AreEqual(
             [|0;1;2|],JdfPostInference.selectedCorridorVariantRanks baseline facts)
         let tight={baseline with alternativeCorridors={baseline.alternativeCorridors with
@@ -1323,7 +1356,7 @@ type JdfBundleTests() =
 
     [<TestMethod>]
     member _.``Every initial policy-grid field crosses its production behavior boundary``() =
-        let baseline=JdfPostInferencePolicy.conservativeRoutedV4
+        let baseline=permissiveCoveragePolicy
         let tightDiameter={baseline with consolidation={baseline.consolidation with maximumDiameterMetres=10.0}}
         let wideDiameter={baseline with consolidation={baseline.consolidation with maximumDiameterMetres=25.0}}
         Assert.IsFalse(JdfPostInference.withinConsolidationDiameter tightDiameter 20.0)
