@@ -7,6 +7,176 @@ public transport data, such as:
 - real-time timetable changes (TODO)
 - vehicle positions (scraping GRAPP, viewing historical data)
 
+## Regional GTFS overlays
+
+`regional-gtfs-overlay` enriches an immutable national JDF bundle with facts
+from a checksum-pinned regional GTFS snapshot. It never downloads a feed and
+never mutates either input. Output is first written to a sibling temporary
+directory and atomically activated as a new, self-contained bundle.
+
+The PID calibration profile is in
+`config/regional-gtfs-overlay/pid-overlay-v1.json`. It excludes heavy rail and
+hard-excludes `pathways.txt` and `levels.txt`; regional calendars and times are
+used as matching evidence, and uniquely matched complete call patterns inherit
+the regional arrival/departure values (including seconds) on shared dates. GVD
+2026 is explicitly clipped to 2025-12-14 through 2026-12-12.
+
+```text
+jrutil-multitool regional-gtfs-overlay \
+  --policy=config/regional-gtfs-overlay/pid-overlay-v1.json \
+  --gvd-year=2026 \
+  --source=pid-gtfs=PID_GTFS.zip \
+  --source-descriptor=pid-gtfs=pid-snapshot.json \
+  jdf-aug-final-v2/bundle output-bundle
+```
+
+The descriptor must contain `retrieved_at` and the source ZIP's lowercase
+`payload_sha256`. Reviewed override CSVs are validity-bounded and require
+source/target namespaces, IDs, validity dates, and a review note. An empty CSV
+with only the supplied header is valid.
+
+Policy schema v3 retains v2's iterative one-gap stop inference, nearest-schedule
+ranking for exact stop patterns, bounded ordered-pattern edits, and
+capability-specific minimum match tiers. Equal-score candidates are expanded
+only when they share a stable CIS line identity and have an identical complete
+stop/time digest. This safely covers parallel JDF validity variants while each
+target's pickup/drop-off, timepoint, accessibility, and trip display fields stay
+untouched. Otherwise-equal candidates are iteratively resolved when exactly one
+target remains unclaimed by another source trip; competing proposals remain
+quarantined. The PID profile declaratively extracts a revision date from each
+source trip ID. If overlapping source revisions claim conflicting facts for the
+same national trip/date, the uniquely newest revision wins; equal-revision
+conflicts still remain quarantined. Ties across stable lines or different
+stop/times, and conflicting stop-context claims, remain quarantined.
+Ordinary stop matching uses compatible names and a configurable geographic
+radius (300 m in the PID profile). Strong, unique route/call context can resolve
+a compatible stop beyond that radius. When the JDF name ends in ` [?]`, an
+accepted PID match supplies the authoritative full name, parent coordinates and
+boarding points; source-created posts unused by final calls are pruned.
+It also permits explicitly configured transport modes to use a complete regional
+trip set on a route/date only when every active source trip has an exact companion
+CIS line assertion and every call's stop place resolves. Those proven instances
+retain their full regional call patterns; the corresponding unclaimed national
+instances are removed instead of being duplicated or partially overlaid.
+For separately configured source-native modes, a missing national route is not a
+hard gap: the overlay imports namespaced regional agencies, routes, stop places,
+posts, trips, calendars and shapes while retaining the asserted CIS line ID. The
+PID profile enables this for all supported non-rail modes, including new stops
+on existing routes; it never fabricates a CIS trip ID or
+JDF-specific trip/call evidence for the imported objects.
+Coverage reports distinguish all active source trips, shared-date and
+pattern-compatible populations, target-available candidates, and national
+snapshot/capacity gaps, so an older or less frequent national snapshot cannot
+make the calibration percentage misleading.
+
+`--audit-date=YYYY-MM-DD` defaults to the CIS snapshot retrieval date in
+Europe/Prague. `reports/snapshot_day_coverage.csv` separates that day's service
+coverage from future, unverified JDF comparisons. `reports/semantic_inheritance.csv`
+separates aligned snapshot evidence from source-only trips and claims requiring
+explicit notice validity; trip identity mappings alone do not authorize future
+notice inheritance. Original sidecars remain unchanged in `base-evidence/`.
+Ambiguous national route versions use a source-native route for new trips rather
+than inheriting an arbitrary version. Exact CIS identity permits bus/trolleybus
+compatibility, with a separate source-mode route preserving retained base service.
+
+GTFS-derived destination displays which identify the final stop are expanded to
+that stop's full canonical overlay name. Genuinely distinct source displays,
+including bilingual, via and intermediate-destination text, remain unchanged.
+`reports/headsigns.csv` preserves raw and output values, the decision reason and
+snapshot-day scope. Retained national headsigns are not rewritten. Bounded pattern edits are not complete service coverage and
+yield to full source trip projection on authoritative dates.
+
+The bundle contains regenerated `gtfs-intermediate/` and `extensions/`, copied
+national non-GTFS evidence under `base-evidence/`, complete mappings and field
+provenance, quarantine/conflict/exclusion/coverage reports, and a deterministic
+manifest. The checked-in PID v1 policy is deliberately a non-publishable
+calibration policy. Publication requires a reviewed policy-only update which
+sets coverage floors and enables publication.
+
+### Overlay implementation and feed profiles
+
+`RegionalGtfsOverlay` is the command/library entry point. Policy and binding
+records live in `JrUtil.RegionalOverlay.Types`; callers import that module
+directly. There are no compatibility type aliases. Implementation modules live
+together under `src/Gtfs/RegionalOverlay/`.
+The implementation is split into base/input preparation, stop and route matching,
+source analysis, trip matching, projection, reports, and bundle writing. Each
+stage receives explicit records and returns its evidence or output decisions;
+large call tables remain streamed. Runtime logging and the single collection at
+the end of analysis are isolated from the matching rules; no row-processing loop
+forces garbage collection.
+
+Shape points are sorted into a temporary spool before source-call analysis,
+using a 64 MiB row budget and at most 16 merge inputs. Projection validates and
+incrementally hashes selected shapes; the writer reads their geometry from disk.
+Input order need not group shape IDs. Diagnostic, candidate-score and headsign
+rows use append-only scratch files. Scratch lives under the OS temporary directory,
+is excluded from the manifest, and is removed on success or failure. Allow space
+for spill runs as well as the final output; write failures do not activate a bundle.
+
+Calendars are immutable packed date sets. Identical output service calendars,
+matching date sets and exact call alignments are shared within their owning stages.
+Projection resolves one national trip at a time in stable ID order and carries only
+final slices into writing. Partial matching evidence still yields to complete
+source representation on authoritative dates. Contextual stop inference and target
+availability resolve each round's proposals together before applying them.
+
+Report and mapping row order is deterministic but is not a semantic contract.
+To compare pinned runs, use `scripts/verify_regional_overlay.py BASELINE OUTPUT`:
+it checks both manifests independently, requires unchanged transit/evidence bytes,
+and compares changed report, mapping and provenance files as exact row multisets.
+The offline verifier uses Python's built-in SQLite to bound its own memory; the
+overlay has no database dependency.
+
+The compiled runner in `scripts/overlay-profile/` samples
+working set, private memory, managed heap, allocations and scratch use every 100 ms,
+with named stages inside writing. Pass policy, GVD year, source ID, payload,
+descriptor, base bundle, output bundle and an explicit `YYYYMMDD` audit date.
+Build it with `dotnet build scripts/overlay-profile/overlay-profile.fsproj`, then
+run its generated executable. It writes `.memory.csv` and `.summary.json` beside
+the output. Run measurements
+without concurrent builds or audits; heap collection itself perturbs the process.
+
+Schema-v3 profiles may omit `source.route_join` and
+`source.trip_match.source_revision`. An omitted join provides no companion CIS
+assertions: reviewed overrides and structural matching remain available, but
+trip-set authority and source-native imports still require the existing exact
+CIS evidence. A configured join must name `cis_line_id` as its target namespace,
+provide equally sized non-empty source/lookup key arrays, and supply its table.
+An omitted revision extractor provides no recency ordering; conflicting claims
+remain quarantined. Configured but unparseable revisions retain the existing
+oldest-revision treatment and diagnostic.
+
+Stop grouping first uses standard `parent_station`, then the configured group
+column, then the individual stop ID. Group/post columns can be omitted; posts
+fall back to their source stop IDs. These defaults allow ordinary GTFS snapshots
+without PID-specific columns. No IDS JMK or IDZK profile is supplied yet.
+
+Capability `priority` is reserved metadata in this single-source implementation;
+it does not arbitrate between feeds. Matching-tier arrays enable existing tiers;
+route precedence remains companion assertion, reviewed override, then structural
+evidence. `require_unique_best` and `require_equal_call_count` retain their
+existing fixed behavior: uniqueness and equal-call-count contextual inference
+are always enforced. `never_inherit` must include pathways and levels; this is
+not a general-purpose table filter. Disabled name, agency, calendar and
+trip-display inheritance applies to enrichment of retained national objects. Complete authoritative/source-native
+projections have their existing construction rules, including source agencies,
+calendars and displays; approximate national stops also retain their explicitly
+supported correction behavior.
+
+Bundle version 1, IDs, report schemas and machine-readable values are preserved.
+In particular, `pid_name_and_coordinates` and `pid_native` in the stop-match
+report are legacy classification labels even for another source. Consult the
+source identity and provenance rather than interpreting these values as feed IDs.
+Human-readable diagnostics use the configured source identity.
+
+The future regional `overlay-all` command should prepare one immutable national
+base, analyze each feed against that base, resolve source-qualified claims, and
+write one bundle. It must not chain overlays of already-overlaid bundles. The
+current internal preparation/analysis/projection/writer boundaries are the seams
+for that work; cross-source conflict resolution, priority semantics and a
+multi-source manifest remain future work.
+
 # Project parts
 
 JrUtil's main part is the central library, also called *JrUtil*. It allows the

@@ -36,6 +36,7 @@ let gtfsStandardTablesExceptStopTimesToFolder () =
     let calendarExceptionSerializer = getRowsSerializerWriter<CalendarException>
     let feedInfoSerializer = getRowsSerializerWriter<FeedInfo>
     let transferSerializer = getRowsSerializerWriter<Transfer>
+    let shapeSerializer = getRowsSerializerWriter<ShapePoint>
     fun path feed ->
         Directory.CreateDirectory(path) |> ignore
         let serializeTo name ser obj =
@@ -48,6 +49,7 @@ let gtfsStandardTablesExceptStopTimesToFolder () =
         serializeTo "stops.txt" stopSerializer feed.stops
         serializeTo "routes.txt" routeSerializer feed.routes
         serializeTo "trips.txt" tripSerializer feed.trips
+        serializeToOpt "shapes.txt" shapeSerializer feed.shapes
         serializeToOpt "calendar.txt" calendarEntrySerializer feed.calendar
         serializeToOpt "calendar_dates.txt"
                        calendarExceptionSerializer
@@ -118,6 +120,7 @@ let gtfsParseFolder () =
     let calendarExceptionsParser = fileParserOpt "calendar_dates.txt"
     let feedInfoParser = fileParserOpt "feed_info.txt"
     let transfersParser = fileParserOpt "transfers.txt"
+    let shapesParser = fileParserOpt "shapes.txt"
     let czRoutesParser = fileParserOpt "cz_routes.txt"
     let czTripsParser = fileParserOpt "cz_trips.txt"
     let czStopsParser = fileParserOpt "cz_stops.txt"
@@ -131,6 +134,7 @@ let gtfsParseFolder () =
             routes = routesParser path
             trips = tripsParser path
             stopTimes = stopTimesParser path
+            shapes = shapesParser path
             calendar = calendarParser path
             calendarExceptions = calendarExceptionsParser path
             feedInfo =

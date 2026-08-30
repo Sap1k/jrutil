@@ -24,6 +24,8 @@
     <Compile Include="InternationalRouteFilterTests.fs" />
     <Compile Include="JdfBundleTests.fs" />
     <Compile Include="CzPttToGtfsTests.fs" />
+    <Compile Include="RegionalGtfsOverlayTests.fs" />
+    <Compile Include="RegionalOverlayStorageTests.fs" />
     <Compile Include="EntryPoint.fs" />
   </ItemGroup>
 
