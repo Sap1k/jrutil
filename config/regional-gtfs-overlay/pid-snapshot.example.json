@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "source_id": "pid-gtfs",
+  "retrieved_at": "2026-08-20T00:00:00+02:00",
+  "source_uri": "https://data.pid.cz/PID_GTFS.zip",
+  "payload_sha256": "replace-with-lowercase-sha256-of-PID_GTFS.zip"
+}

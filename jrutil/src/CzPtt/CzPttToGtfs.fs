@@ -995,6 +995,7 @@ let private transfers message (journeys: Journey array) =
         toTripId = Some (tripId message toJourney)
         transferType = 4
         minTransferTime = None
+        maxWaitingTime = None
     })
 
 let private agency catalog code =
@@ -1405,6 +1406,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
         routes = routes
         trips = trips
         stopTimes = allStopTimes
+        shapes = None
         calendar = None
         calendarExceptions = Some allCalendarExceptions
         feedInfo = feedInfo acceptedMessages

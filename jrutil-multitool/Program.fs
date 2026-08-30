@@ -12,6 +12,7 @@ open Serilog
 open Serilog.Context
 
 open JrUtil
+open JrUtil.RegionalOverlay.Types
 open JrUtil.GeoData
 open JrUtil.Utils
 
@@ -25,6 +26,7 @@ Usage:
     jrutil-multitool.exe jdf-replay-post-inference [options] --evidence=DIR --output=DIR
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
+    jrutil-multitool.exe regional-gtfs-overlay [--audit-date=DATE] --policy=FILE --gvd-year=YEAR --source=BINDING --source-descriptor=BINDING <base-bundle> <overlay-bundle-out>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
@@ -54,6 +56,10 @@ Options:
     --no-post-inference-scores             Skip diagnostic score rows for publication-only bundles
     --evidence=DIR                         Evidence directory for policy replay
     --policy=FILE                          Policy JSON for policy replay
+    --gvd-year=YEAR                       Explicit GVD year for a regional overlay
+    --audit-date=DATE                     Coverage audit date YYYY-MM-DD (default: CIS snapshot Prague date)
+    --source=BINDING                      Overlay source binding SOURCE_ID=GTFS.zip
+    --source-descriptor=BINDING           Source checksum binding SOURCE_ID=descriptor.json
     --policy-grid=FILE                     Deterministic policy variants for replay
     --expectations=FILE                    Labelled routed-post expectation TSV
     --review-stops=FILE                    Stop selectors for replay diagnostics
@@ -130,6 +136,31 @@ let emitProgressEvent enabled eventName (fields: (string * obj) list) =
         // under the same lock used for human-readable Serilog output.
         Log.ForContext("JrUtilProgressEvent", line)
            .Information("{ProgressEvent:l}", line)
+
+let private parseOverlayArguments args =
+    let parseBinding argumentName (value: string) =
+        let separator = value.IndexOf('=')
+        if separator <= 0 || separator = value.Length - 1 then
+            invalidArg argumentName $"Expected SOURCE_ID=PATH, got {value}"
+        value.Substring(0, separator), value.Substring(separator + 1)
+    let sourceId, sourcePath = parseBinding "--source" (argValue args "--source")
+    let descriptorSourceId, descriptorPath =
+        parseBinding "--source-descriptor" (argValue args "--source-descriptor")
+    if sourceId <> descriptorSourceId then
+        invalidArg "--source-descriptor" "Source and descriptor bindings must use the same source ID"
+    let mutable gvdYear = 0
+    if not (Int32.TryParse(argValue args "--gvd-year", &gvdYear)) then
+        invalidArg "--gvd-year" "Expected a four-digit year"
+    let sourceBinding: SourceBinding = {
+        sourceId = sourceId
+        payloadPath = sourcePath
+        descriptorPath = descriptorPath
+    }
+    let auditDate =
+        optArgValue args "--audit-date"
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.map (fun value -> NodaTime.Text.LocalDatePattern.Iso.Parse(value).Value)
+    gvdYear, sourceBinding, auditDate
 
 [<EntryPoint>]
 let main (args: string array) =
@@ -369,7 +400,25 @@ let main (args: string array) =
             invalidArg "--international-route-overrides"
                 "International route overrides require --international-route-policy=regional-adjacent"
         let mutable exitCode = 0
-        if argFlagSet args "jdf-to-bundle" then
+        if argFlagSet args "regional-gtfs-overlay" then
+            try
+                let gvdYear, sourceBinding, auditDate = parseOverlayArguments args
+                let result =
+                    RegionalGtfsOverlay.executeWithAuditDate
+                        auditDate
+                        (argValue args "--policy")
+                        gvdYear
+                        sourceBinding
+                        (argValue args "<base-bundle>")
+                        (argValue args "<overlay-bundle-out>")
+                Log.Information(
+                    "Regional overlay complete: matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}; shapes={Shapes}; transfers={Transfers}",
+                    result.matchedTrips, result.unmatchedTrips, result.ambiguousTrips,
+                    result.selectedShapes, result.selectedTransfers)
+            with error ->
+                exitCode <- 1
+                Log.Error(error, "Regional GTFS overlay failed")
+        else if argFlagSet args "jdf-to-bundle" then
             try
                 let bundlePlan =
                     jobsFor "jdf-to-bundle" Execution.BundleWork

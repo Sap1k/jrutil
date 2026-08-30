@@ -1,4 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <InternalsVisibleTo Include="jrutil.tests" />
+  </ItemGroup>
   <!--
   This file is part of JrUtil and is licenced under the GNU AGPLv3 or later
   (c) 2024 David Koňařík
@@ -28,6 +31,24 @@
     <Compile Include="src/Gtfs/GtfsCsvSerializer.fs" />
     <Compile Include="src/Gtfs/GtfsParser.fs" />
     <Compile Include="src/Gtfs/Gtfs.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Types.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Scratch.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/DateSet.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Model.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Runtime.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Support.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Shapes.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Policy.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BasePreparation.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/InputPreparation.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/StopMatching.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/RouteMatching.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/SourceAnalysis.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/TripMatching.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Projection.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Reports.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BundleWriter.fs" />
+    <Compile Include="src/Gtfs/RegionalGtfsOverlay.fs" />
     <Compile Include="src/Jdf/JdfParser.fs" />
     <Compile Include="src/Jdf/JdfSerializer.fs" />
     <Compile Include="src/Jdf/JdfModel.fs" />

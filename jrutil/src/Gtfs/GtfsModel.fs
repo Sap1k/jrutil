@@ -111,6 +111,14 @@ type StopTime = {
     [<CsvFieldName("stop_zone_ids")>] stopZoneIds: string option
 }
 
+type ShapePoint = {
+    [<CsvFieldName("shape_id")>] shapeId: string
+    [<CsvFieldName("shape_pt_lat")>] lat: decimal
+    [<CsvFieldName("shape_pt_lon")>] lon: decimal
+    [<CsvFieldName("shape_pt_sequence")>] sequence: int
+    [<CsvFieldName("shape_dist_traveled")>] distanceTraveled: decimal option
+}
+
 // Serialization projection containing only fields from the GTFS Schedule
 // specification. StopTime retains stopZoneIds solely for parsing legacy JrUtil
 // feeds which used that non-standard column.
@@ -166,6 +174,8 @@ type Transfer = {
     [<CsvFieldName("to_trip_id")>] toTripId: string option
     [<CsvFieldName("transfer_type")>] transferType: int
     [<CsvFieldName("min_transfer_time")>] minTransferTime: int option
+    // PID extension. Ordinary feeds leave this empty.
+    [<CsvFieldName("max_waiting_time")>] maxWaitingTime: int option
 }
 
 // Oběhy Czech schedule extensions. These records intentionally use the
@@ -222,6 +232,7 @@ type GtfsFeed = {
     routes: Route array
     trips: Trip array
     stopTimes: StopTime array
+    shapes: ShapePoint array option
     calendar: CalendarEntry array option
     calendarExceptions: CalendarException array option
     feedInfo: FeedInfo option

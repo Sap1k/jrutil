@@ -2122,6 +2122,7 @@ let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
                 tripsToDelete |> Set.contains t.id |> not)
             |> Seq.toArray
         stopTimes = stopTimes
+        shapes = None
         calendar = Some calendar
         calendarExceptions = Some calendarExceptions
         feedInfo = Some (feedInfo jdfBatch.version calendar calendarExceptions)

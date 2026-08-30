@@ -1,0 +1,7 @@
+source_namespace,source_id,target_namespace,target_id,valid_from,valid_to,review_note
+pid-stop-group,U1000S1,jdf-stop-place-name,"Praha,Letňany",20251214,20261212,"Exact Praha station identity; PID platforms remain just beyond the automatic 125 m radius"
+pid-stop-group,U1071S1,jdf-stop-place-name,"Praha,Depo Hostivař",20251214,20261212,"Exact Praha station identity; PID platforms remain beyond the automatic 125 m radius"
+pid-stop-group,U1141S1,jdf-stop-place-name,"Praha,Zličín",20251214,20261212,"Exact Praha station identity; PID platforms remain beyond the automatic 125 m radius"
+pid-stop-group,U237S1,jdf-stop-place-name,"Praha,Karlovo náměstí",20251214,20261212,"Exact Praha station identity; PID platforms remain just beyond the automatic 125 m radius"
+pid-stop-group,U527S1,jdf-stop-place-name,"Praha,Vyšehrad",20251214,20261212,"Exact Praha station identity; PID platforms remain beyond the automatic 125 m radius"
+pid-stop-group,group:539:národní-třída,jdf-stop-place-name,"Praha,Národní třída",20251214,20261212,"Exact Praha stop-place identity; source and national members remain beyond the automatic 125 m radius"
