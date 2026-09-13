@@ -27,6 +27,7 @@ Usage:
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
     jrutil-multitool.exe regional-gtfs-overlay [--audit-date=DATE] --policy=FILE --gvd-year=YEAR --source=BINDING --source-descriptor=BINDING <base-bundle> <overlay-bundle-out>
+    jrutil-multitool.exe regional-gtfs-overlay-all [--audit-date=DATE] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
@@ -161,6 +162,33 @@ let private parseOverlayArguments args =
         |> Option.filter (String.IsNullOrWhiteSpace >> not)
         |> Option.map (fun value -> NodaTime.Text.LocalDatePattern.Iso.Parse(value).Value)
     gvdYear, sourceBinding, auditDate
+
+let private parseOverlayAllArguments args =
+    let parseBinding argumentName (value: string) =
+        let separator = value.IndexOf('=')
+        if separator <= 0 || separator = value.Length - 1 then
+            invalidArg argumentName $"Expected SOURCE_ID=PATH, got {value}"
+        value.Substring(0, separator), value.Substring(separator + 1)
+    let sources = argValues args "--source" |> Seq.map (parseBinding "--source") |> Seq.toArray
+    let descriptorBindings = argValues args "--source-descriptor" |> Seq.map (parseBinding "--source-descriptor") |> Seq.toArray
+    if sources.Length < 2 then invalidArg "--source" "regional-gtfs-overlay-all requires at least two sources"
+    if sources |> Array.map fst |> Array.distinct |> Array.length <> sources.Length then invalidArg "--source" "Duplicate source ID"
+    if descriptorBindings |> Array.map fst |> Array.distinct |> Array.length <> descriptorBindings.Length then invalidArg "--source-descriptor" "Duplicate source descriptor ID"
+    let descriptors = descriptorBindings |> dict
+    if descriptors.Count <> sources.Length then invalidArg "--source-descriptor" "Each source requires exactly one descriptor"
+    let bindings =
+        sources
+        |> Array.map (fun (sourceId, payloadPath) ->
+            match descriptors.TryGetValue(sourceId) with
+            | true, descriptorPath -> { sourceId = sourceId; payloadPath = payloadPath; descriptorPath = descriptorPath }
+            | _ -> invalidArg "--source-descriptor" $"Missing descriptor for source {sourceId}")
+    let mutable gvdYear = 0
+    if not (Int32.TryParse(argValue args "--gvd-year", &gvdYear)) then invalidArg "--gvd-year" "Expected a four-digit year"
+    let auditDate =
+        optArgValue args "--audit-date"
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.map (fun value -> NodaTime.Text.LocalDatePattern.Iso.Parse(value).Value)
+    gvdYear, bindings, auditDate
 
 [<EntryPoint>]
 let main (args: string array) =
@@ -400,7 +428,19 @@ let main (args: string array) =
             invalidArg "--international-route-overrides"
                 "International route overrides require --international-route-policy=regional-adjacent"
         let mutable exitCode = 0
-        if argFlagSet args "regional-gtfs-overlay" then
+        if argFlagSet args "regional-gtfs-overlay-all" then
+            try
+                let gvdYear, sourceBindings, auditDate = parseOverlayAllArguments args
+                let result =
+                    RegionalGtfsOverlay.executeAllWithAuditDate auditDate (argValue args "--policy") gvdYear sourceBindings
+                        (argValue args "<base-bundle>") (argValue args "<overlay-bundle-out>")
+                Log.Information(
+                    "Combined regional overlay complete: sources={Sources}; matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}",
+                    String.concat "," result.sources, result.aggregate.matchedTrips, result.aggregate.unmatchedTrips, result.aggregate.ambiguousTrips)
+            with error ->
+                exitCode <- 1
+                Log.Error(error, "Combined regional GTFS overlay failed")
+        else if argFlagSet args "regional-gtfs-overlay" then
             try
                 let gvdYear, sourceBinding, auditDate = parseOverlayArguments args
                 let result =

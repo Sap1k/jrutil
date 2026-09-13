@@ -35,6 +35,40 @@ The descriptor must contain `retrieved_at` and the source ZIP's lowercase
 source/target namespaces, IDs, validity dates, and a review note. An empty CSV
 with only the supplied header is valid.
 
+For the non-publishable PID + IDS JMK calibration, use the versioned
+`pid-ids-jmk-overlay-v1.json` policy and bind both checksum-pinned archives in
+any order. The base is prepared once and both feeds are resolved in one pass;
+the command does not chain independently produced overlays.
+
+```text
+jrutil-multitool regional-gtfs-overlay-all \
+  --policy=config/regional-gtfs-overlay/pid-ids-jmk-overlay-v1.json \
+  --gvd-year=2026 \
+  --source=pid-gtfs=PID_GTFS.zip \
+  --source-descriptor=pid-gtfs=pid-snapshot.json \
+  --source=ids-jmk-gtfs=IDSJMK_GTFS.zip \
+  --source-descriptor=ids-jmk-gtfs=ids-jmk-snapshot.json \
+  jdf-aug-final-v2/bundle output-bundle
+```
+
+JrUtil performs no download. Pin the official IDS JMK `gtfs.zip` separately,
+record its hash in the descriptor, and keep `api.txt` in the archive. The
+IDS-JMK adapter requires exactly one valid mapping per static trip; duplicated
+line/course keys remain candidates and are emitted with disjoint validity
+ranges. Standard parent/child stops become places and boarding points, route
+type 800 is trolleybus, ferry is supported, and heavy rail is excluded. Missing
+IDS JMK shapes do not disable PID shapes. IDS JMK zones are additive namespaced
+claims; ordinary `stops.zone_id` is populated only for a unique effective zone.
+IDS JMK trip-set authority covers bus, tram, trolleybus and ferry service when a
+unique structural national route identity is proven. This lets the source fill
+dates beyond the national snapshot in the same way as PID. Arbitrary
+source-native routes/trips remain restricted to ferries. Unresolved non-ferry
+trips are withheld with a reason in `reports/unmatched_trip_reasons.csv`, so a
+failed identity match cannot create a parallel journey.
+To reconcile verbose IDS JMK names with abbreviated JDF names, its profile also
+allows a coordinate-only identity within 25 m when the next candidate is at
+least 10 m farther away; nearby urban stops without that margin stay quarantined.
+
 Policy schema v3 retains v2's iterative one-gap stop inference, nearest-schedule
 ranking for exact stop patterns, bounded ordered-pattern edits, and
 capability-specific minimum match tiers. Equal-score candidates are expanded
@@ -139,9 +173,11 @@ without concurrent builds or audits; heap collection itself perturbs the process
 
 Schema-v3 profiles may omit `source.route_join` and
 `source.trip_match.source_revision`. An omitted join provides no companion CIS
-assertions: reviewed overrides and structural matching remain available, but
-trip-set authority and source-native imports still require the existing exact
-CIS evidence. A configured join must name `cis_line_id` as its target namespace,
+assertions. Reviewed overrides and structural matching remain available; a
+unique structural route/date proof can authorize a complete source trip set,
+while configured road/local modes can import unmatched service under
+deterministic source-namespaced IDs. A configured join must name `cis_line_id`
+as its target namespace,
 provide equally sized non-empty source/lookup key arrays, and supply its table.
 An omitted revision extractor provides no recency ordering; conflicting claims
 remain quarantined. Configured but unparseable revisions retain the existing
@@ -150,10 +186,16 @@ oldest-revision treatment and diagnostic.
 Stop grouping first uses standard `parent_station`, then the configured group
 column, then the individual stop ID. Group/post columns can be omitted; posts
 fall back to their source stop IDs. These defaults allow ordinary GTFS snapshots
-without PID-specific columns. No IDS JMK or IDZK profile is supplied yet.
+without PID-specific columns. IDS JMK has a supplied adapter/profile. IDZK is
+intentionally out of scope because its feed lacks the required boarding-post
+hierarchy.
 
-Capability `priority` is reserved metadata in this single-source implementation;
-it does not arbitrate between feeds. Matching-tier arrays enable existing tiers;
+In the combined profile, compatible equal-priority facts coalesce and retain all
+source provenance. Differing facts are quarantined and the national value
+survives. Missing facts are neutral, so a PID shape can coexist with an identical
+JMK schedule. Equivalent source-native trips and strongly equivalent boarding
+points (same resolved place and nonblank platform code) are structurally
+deduplicated. Matching-tier arrays enable existing tiers;
 route precedence remains companion assertion, reviewed override, then structural
 evidence. `require_unique_best` and `require_equal_call_count` retain their
 existing fixed behavior: uniqueness and equal-call-count contextual inference
@@ -164,7 +206,10 @@ projections have their existing construction rules, including source agencies,
 calendars and displays; approximate national stops also retain their explicitly
 supported correction behavior.
 
-Bundle version 1, IDs, report schemas and machine-readable values are preserved.
+Single-source bundle version 1, IDs, report schemas and machine-readable values
+are preserved. Combined bundles use version 2 with a sorted `sources` array,
+per-source and aggregate counts, source payload/descriptor hashes, and the
+combined policy hash.
 In particular, `pid_name_and_coordinates` and `pid_native` in the stop-match
 report are legacy classification labels even for another source. Consult the
 source identity and provenance rather than interpreting these values as feed IDs.

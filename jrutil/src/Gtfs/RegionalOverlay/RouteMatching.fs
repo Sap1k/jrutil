@@ -82,7 +82,7 @@ let buildCandidates ({
                     prepared.baseRoutes.ContainsKey(id)
                     && (let baseMode = modeClass (rowValue prepared.baseRoutes.[id] "route_type")
                         let sourceMode = modeClass (rowValue sourceRoute "route_type")
-                        baseMode = sourceMode || (Set.ofList ["bus"; "trolleybus"] |> fun road -> road.Contains(baseMode) && road.Contains(sourceMode))))
+                        compatibleModeClasses baseMode sourceMode))
                 |> Array.distinct
                 |> Array.sort
             | _ -> [||])
@@ -106,11 +106,18 @@ let buildCandidates ({
                 |> Array.distinct
             | _ -> [||]
         let label = rowValue sourceRoute "route_short_name"
+        let structuralExact =
+            prepared.baseRouteRows
+            |> Array.filter (fun target ->
+                compatibleModeClasses (modeClass (rowValue target "route_type")) (modeClass (rowValue sourceRoute "route_type"))
+                && (String.IsNullOrWhiteSpace(label) || rowValue target "route_short_name" = label))
+            |> Array.map (fun row -> rowValue row "route_id")
+            |> Array.distinct
         let structural =
             prepared.baseRouteRows
             |> Array.filter (fun target ->
-                modeClass (rowValue target "route_type") = modeClass (rowValue sourceRoute "route_type")
-                && (String.IsNullOrWhiteSpace(label) || rowValue target "route_short_name" = label))
+                compatibleModeClasses (modeClass (rowValue target "route_type")) (modeClass (rowValue sourceRoute "route_type"))
+                && (String.IsNullOrWhiteSpace(label) || structurallyCompatibleRouteLabels label (rowValue target "route_short_name")))
             |> Array.map (fun row -> rowValue row "route_id")
             |> Array.distinct
         structuralRouteCandidates.[sourceRouteId] <- structural
@@ -120,7 +127,7 @@ let buildCandidates ({
             routeCandidates.[sourceRouteId] <- reviewed, "reviewed_override"
         else
             let candidates =
-                if prepared.policy.source.routeMatchTiers |> Array.contains "structural_trip_evidence" then structural else [||]
+                if prepared.policy.source.routeMatchTiers |> Array.contains "structural_trip_evidence" then structuralExact else [||]
             routeCandidates.[sourceRouteId] <- candidates, "structural_trip_evidence"
     logProgress "build-route-candidates" (int64 sourceRouteRows.Length) (Some (int64 sourceRouteRows.Length))
 

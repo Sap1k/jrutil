@@ -39,6 +39,7 @@
     <Compile Include="src/Gtfs/RegionalOverlay/Support.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Shapes.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Policy.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/MultiSourcePreparation.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/BasePreparation.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/InputPreparation.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/StopMatching.fs" />

@@ -498,7 +498,7 @@ type RegionalGtfsOverlayTests() =
             let calls = File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stop_times.txt"))
             Assert.IsFalse(calls.Contains("08:03:00") || calls.Contains("08:04:00"))
             let additions = File.ReadAllLines(Path.Combine(output, "reports", "source_trip_additions.csv"))
-            Assert.AreEqual(1, additions.Length, "Configured authority alone must not fabricate CIS assertions")
+            Assert.AreEqual((if authority then 2 else 1), additions.Length, "Structural route/date proof may authorize the configured complete regional trip set without fabricating a CIS trip identity")
             Assert.IsTrue(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stops.txt")).Contains("overlay:generic-gtfs:post:"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -569,5 +569,123 @@ type RegionalGtfsOverlayTests() =
             Assert.IsFalse(Directory.Exists(output))
             Assert.AreEqual(0, Directory.EnumerateDirectories(root, ".output.tmp-*") |> Seq.length)
             for path, expected in inputHashes do Assert.AreEqual(expected, sha path, path)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Czech stop-name abbreviations match their verbose IDS JMK forms``() =
+        let rank left right = JrUtil.RegionalOverlay.Support.stopNameMatchRank left right
+        Assert.IsTrue(rank "Ochoz u Brna, obecní úřad" "Ochoz u Brna,ObÚ" |> Option.isSome)
+        Assert.IsTrue(rank "Bílovice nad Svitavou, železniční stanice" "Bílovice n.Svit.,žel.st." |> Option.isSome)
+        Assert.IsTrue(rank "Moravský Krumlov, náměstí" "Moravský Krumlov,nám." |> Option.isSome)
+        Assert.IsTrue(rank "Svatobořice-Mistřín, restaurace" "Svatobořice-Mistřín,rest." |> Option.isSome)
+        Assert.IsTrue(rank "Ochoz u Brna, obecní úřad" "Ochoz u Brna, železniční stanice" |> Option.isNone)
+        Assert.IsTrue(JrUtil.RegionalOverlay.Support.compatibleModeClasses "trolleybus" "bus")
+        Assert.IsTrue(JrUtil.RegionalOverlay.Support.structurallyCompatibleRouteLabels "H4" "H")
+        Assert.IsFalse(JrUtil.RegionalOverlay.Support.structurallyCompatibleRouteLabels "25" "2")
+
+    [<TestMethod>]
+    member _.``Combined PID and IDS JMK overlay is order independent and preserves JMK metadata``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-all-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, pidZip, pidDescriptor, pidPolicy = makeFixture root
+            write (Path.Combine(basePath, "extensions", "cz_stop_zones.txt")) "stop_place_id,zone_id,route_id,ids_system_id,source_provenance\n"
+            let pidJson = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(pidPolicy))
+            pidJson.["source"].["trip_set_authority"].["modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"trolleybus\"]")
+            pidJson.["source"].["trip_set_authority"].["source_native_modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"trolleybus\"]")
+            write pidPolicy (pidJson.ToJsonString())
+
+            let jmkDir = Path.Combine(root, "jmk")
+            write (Path.Combine(jmkDir, "agency.txt")) "agency_id,agency_name,agency_url,agency_timezone\njmk,IDS JMK,https://www.idsjmk.cz,Europe/Prague\n"
+            write (Path.Combine(jmkDir, "stops.txt")) "stop_id,stop_name,stop_lat,stop_lon,zone_id,location_type,parent_station,platform_code\npa,City Alpha,50.0001,14.0001,100,1,,\nja,City Alpha,50.0001,14.0001,100,0,pa,N\npb,\"Beta, verbose regional name\",50.0011,14.0011,101,1,,\njb,\"Beta, verbose regional name\",50.0011,14.0011,101,0,pb,N\n"
+            write (Path.Combine(jmkDir, "routes.txt")) "route_id,agency_id,route_short_name,route_long_name,route_type,route_color,route_text_color\njtram,jmk,10,JMK tram,0,ff0000,ffffff\njferry,jmk,F,JMK ferry,4,0000ff,ffffff\njtrolley,jmk,T,JMK trolleybus,800,00aa00,ffffff\njrail,jmk,R,JMK rail,2,333333,ffffff\n"
+            write (Path.Combine(jmkDir, "trips.txt")) "route_id,service_id,trip_id,trip_headsign,direction_id\njtram,jd1,j1,Beta,0\njtram,jd2,j2,Beta,0\njferry,jd1,jf,Beta,0\njtrolley,jd1,jt,Beta,0\njrail,jd1,jr,Beta,0\n"
+            write (Path.Combine(jmkDir, "stop_times.txt")) "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\nj1,09:00:45,09:00:45,ja,1,0,0\nj1,09:10:05,09:10:05,jb,2,0,0\nj2,09:00:45,09:00:45,ja,1,0,0\nj2,09:10:05,09:10:05,jb,2,0,0\njf,12:00:00,12:00:00,ja,1,0,0\njf,12:10:00,12:10:00,jb,2,0,0\njt,12:30:00,12:30:00,ja,1,0,0\njt,12:40:00,12:40:00,jb,2,0,0\njr,13:00:00,13:00:00,ja,1,0,0\njr,13:10:00,13:10:00,jb,2,0,0\n"
+            write (Path.Combine(jmkDir, "calendar_dates.txt")) "service_id,date,exception_type\njd1,20251215,1\njd2,20251216,1\n"
+            write (Path.Combine(jmkDir, "transfers.txt")) "from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_trip_id,to_trip_id\njb,ja,2,90,j1,jf\n"
+            write (Path.Combine(jmkDir, "api.txt")) "Linka/CVlaku = trip_id: 10/42 = j1\nLinka/CVlaku = trip_id: 10/42 = j2\nLinka/CVlaku = trip_id: F/7 = jf\nLinka/CVlaku = trip_id: T/9 = jt\nLinka/CVlaku = trip_id: R/8 = jr\n"
+            let jmkZip = Path.Combine(root, "IDSJMK_GTFS.zip")
+            ZipFile.CreateFromDirectory(jmkDir, jmkZip)
+            let jmkDescriptor = Path.Combine(root, "jmk-descriptor.json")
+            write jmkDescriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha jmkZip}\"}}")
+
+            let jmkPolicy = Path.Combine(root, "jmk-policy.json")
+            let jmkJson = System.Text.Json.Nodes.JsonNode.Parse(policyJson)
+            let jmkSource = jmkJson.["source"]
+            jmkSource.["source_id"] <- System.Text.Json.Nodes.JsonValue.Create("ids-jmk-gtfs")
+            jmkSource.["route_join"] <- null
+            jmkSource.["stop_match"].["group_column"] <- System.Text.Json.Nodes.JsonValue.Create("")
+            jmkSource.["stop_match"].["post_column"] <- System.Text.Json.Nodes.JsonValue.Create("")
+            jmkSource.["stop_match"].["maximum_distance_metres"] <- System.Text.Json.Nodes.JsonValue.Create(300)
+            jmkSource.["stop_match"].["coordinate_identity_maximum_metres"] <- System.Text.Json.Nodes.JsonValue.Create(25)
+            jmkSource.["stop_match"].["coordinate_identity_minimum_margin_metres"] <- System.Text.Json.Nodes.JsonValue.Create(10)
+            jmkSource.["trip_match"].["source_revision"] <- null
+            jmkSource.["trip_set_authority"].["modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"tram\",\"ferry\",\"trolleybus\"]")
+            jmkSource.["trip_set_authority"].["source_native_modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"ferry\"]")
+            jmkSource.["capabilities"].["shapes"].["mode"] <- System.Text.Json.Nodes.JsonValue.Create("disabled")
+            jmkSource.["capabilities"].["stop_zones"] <- System.Text.Json.Nodes.JsonNode.Parse("{\"mode\":\"additive\",\"priority\":100}")
+            jmkSource.["overrides"] <- System.Text.Json.Nodes.JsonNode.Parse("{\"routes\":\"\",\"trips\":\"\",\"stops\":\"\"}")
+            write jmkPolicy (jmkJson.ToJsonString())
+            let combinedPolicy = Path.Combine(root, "combined-policy.json")
+            write combinedPolicy ($"{{\"schema_version\":1,\"calibration\":true,\"publication_enabled\":false,\"conflict_policy\":\"equal_priority_quarantine\",\"minimum_coverage\":{{}},\"sources\":[{{\"source_id\":\"pid-gtfs\",\"policy\":\"{Path.GetFileName(pidPolicy)}\",\"adapter\":\"pid-v1\"}},{{\"source_id\":\"ids-jmk-gtfs\",\"policy\":\"{Path.GetFileName(jmkPolicy)}\",\"adapter\":\"ids-jmk-v1\"}}]}}")
+
+            let pid: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = pidZip; descriptorPath = pidDescriptor }
+            let jmk: SourceBinding = { sourceId = "ids-jmk-gtfs"; payloadPath = jmkZip; descriptorPath = jmkDescriptor }
+            let output1 = Path.Combine(root, "combined-1")
+            let output2 = Path.Combine(root, "combined-2")
+            let result = RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; jmk |] basePath output1
+            RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| jmk; pid |] basePath output2 |> ignore
+            CollectionAssert.AreEqual([| "ids-jmk-gtfs"; "pid-gtfs" |], result.sources)
+            let files1 = Directory.EnumerateFiles(output1, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> Path.GetRelativePath(output1, path)) |> Seq.sort |> Seq.toArray
+            let files2 = Directory.EnumerateFiles(output2, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> Path.GetRelativePath(output2, path)) |> Seq.sort |> Seq.toArray
+            CollectionAssert.AreEqual(files1, files2)
+            for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
+            use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
+            Assert.AreEqual(2, manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            Assert.AreEqual(2, manifest.RootElement.GetProperty("sources").GetArrayLength())
+            Assert.AreEqual(2, manifest.RootElement.GetProperty("counts").GetProperty("per_source").GetArrayLength())
+            let mappings = File.ReadAllText(Path.Combine(output1, "mappings", "operational_to_source_trips.csv"))
+            Assert.IsTrue(mappings.Contains("\"10\",\"42\",\"j1\"") && mappings.Contains("\"10\",\"42\",\"j2\""), mappings)
+            let trips = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "trips.txt"))
+            Assert.IsTrue(trips.Contains("overlay:ids-jmk-gtfs:trip:"), "An unmatched ferry must be imported with a deterministic source namespace")
+            Assert.IsFalse(trips.Contains("jr"), "Heavy rail must remain excluded")
+            Assert.IsFalse(File.ReadAllText(Path.Combine(output1, "reports", "substitutions.csv")).Contains("ids-jmk-gtfs:jt"), "PID native-mode permissions must not make an unmatched JMK trolleybus native")
+            let zones = File.ReadAllText(Path.Combine(output1, "extensions", "cz_stop_zones.txt"))
+            Assert.IsTrue(zones.Contains("ids-jmk-gtfs") && zones.Contains("overlay:ids-jmk-gtfs:zone:"), zones)
+            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "diagnostics.csv")).Contains("cross_source_fact_coalesced"))
+            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "stop_group_matches.csv")).Contains("coordinate_identity_unique"))
+
+            Assert.ThrowsExactly<ArgumentException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; pid |] basePath (Path.Combine(root, "duplicate")) |> ignore) |> ignore
+            Assert.ThrowsExactly<ArgumentException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid |] basePath (Path.Combine(root, "missing")) |> ignore) |> ignore
+
+            let badChecksumDescriptor = Path.Combine(root, "jmk-bad-checksum.json")
+            write badChecksumDescriptor "{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"deadbeef\"}"
+            let badChecksum = { jmk with descriptorPath = badChecksumDescriptor }
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; badChecksum |] basePath (Path.Combine(root, "bad-checksum")) |> ignore) |> ignore
+
+            let skewDescriptor = Path.Combine(root, "jmk-skew.json")
+            write skewDescriptor ($"{{\"retrieved_at\":\"2026-09-20T00:00:00+02:00\",\"payload_sha256\":\"{sha jmkZip}\"}}")
+            let skewed = { jmk with descriptorPath = skewDescriptor }
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; skewed |] basePath (Path.Combine(root, "skew")) |> ignore) |> ignore
+
+            let jmkStopTimes = Path.Combine(jmkDir, "stop_times.txt")
+            File.ReadAllText(jmkStopTimes).Replace("j1,09:00:45,09:00:45", "j1,09:01:45,09:01:45") |> write jmkStopTimes
+            let conflictingZip = Path.Combine(root, "IDSJMK-conflicting.zip")
+            ZipFile.CreateFromDirectory(jmkDir, conflictingZip)
+            let conflictingDescriptor = Path.Combine(root, "jmk-conflicting.json")
+            write conflictingDescriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha conflictingZip}\"}}")
+            let conflicting = { jmk with payloadPath = conflictingZip; descriptorPath = conflictingDescriptor }
+            let conflictOutput = Path.Combine(root, "conflicting")
+            RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; conflicting |] basePath conflictOutput |> ignore
+            Assert.IsTrue(File.ReadAllText(Path.Combine(conflictOutput, "reports", "diagnostics.csv")).Contains("cross_source_fact_conflict"))
+            Assert.IsFalse(File.ReadAllText(Path.Combine(conflictOutput, "gtfs-intermediate", "stop_times.txt")).Contains("09:01:45"), "A cross-source conflict must retain the national schedule")
+
+            write (Path.Combine(jmkDir, "api.txt")) "Linka/CVlaku = trip_id: malformed\n"
+            let malformedZip = Path.Combine(root, "IDSJMK-malformed.zip")
+            ZipFile.CreateFromDirectory(jmkDir, malformedZip)
+            let malformedDescriptor = Path.Combine(root, "jmk-malformed.json")
+            write malformedDescriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha malformedZip}\"}}")
+            let malformed = { jmk with payloadPath = malformedZip; descriptorPath = malformedDescriptor }
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; malformed |] basePath (Path.Combine(root, "malformed")) |> ignore) |> ignore
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)

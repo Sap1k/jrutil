@@ -37,7 +37,7 @@ let capabilityNames =
     set [
         "stop_coordinates"; "boarding_points"; "call_boarding_points"; "shapes"
         "route_short_name"; "route_long_name"; "route_color"; "route_text_color"
-        "transfers"; "stop_names"; "trip_headsigns"; "trip_short_names"
+        "transfers"; "stop_zones"; "stop_names"; "trip_headsigns"; "trip_short_names"
         "schedules"; "calendars"; "agencies"
     ]
 
@@ -63,6 +63,16 @@ let rowValue (row: CsvRow) name =
     match (if String.IsNullOrEmpty(name) then false, "" else row.TryGetValue(name)) with
     | true, value -> value
     | _ -> ""
+
+let sourceIdentity fallback (row: CsvRow) =
+    match rowValue row "overlay_source_id" with
+    | value when String.IsNullOrWhiteSpace(value) -> fallback
+    | value -> value
+
+let originalIdentity column (row: CsvRow) =
+    match rowValue row ("overlay_original_" + column) with
+    | value when String.IsNullOrWhiteSpace(value) -> rowValue row column
+    | value -> value
 
 let parseInt (value: string) =
     match Int32.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture) with
@@ -121,15 +131,80 @@ let normalizeName (value: string) =
     |> String
     |> fun value -> value.Split(' ', StringSplitOptions.RemoveEmptyEntries)
 
+let private canonicalStopNameTokens (value: string) =
+    let tokens = normalizeName value
+    let expanded = ResizeArray<string>()
+    let mutable index = 0
+    while index < tokens.Length do
+        let token = tokens.[index]
+        let next = if index + 1 < tokens.Length then tokens.[index + 1] else ""
+        match token, next with
+        | "žel", "st" ->
+            expanded.Add("železniční")
+            expanded.Add("stanice")
+            index <- index + 2
+        | "čerp", "st" ->
+            expanded.Add("čerpací")
+            expanded.Add("stanice")
+            index <- index + 2
+        | "obch", "stř" ->
+            expanded.Add("obchodní")
+            expanded.Add("středisko")
+            index <- index + 2
+        | "obú", _ ->
+            expanded.Add("obecní")
+            expanded.Add("úřad")
+            index <- index + 1
+        | "nám", _ -> expanded.Add("náměstí"); index <- index + 1
+        | "rozc", _ -> expanded.Add("rozcestí"); index <- index + 1
+        | "rest", _ -> expanded.Add("restaurace"); index <- index + 1
+        | "zast", _ -> expanded.Add("zastávka"); index <- index + 1
+        | "dol", _ -> expanded.Add("dolní"); index <- index + 1
+        | "hor", _ -> expanded.Add("horní"); index <- index + 1
+        | "nem", _ -> expanded.Add("nemocnice"); index <- index + 1
+        | "kult", _ -> expanded.Add("kulturní"); index <- index + 1
+        | "mech", _ -> expanded.Add("mechanizační"); index <- index + 1
+        | "stř", _ -> expanded.Add("středisko"); index <- index + 1
+        | "záv", _ -> expanded.Add("závod"); index <- index + 1
+        | "n", _ -> expanded.Add("nad"); index <- index + 1
+        | _ -> expanded.Add(token); index <- index + 1
+    expanded.ToArray()
+
 let stopNameMatchRank (leftRaw: string) (rightRaw: string) =
-    let left = normalizeName leftRaw
-    let right = normalizeName rightRaw
+    let left = canonicalStopNameTokens leftRaw
+    let right = canonicalStopNameTokens rightRaw
     let localitySuffix (shorter: string array) (longerRaw: string) =
         let comma = longerRaw.IndexOf(',')
-        comma >= 0 && normalizeName longerRaw.[comma + 1..] = shorter
+        comma >= 0 && canonicalStopNameTokens longerRaw.[comma + 1..] = shorter
+    let prefixEquivalent (left: string array) (right: string array) =
+        left.Length = right.Length
+        && Array.zip left right
+           |> Array.forall (fun (a, b) ->
+               a = b
+               || (min a.Length b.Length >= 3 && (a.StartsWith(b, StringComparison.Ordinal) || b.StartsWith(a, StringComparison.Ordinal))))
     if left = right then Some 0
     elif localitySuffix left rightRaw || localitySuffix right leftRaw then Some (abs (left.Length - right.Length))
+    elif prefixEquivalent left right then
+        Some (Array.zip left right |> Array.sumBy (fun (a, b) -> if a = b then 0 else 1))
     else None
+
+let compatibleModeClasses (left: string) (right: string) =
+    left = right
+    || (Set.ofList [ "bus"; "trolleybus" ] |> fun road -> road.Contains(left) && road.Contains(right))
+
+let structurallyCompatibleRouteLabels (leftRaw: string) (rightRaw: string) =
+    let normalize (value: string) =
+        value.ToUpperInvariant()
+        |> Seq.filter Char.IsLetterOrDigit
+        |> Array.ofSeq
+        |> String
+    let left, right = normalize leftRaw, normalize rightRaw
+    let prefixVariant (shorter: string) (longer: string) =
+        shorter.Length = 1
+        && Char.IsLetter(shorter.[0])
+        && longer.StartsWith(shorter, StringComparison.Ordinal)
+        && longer.[shorter.Length..] |> Seq.forall Char.IsDigit
+    left = right || (left <> "" && right <> "" && (prefixVariant left right || prefixVariant right left))
 
 let haversineMetres lat1 lon1 lat2 lon2 =
     let radians value = value * Math.PI / 180.0
@@ -180,6 +255,25 @@ let csvFields archivePath fileName =
                     if not (isNull fields) && not (fields.Length = 1 && fields.[0] = "") then
                         yield header, fields
     }
+
+let textLines archivePath fileName = seq {
+    let openStream () =
+        if Directory.Exists(archivePath) then
+            let path = Path.Combine(archivePath, fileName)
+            if File.Exists(path) then Some (File.OpenRead(path) :> Stream, None) else None
+        else
+            let archive = ZipFile.OpenRead(archivePath)
+            match archive.Entries |> Seq.tryFind (fun entry -> entry.FullName.Replace('\\', '/').Equals(fileName, StringComparison.OrdinalIgnoreCase)) with
+            | Some entry -> Some (entry.Open(), Some archive)
+            | None -> archive.Dispose(); None
+    match openStream () with
+    | None -> ()
+    | Some (stream, owner) ->
+        use stream = stream
+        use _owner = owner |> Option.map (fun value -> value :> IDisposable) |> Option.toObj
+        use reader = new StreamReader(stream, Encoding.UTF8, true)
+        while not reader.EndOfStream do yield reader.ReadLine()
+}
 
 let csvRows archivePath fileName =
     csvFields archivePath fileName

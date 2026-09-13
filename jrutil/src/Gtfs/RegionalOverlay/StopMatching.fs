@@ -111,7 +111,35 @@ let matchStops ({
             elif candidates.Length > 1 then
                 addDiagnostic prepared.diagnostics "stop_match_ambiguous" sourceGroup.groupId $"{candidates.Length} name/geography candidates"
             else
-                addDiagnostic prepared.diagnostics "stop_match_unresolved" sourceGroup.groupId "No unique name/geography candidate"
+                let coordinateCandidates =
+                    if prepared.policy.source.stopMatch.coordinateIdentityMaximumMetres <= 0.0 || sourcePoints.Length = 0 then [||]
+                    else
+                        nearby.Values
+                        |> Seq.choose (fun target ->
+                            prepared.stopGroupDistance sourceGroup target
+                            |> Option.filter (fun distance -> distance <= prepared.policy.source.stopMatch.coordinateIdentityMaximumMetres)
+                            |> Option.map (fun distance -> target, distance))
+                        |> Seq.sortBy (fun (target, distance) -> distance, target.groupId)
+                        |> Seq.toArray
+                let coordinateMatch =
+                    if coordinateCandidates.Length = 0 then None
+                    elif coordinateCandidates.Length = 1 then Some coordinateCandidates.[0]
+                    else
+                        let bestTarget, bestDistance = coordinateCandidates.[0]
+                        let _, runnerUpDistance = coordinateCandidates.[1]
+                        if runnerUpDistance - bestDistance >= prepared.policy.source.stopMatch.coordinateIdentityMinimumMarginMetres then
+                            Some (bestTarget, bestDistance)
+                        else None
+                match coordinateMatch with
+                | Some (target, distance) ->
+                    stopGroupMatches.[sourceGroup.groupId] <- target.groupId
+                    stopMatchMethods.[sourceGroup.groupId] <- "coordinate_identity_unique"
+                    stopMatchDistances.[sourceGroup.groupId] <- distance
+                    addDiagnostic prepared.diagnostics "stop_coordinate_identity_selected" sourceGroup.groupId $"{sourceGroup.name} -> {target.name} at {distance:F1} m"
+                | None when coordinateCandidates.Length > 0 ->
+                    addDiagnostic prepared.diagnostics "stop_match_ambiguous" sourceGroup.groupId $"No coordinate candidate has the required {prepared.policy.source.stopMatch.coordinateIdentityMinimumMarginMetres:F1} m margin"
+                | None ->
+                    addDiagnostic prepared.diagnostics "stop_match_unresolved" sourceGroup.groupId "No unique name/geography or coordinate-identity candidate"
     logProgress "match-stop-groups" (int64 sourceStopGroups.Length) (Some (int64 sourceStopGroups.Length))
     Log.Information(
         "Regional overlay stop matching: matched_groups={MatchedGroups}; unresolved_or_ambiguous_groups={UnmatchedGroups}",
