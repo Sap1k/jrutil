@@ -66,6 +66,7 @@ type MatchBinding = {
 type OverlaySelection = {
     factKey: string
     sourceId: string
+    sourceIds: string array
     sourceTripId: string
     sourceStopIds: string array
     outputStopIds: string array
@@ -129,6 +130,8 @@ type TripSlice = {
 
 type SourceTripProjection = {
     sourceId: string
+    sourceIds: string array
+    sourceTripReferences: (string * string) array
     sourceTripId: string
     sourceRouteId: string
     targetRouteId: string

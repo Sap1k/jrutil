@@ -187,59 +187,61 @@ let write ({
                 for slice in slices do
                     match slice.selection with
                     | Some selection ->
+                        let provenanceSources = String.concat ";" selection.sourceIds
                         selection.outputShapeId
                         |> Option.iter (fun value ->
-                            writeSelectedField [| slice.trip.id; "shape_id"; prepared.binding.sourceId; value; (capability prepared.policy "shapes").mode |])
+                            writeSelectedField [| slice.trip.id; "shape_id"; provenanceSources; value; (capability prepared.policy "shapes").mode |])
                         for index in 0 .. selection.outputStopIds.Length - 1 do
                             if not (String.IsNullOrEmpty(selection.outputStopIds.[index])) then
                                 writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "stop_id"; prepared.binding.sourceId
+                                    slice.trip.id + "#" + string (index + 1); "stop_id"; provenanceSources
                                     selection.outputStopIds.[index]; (capability prepared.policy "call_boarding_points").mode
                                 |]
                             selection.distances.[index]
                             |> Option.iter (fun value ->
                                 writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "shape_dist_traveled"; prepared.binding.sourceId
+                                    slice.trip.id + "#" + string (index + 1); "shape_dist_traveled"; provenanceSources
                                     value.ToString("G29", CultureInfo.InvariantCulture); (capability prepared.policy "shapes").mode
                                 |])
                             selection.arrivals.[index]
                             |> Option.iter (fun value ->
                                 writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "arrival_time"; prepared.binding.sourceId
+                                    slice.trip.id + "#" + string (index + 1); "arrival_time"; provenanceSources
                                     value; (capability prepared.policy "schedules").mode
                                 |])
                             selection.departures.[index]
                             |> Option.iter (fun value ->
                                 writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "departure_time"; prepared.binding.sourceId
+                                    slice.trip.id + "#" + string (index + 1); "departure_time"; provenanceSources
                                     value; (capability prepared.policy "schedules").mode
                                 |])
                     | None -> ()
             | _ -> ()
         for addition in projection.sourceTripAdditions do
+            let additionSource = addition.projection.sourceId
             addition.trip.shapeId
             |> Option.iter (fun value ->
-                writeSelectedField [| addition.trip.id; "shape_id"; prepared.binding.sourceId; value; (capability prepared.policy "shapes").mode |])
+                writeSelectedField [| addition.trip.id; "shape_id"; additionSource; value; (capability prepared.policy "shapes").mode |])
             for index in 0 .. addition.projection.sourceCalls.Length - 1 do
                 let call = addition.projection.sourceCalls.[index]
                 let outputStopId = projection.outputStopForSource.[call.stopId]
                 writeSelectedField [|
-                    addition.trip.id + "#" + string (index + 1); "stop_id"; prepared.binding.sourceId
+                    addition.trip.id + "#" + string (index + 1); "stop_id"; additionSource
                     outputStopId; (capability prepared.policy "call_boarding_points").mode
                 |]
                 if addition.trip.shapeId.IsSome then
                     call.distance
                     |> Option.iter (fun value ->
                         writeSelectedField [|
-                            addition.trip.id + "#" + string (index + 1); "shape_dist_traveled"; prepared.binding.sourceId
+                            addition.trip.id + "#" + string (index + 1); "shape_dist_traveled"; additionSource
                             value.ToString("G29", CultureInfo.InvariantCulture); (capability prepared.policy "shapes").mode
                         |])
                 writeSelectedField [|
-                    addition.trip.id + "#" + string (index + 1); "arrival_time"; prepared.binding.sourceId
+                    addition.trip.id + "#" + string (index + 1); "arrival_time"; additionSource
                     call.arrival; (capability prepared.policy "schedules").mode
                 |]
                 writeSelectedField [|
-                    addition.trip.id + "#" + string (index + 1); "departure_time"; prepared.binding.sourceId
+                    addition.trip.id + "#" + string (index + 1); "departure_time"; additionSource
                     call.departure; (capability prepared.policy "schedules").mode
                 |]
         let routeColumns = columnsOf prepared.baseGtfs "routes.txt"
@@ -259,7 +261,8 @@ let write ({
                                     let values = sourceRows |> Seq.map (fun source -> rowValue source column) |> Seq.filter (String.IsNullOrWhiteSpace >> not) |> Seq.distinct |> Seq.toArray
                                     if values.Length = 1 then
                                         row.[column] <- values.[0]
-                                        writeSelectedField [| routeId; column; prepared.binding.sourceId; values.[0]; (capability prepared.policy capabilityName).mode |]
+                                        let sources = sourceRows |> Seq.filter (fun source -> rowValue source column = values.[0]) |> Seq.map (sourceIdentity prepared.binding.sourceId) |> Seq.distinct |> Seq.sort |> String.concat ";"
+                                        writeSelectedField [| routeId; column; sources; values.[0]; (capability prepared.policy capabilityName).mode |]
                                     elif values.Length > 1 then
                                         addDiagnostic prepared.diagnostics "route_display_conflict" routeId $"Conflicting {column} values"
                         | _ -> ()
@@ -274,7 +277,8 @@ let write ({
                         if not (source.agencies.ContainsKey(sourceAgencyId)) then
                             let missingAgencyRouteId = rowValue sourceRoute "route_id"
                             invalidOp $"Source-native route {missingAgencyRouteId} refers to missing agency {sourceAgencyId}"
-                        let outputAgencyId = sourceAgencyOutputId prepared.binding.sourceId sourceAgencyId
+                        let sourceId = sourceIdentity prepared.binding.sourceId sourceRoute
+                        let outputAgencyId = sourceAgencyOutputId sourceId (originalIdentity "agency_id" sourceRoute)
                         row.["agency_id"] <- outputAgencyId
                         usedAgencyIds.Add(outputAgencyId) |> ignore
                         if not (sourceNativeAgencyRows.ContainsKey(outputAgencyId)) then
@@ -292,6 +296,40 @@ let write ({
 
         let baseStopRowsById = prepared.baseStopRows |> Array.map (fun row -> rowValue row "stop_id", row) |> dict
         let sourceStopByOutput = projection.outputStopForSource |> Seq.map (fun pair -> pair.Value, pair.Key) |> dict
+        let sourcesForPlace targetPlace =
+            source.stopGroups
+            |> Seq.choose (fun group ->
+                match source.stopGroupMatches.TryGetValue(group.groupId) with
+                | true, mapped when mapped = targetPlace -> Some (sourceIdentity prepared.binding.sourceId group.members.[0])
+                | _ -> None)
+            |> Seq.distinct
+            |> Seq.sort
+            |> String.concat ";"
+        let regionalZonesByPlace = Dictionary<string, string array>(StringComparer.Ordinal)
+        if enabled prepared.policy "stop_zones" then
+            for group in source.stopGroups do
+                if sourceIdentity prepared.binding.sourceId group.members.[0] = "ids-jmk-gtfs" then
+                    let targetPlace =
+                        match source.stopGroupMatches.TryGetValue(group.groupId) with
+                        | true, value -> Some value
+                        | _ -> source.mappedPlaceBySourceStop |> Map.tryFind (rowValue group.members.[0] "stop_id")
+                    match targetPlace with
+                    | Some targetPlace ->
+                        let zones = group.members |> Array.map (fun row -> rowValue row "zone_id") |> Array.filter (String.IsNullOrWhiteSpace >> not) |> Array.distinct |> Array.sort
+                        if zones.Length > 0 then regionalZonesByPlace.[targetPlace] <- zones
+                    | _ -> ()
+        let outputZoneIdentity code = "overlay:ids-jmk-gtfs:zone:" + (sha256Text code).Substring(0, 16)
+        let isUsedPlace targetPlace =
+            usedStopIds.Contains(targetPlace)
+            || (projection.outputStopForSource
+                |> Seq.exists (fun pair ->
+                    usedStopIds.Contains(pair.Value)
+                    && (source.mappedPlaceBySourceStop |> Map.tryFind pair.Key) = Some targetPlace))
+        let setUniqueZone targetPlace (row: CsvRow) =
+            let existing = optionText (rowValue row "zone_id") |> Option.toArray
+            let regional = match regionalZonesByPlace.TryGetValue(targetPlace) with | true, values -> values |> Array.map outputZoneIdentity | _ -> [||]
+            let effective = Array.append existing regional |> Array.distinct
+            row.["zone_id"] <- if effective.Length = 1 then effective.[0] else ""
         let parentIds =
             usedStopIds
             |> Seq.choose (fun stopId ->
@@ -312,6 +350,7 @@ let write ({
                 group.lat |> Option.iter (fun value -> row.["stop_lat"] <- value.ToString("G29", CultureInfo.InvariantCulture))
                 group.lon |> Option.iter (fun value -> row.["stop_lon"] <- value.ToString("G29", CultureInfo.InvariantCulture))
                 row.["location_type"] <- "1"
+                setUniqueZone outputPlaceId row
                 sourceNativeParentRows.Add(row)
         let newPostRows = ResizeArray<CsvRow>()
         for sourceStopId in projection.acceptedSourceStopIds |> Set.toArray |> Array.sort do
@@ -334,6 +373,7 @@ let write ({
                 row.["parent_station"] <- targetParent
                 row.["wheelchair_boarding"] <- rowValue sourceRow "wheelchair_boarding"
                 row.["platform_code"] <- rowValue sourceRow "platform_code"
+                setUniqueZone targetParent row
                 newPostRows.Add(row)
             | _ -> ()
         let outputStopRows =
@@ -342,9 +382,10 @@ let write ({
                     let stopId = rowValue baseRow "stop_id"
                     if usedStopIds.Contains(stopId) then
                         let row = cloneRow baseRow
+                        setUniqueZone stopId row
                         if source.authoritativeGtfsStopCorrections.ContainsKey(stopId) then
                             row.["stop_name"] <- source.authoritativeGtfsStopCorrections.[stopId].name
-                            writeSelectedField [| stopId; "stop_name"; prepared.binding.sourceId; row.["stop_name"]; "authoritative_approximate_correction" |]
+                            writeSelectedField [| stopId; "stop_name"; sourcesForPlace stopId; row.["stop_name"]; "authoritative_approximate_correction" |]
                         match projection.outputParentCoordinates.TryGetValue(stopId) with
                         | true, coordinates ->
                             let unique = coordinates |> Seq.distinct |> Seq.toArray
@@ -352,13 +393,14 @@ let write ({
                                 let lat, lon = unique.[0]
                                 row.["stop_lat"] <- lat.ToString("G29", CultureInfo.InvariantCulture)
                                 row.["stop_lon"] <- lon.ToString("G29", CultureInfo.InvariantCulture)
-                                writeSelectedField [| stopId; "stop_lat,stop_lon"; prepared.binding.sourceId; row.["stop_lat"] + "," + row.["stop_lon"]; (capability prepared.policy "stop_coordinates").mode |]
+                                writeSelectedField [| stopId; "stop_lat,stop_lon"; sourcesForPlace stopId; row.["stop_lat"] + "," + row.["stop_lon"]; (capability prepared.policy "stop_coordinates").mode |]
                             elif unique.Length > 1 then addDiagnostic prepared.diagnostics "stop_coordinate_conflict" stopId "Multiple authoritative coordinates"
                         | _ -> ()
                         yield row
                 yield! sourceNativeParentRows
                 yield! newPostRows
             }
+            |> Seq.distinctBy (fun row -> rowValue row "stop_id")
             |> Seq.sortBy (fun row -> rowValue row "stop_id")
             |> Seq.toArray
         writeRows (Path.Combine(gtfsOutput, "stops.txt")) stopColumns outputStopRows
@@ -416,7 +458,7 @@ let write ({
                 slices
                 |> Array.choose (fun slice ->
                     match slice.selection with
-                    | Some selected when selectionKey (Some selected) = selectionKey (Some bindingSelection) ->
+                    | Some selected when projection.selectionsCompatible selected bindingSelection ->
                         let dates = dateIntersection matchBinding.dates slice.dates
                         if anyDate dates then Some (slice, dates) else None
                     | _ -> None)
@@ -530,7 +572,7 @@ let write ({
                         row.["route_id"] <- outputRouteId
                         row.["cis_line_id"] <- cisLineId
                         row.["public_line_number"] <- rowValue sourceRoute "route_short_name"
-                        row.["source_provenance"] <- prepared.binding.sourceId
+                        row.["source_provenance"] <- sourceIdentity prepared.binding.sourceId sourceRoute
                         yield row
             }
             |> Seq.sortBy (fun row -> rowValue row "route_id")
@@ -553,9 +595,9 @@ let write ({
                 let row = CsvRow(StringComparer.Ordinal)
                 for column in columnsOf prepared.baseExtensions "cz_trips.txt" do row.[column] <- ""
                 row.["trip_id"] <- addition.trip.id
-                row.["cis_line_id"] <- addition.projection.cisLineId
-                row.["source_trip_ids"] <- prepared.binding.sourceId + ":" + addition.projection.sourceTripId
-                row.["coverage_sources"] <- prepared.binding.sourceId
+                row.["cis_line_id"] <- if addition.projection.cisLineId.StartsWith("source:", StringComparison.Ordinal) then "" else addition.projection.cisLineId
+                row.["source_trip_ids"] <- addition.projection.sourceTripReferences |> Array.map (fun (sourceId, tripId) -> sourceId + ":" + tripId) |> String.concat ";"
+                row.["coverage_sources"] <- String.concat ";" addition.projection.sourceIds
                 yield row
         }
         writeRows (Path.Combine(extensionsOutput, "cz_trips.txt")) (columnsOf prepared.baseExtensions "cz_trips.txt") outputCzTripRows
@@ -570,7 +612,7 @@ let write ({
                 row.["stop_id"] <- outputPlaceId
                 row.["stop_place_id"] <- outputPlaceId
                 row.["asw_id"] <- group.members |> Array.map (fun memberRow -> rowValue memberRow prepared.policy.source.stopMatch.groupColumn) |> Array.distinct |> String.concat ";"
-                row.["source_ids"] <- group.members |> Array.map (fun memberRow -> prepared.binding.sourceId + ":" + rowValue memberRow "stop_id") |> String.concat ";"
+                row.["source_ids"] <- group.members |> Array.map (fun memberRow -> sourceIdentity prepared.binding.sourceId memberRow + ":" + originalIdentity "stop_id" memberRow) |> String.concat ";"
                 outputCzStopRows.Add(row)
         for sourceStopId in projection.acceptedSourceStopIds |> Set.toArray |> Array.sort do
             match projection.outputStopForSource.TryGetValue(sourceStopId) with
@@ -579,20 +621,44 @@ let write ({
                 for column in columnsOf prepared.baseExtensions "cz_stops.txt" do row.[column] <- ""
                 row.["stop_id"] <- outputStopId
                 row.["stop_place_id"] <- source.mappedPlaceBySourceStop.[sourceStopId]
-                row.["post_id"] <- optionText (rowValue projection.sourceStops.[sourceStopId] prepared.policy.source.stopMatch.postColumn) |> Option.defaultValue sourceStopId
+                row.["post_id"] <- optionText (rowValue projection.sourceStops.[sourceStopId] prepared.policy.source.stopMatch.postColumn) |> Option.defaultValue (originalIdentity "stop_id" projection.sourceStops.[sourceStopId])
                 row.["asw_id"] <- rowValue projection.sourceStops.[sourceStopId] prepared.policy.source.stopMatch.groupColumn
-                row.["source_ids"] <- prepared.binding.sourceId + ":" + sourceStopId
+                row.["source_ids"] <- sourceIdentity prepared.binding.sourceId projection.sourceStops.[sourceStopId] + ":" + originalIdentity "stop_id" projection.sourceStops.[sourceStopId]
                 outputCzStopRows.Add(row)
             | _ -> ()
         outputCzStopRows
+        |> Seq.distinctBy (fun row -> rowValue row "stop_id")
         |> Seq.sortBy (fun row -> rowValue row "stop_id")
         |> writeRows (Path.Combine(extensionsOutput, "cz_stops.txt")) (columnsOf prepared.baseExtensions "cz_stops.txt")
 
         let stopZonePath = Path.Combine(prepared.baseExtensions, "cz_stop_zones.txt")
         if File.Exists(stopZonePath) then
-            csvRows prepared.baseExtensions "cz_stop_zones.txt"
-            |> Seq.filter (fun row -> usedStopIds.Contains(rowValue row "stop_place_id") && usedRouteIds.Contains(rowValue row "route_id"))
-            |> writeRows (Path.Combine(extensionsOutput, "cz_stop_zones.txt")) (columnsOf prepared.baseExtensions "cz_stop_zones.txt")
+            let stopZoneColumns =
+                seq {
+                    yield! columnsOf prepared.baseExtensions "cz_stop_zones.txt"
+                    yield! [ "stop_place_id"; "zone_id"; "zone_code"; "route_id"; "ids_system_id"; "source_provenance" ]
+                }
+                |> Seq.distinct
+                |> Seq.toArray
+            seq {
+                yield!
+                    csvRows prepared.baseExtensions "cz_stop_zones.txt"
+                    |> Seq.filter (fun row -> usedStopIds.Contains(rowValue row "stop_place_id") && (String.IsNullOrWhiteSpace(rowValue row "route_id") || usedRouteIds.Contains(rowValue row "route_id")))
+                for KeyValue(stopPlaceId, zones) in regionalZonesByPlace do
+                    if isUsedPlace stopPlaceId then
+                        for code in zones do
+                            let row = CsvRow(StringComparer.Ordinal)
+                            for column in stopZoneColumns do row.[column] <- ""
+                            row.["stop_place_id"] <- stopPlaceId
+                            row.["zone_id"] <- outputZoneIdentity code
+                            row.["zone_code"] <- code
+                            row.["ids_system_id"] <- "ids-jmk"
+                            row.["source_provenance"] <- "ids-jmk-gtfs"
+                            yield row
+            }
+            |> Seq.distinctBy (fun row -> String.concat "\u001f" [ rowValue row "stop_place_id"; rowValue row "zone_id"; rowValue row "route_id"; rowValue row "ids_system_id" ])
+            |> Seq.sortBy (fun row -> rowValue row "stop_place_id", rowValue row "zone_id", rowValue row "route_id")
+            |> writeRows (Path.Combine(extensionsOutput, "cz_stop_zones.txt")) stopZoneColumns
         let tripStopZonePath = Path.Combine(prepared.baseExtensions, "cz_trip_stop_zones.txt")
         if File.Exists(tripStopZonePath) then
             seq {
@@ -650,6 +716,38 @@ let write ({
             selectedShapes = manifestShapeCount
             selectedTransfers = manifestTransferCount
         }
+        let perSourceCounts =
+            let sourceIds =
+                source.tripRows
+                |> Seq.map (sourceIdentity prepared.binding.sourceId)
+                |> Seq.distinct
+                |> Seq.sort
+                |> Seq.toArray
+            sourceIds
+            |> Array.map (fun sourceId ->
+                let active = activeSourceTrips |> Array.filter (fun row -> sourceIdentity prepared.binding.sourceId row = sourceId)
+                let matched =
+                    matchedSourceTripSet
+                    |> Seq.filter (fun tripId -> source.tripsById.ContainsKey(tripId) && sourceIdentity prepared.binding.sourceId source.tripsById.[tripId] = sourceId)
+                    |> Seq.length
+                let ambiguous =
+                    matches.unresolvedPending
+                    |> Seq.map (fun value -> value.sourceTripId)
+                    |> Seq.filter (fun tripId -> source.tripsById.ContainsKey(tripId) && sourceIdentity prepared.binding.sourceId source.tripsById.[tripId] = sourceId)
+                    |> Seq.filter (fullyCoveredSourceTrips.Contains >> not)
+                    |> Seq.distinct
+                    |> Seq.length
+                let groups = source.stopGroups |> Array.filter (fun group -> sourceIdentity prepared.binding.sourceId group.members.[0] = sourceId)
+                let matchedGroups = groups |> Array.filter (fun group -> source.stopGroupMatches.ContainsKey(group.groupId)) |> Array.length
+                let item = Dictionary<string, obj>()
+                item.["source_id"] <- box sourceId
+                item.["matched_source_trips"] <- box matched
+                item.["unmatched_source_trips"] <- box (max 0 (active.Length - matched))
+                item.["ambiguous_source_trips"] <- box ambiguous
+                item.["matched_stop_groups"] <- box matchedGroups
+                item.["unmatched_stop_groups"] <- box (groups.Length - matchedGroups)
+                item.["selected_shapes"] <- box (projection.outputShapeBySource |> Seq.filter (fun pair -> pair.Key.StartsWith(sourceId + ":", StringComparison.Ordinal)) |> Seq.length)
+                item :> obj)
         projection.selectionByBinding.Clear()
         matches.bindings.Clear()
         source.stopInferenceEvidence.Clear()
@@ -675,14 +773,22 @@ let write ({
         logProgress "copy-base-evidence" copiedEvidenceFiles (Some copiedEvidenceFiles)
         let policyOutput = Path.Combine(temporary, "policy")
         Directory.CreateDirectory(policyOutput) |> ignore
-        File.Copy(prepared.policyPath, Path.Combine(policyOutput, "overlay-policy.json"), false)
+        let multiSourceMetadataPath = Path.Combine(prepared.binding.payloadPath, "overlay_sources.json")
+        let isMultiSource = File.Exists(multiSourceMetadataPath)
+        if isMultiSource then
+            copyDirectory (Path.Combine(prepared.binding.payloadPath, "_overlay", "policies")) policyOutput
+        else
+            File.Copy(prepared.policyPath, Path.Combine(policyOutput, "overlay-policy.json"), false)
         for configuredPath in [ prepared.policy.source.overrides.routes; prepared.policy.source.overrides.trips; prepared.policy.source.overrides.stops ] do
             match parseOverridePath prepared.policyPath configuredPath with
             | Some path -> File.Copy(path, Path.Combine(policyOutput, Path.GetFileName(path)), false)
             | None -> ()
         let sourceMetadata = Path.Combine(temporary, "source-metadata")
         Directory.CreateDirectory(sourceMetadata) |> ignore
-        File.Copy(prepared.binding.descriptorPath, Path.Combine(sourceMetadata, prepared.binding.sourceId + "-descriptor.json"), false)
+        if isMultiSource then
+            copyDirectory (Path.Combine(prepared.binding.payloadPath, "_overlay", "descriptors")) sourceMetadata
+        else
+            File.Copy(prepared.binding.descriptorPath, Path.Combine(sourceMetadata, prepared.binding.sourceId + "-descriptor.json"), false)
 
         let filesToHash =
             Directory.EnumerateFiles(temporary, "*", SearchOption.AllDirectories)
@@ -715,6 +821,7 @@ let write ({
         counts.["matched_source_trips"] <- box manifestMatchedTripCount
         counts.["unmatched_source_trips"] <- box manifestUnmatchedTripCount
         counts.["ambiguous_source_trips"] <- box manifestAmbiguousTripCount
+        if isMultiSource then counts.["per_source"] <- box perSourceCounts
         let sourceManifest = Dictionary<string, obj>()
         sourceManifest.["source_id"] <- box prepared.binding.sourceId
         sourceManifest.["payload_sha256"] <- box prepared.actualSourceHash
@@ -726,14 +833,20 @@ let write ({
         gvd.["end_date"] <- box (dateString prepared.window.endDate)
         let manifest = Dictionary<string, obj>()
         manifest.["bundle_format"] <- box "obehy-jrutil-regional-gtfs-overlay"
-        manifest.["bundle_version"] <- box OverlayBundleVersion
+        manifest.["bundle_version"] <- box (if isMultiSource then MultiSourceOverlayBundleVersion else OverlayBundleVersion)
         manifest.["calibration"] <- box prepared.policy.calibration
         manifest.["audit_date"] <- box (dateString prepared.auditDate)
         manifest.["base_snapshot_date"] <- box (dateString prepared.snapshotDate)
         manifest.["publishable"] <- box (prepared.policy.publicationEnabled && not prepared.policy.calibration)
         manifest.["base_manifest_sha256"] <- box (sha256File (Path.Combine(prepared.baseBundle, "manifest.json")) )
-        manifest.["source"] <- box sourceManifest
-        manifest.["policy_sha256"] <- box (sha256File prepared.policyPath)
+        if isMultiSource then
+            use metadataDocument = JsonDocument.Parse(File.ReadAllText(multiSourceMetadataPath))
+            let metadataRoot = metadataDocument.RootElement
+            manifest.["sources"] <- box (JsonSerializer.Deserialize<obj>(metadataRoot.GetProperty("sources").GetRawText(), jsonOptions))
+            manifest.["policy_sha256"] <- box (metadataRoot.GetProperty("policy_sha256").GetString())
+        else
+            manifest.["source"] <- box sourceManifest
+            manifest.["policy_sha256"] <- box (sha256File prepared.policyPath)
         manifest.["gvd"] <- box gvd
         manifest.["jrutil_commit"] <- box (currentCommit ())
         manifest.["counts"] <- box counts

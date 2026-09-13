@@ -43,6 +43,10 @@ let loadPolicy path =
         invalidArg "--policy" "source.stop_match is required"
     if policy.source.stopMatch.maximumDistanceMetres <= 0.0 then
         invalidArg "--policy" "maximum_distance_metres must be positive"
+    if policy.source.stopMatch.coordinateIdentityMaximumMetres < 0.0 then
+        invalidArg "--policy" "coordinate_identity_maximum_metres must not be negative"
+    if policy.source.stopMatch.coordinateIdentityMinimumMarginMetres < 0.0 then
+        invalidArg "--policy" "coordinate_identity_minimum_margin_metres must not be negative"
     if isNull (box policy.source.stopMatch.contextualInference) then
         invalidArg "--policy" "source.stop_match.contextual_inference is required"
     let contextual = policy.source.stopMatch.contextualInference

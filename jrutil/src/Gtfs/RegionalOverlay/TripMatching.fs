@@ -275,7 +275,7 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
                         addDiagnostic prepared.diagnostics "trip_validity_unresolved" sourceTripId "Signature candidates exist, but none is uniquely active on a shared operating date"
                 for KeyValue(_, (candidate, methodName, dates, runnerMargin)) in assignments do
                     bindings.Add({
-                        sourceId = prepared.binding.sourceId
+                        sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
                         sourceTripId = sourceTripId
                         targetTripId = candidate.tripId
                         dates = dateSets.Intern dates
@@ -290,6 +290,8 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
                         runnerUpMargin = runnerMargin
                         completePattern = candidate.editCount = 0
                     })
+        | (true, sourceActive), _ when anyDate sourceActive ->
+            addDiagnostic prepared.diagnostics "trip_call_pattern_unavailable" sourceTripId "The active source trip has no eligible parsed call pattern"
         | _ -> ()
         matchedSourceTripsProcessed <- matchedSourceTripsProcessed + 1L
         if matchedSourceTripsProcessed % 1000L = 0L then
@@ -341,7 +343,7 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
                 let sourceTripRow = source.tripsById.[pending.sourceTripId]
                 let methodName = pending.routeMethod + "+" + candidate.tier
                 bindings.Add({
-                    sourceId = prepared.binding.sourceId
+                    sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
                     sourceTripId = pending.sourceTripId
                     targetTripId = candidate.tripId
                     dates = dateSets.Intern dates

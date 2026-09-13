@@ -320,18 +320,27 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
     refreshSourceCallPlaces ()
     let tripSetAuthorityModes = prepared.policy.source.tripSetAuthority.modes |> Set.ofArray
     let sourceNativeModes = prepared.policy.source.tripSetAuthority.sourceNativeModes |> Set.ofArray
+    let tripSetAuthorityAllowed (row: CsvRow) mode =
+        match row.TryGetValue("overlay_trip_set_authority_allowed") with
+        | true, value -> value = "1"
+        | _ -> tripSetAuthorityModes.Contains(mode)
+    let sourceNativeAllowed (row: CsvRow) mode =
+        match row.TryGetValue("overlay_source_native_allowed") with
+        | true, value -> value = "1"
+        | _ -> sourceNativeModes.Contains(mode)
     let sourceNativeStopPlaces = Dictionary<string, StopGroup>(StringComparer.Ordinal)
     for sourceTripRow in sourceTripRows do
         let sourceRouteId = rowValue sourceTripRow "route_id"
         let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
-        match routeMatching.cisForSourceTrip sourceTripRow, sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(rowValue sourceTripRow "trip_id") with
-        | Some _, (true, activeDates), (true, calls)
-            when sourceNativeModes.Contains(sourceMode) && anyDate activeDates ->
+        match sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(rowValue sourceTripRow "trip_id") with
+        | (true, activeDates), (true, calls)
+            when sourceNativeAllowed sourceTripRow sourceMode && anyDate activeDates ->
             for call in calls do
                 if not (mappedPlaceBySourceStop.ContainsKey(call.stopId)) then
                     let groupId = sourceGroupByMember.[call.stopId]
-                    let outputPlaceId = sourceStopPlaceId prepared.binding.sourceId groupId
                     let group = sourceStopGroupById.[groupId]
+                    let sourceId = sourceIdentity prepared.binding.sourceId group.members.[0]
+                    let outputPlaceId = sourceStopPlaceId sourceId groupId
                     sourceNativeStopPlaces.[outputPlaceId] <- group
                     stopMatching.stopGroupMatches.[groupId] <- outputPlaceId
                     stopMatching.stopMatchMethods.[groupId] <- "source_native"
@@ -341,9 +350,25 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
     let sourceNativeRoutes = Dictionary<string, CsvRow * string>(StringComparer.Ordinal)
     let authorityCandidates = ResizeArray<string * string * string array * DateSet.Dates * CallValue array * CsvRow>()
     let blockedAuthorityDates = HashSet<struct (string * int)>()
+    let authorityIdentity (sourceTripRow: CsvRow) =
+        match routeMatching.cisForSourceTrip sourceTripRow with
+        | Some cisLineId -> Some (cisLineId, routeMatching.directBaseRoutesForSourceTrip sourceTripRow)
+        | None ->
+            let sourceRouteId = rowValue sourceTripRow "route_id"
+            match routeMatching.routeCandidates.TryGetValue(sourceRouteId) with
+            | true, (routes, "structural_trip_evidence") when routes.Length = 1 ->
+                match prepared.baseCisByRoute.TryGetValue(routes.[0]) with
+                | true, cisLineId -> Some (cisLineId, routes)
+                | _ -> None
+            | _ ->
+                let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
+                if sourceNativeAllowed sourceTripRow sourceMode then
+                    let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                    Some ("source:" + sourceId + ":" + originalIdentity "route_id" sourceRoutes.[sourceRouteId], [||])
+                else None
     let assertedCisBySourceRoute =
         sourceTripRows
-        |> Seq.choose (fun row -> routeMatching.cisForSourceTrip row |> Option.map (fun cis -> rowValue row "route_id", cis))
+        |> Seq.choose (fun row -> authorityIdentity row |> Option.map (fun (cis, _) -> rowValue row "route_id", cis))
         |> Seq.groupBy fst
         |> Seq.map (fun (sourceRouteId, values) -> sourceRouteId, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
         |> dict
@@ -354,15 +379,24 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
         let sourceTripId = rowValue sourceTripRow "trip_id"
         let sourceRouteId = rowValue sourceTripRow "route_id"
         let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
-        if tripSetAuthorityModes.Contains(sourceMode) then
-            match routeMatching.cisForSourceTrip sourceTripRow, sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(sourceTripId) with
-            | Some cisLineId, (true, activeDates), (true, calls) when anyDate activeDates ->
-                let directTargetRoutes = routeMatching.directBaseRoutesForSourceTrip sourceTripRow
+        if tripSetAuthorityAllowed sourceTripRow sourceMode then
+            match authorityIdentity sourceTripRow, sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(sourceTripId) with
+            | Some (cisLineId, directTargetRoutes), (true, activeDates), (true, calls) when anyDate activeDates ->
                 let targetRoutes =
                     if directTargetRoutes.Length = 1
                        && modeClass (rowValue prepared.baseRoutes.[directTargetRoutes.[0]] "route_type") = sourceMode then directTargetRoutes
-                    elif sourceNativeModes.Contains(sourceMode) then
-                        let outputRouteId = sourceRouteOutputId prepared.binding.sourceId sourceRouteId cisLineId
+                    elif directTargetRoutes.Length = 1
+                         && compatibleModeClasses (modeClass (rowValue prepared.baseRoutes.[directTargetRoutes.[0]] "route_type")) sourceMode then
+                        // JDF represents trolleybus service as road/bus. Preserve the
+                        // source mode on a derived route while retaining the proven
+                        // national CIS identity and replacing its baseline dates.
+                        let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                        let outputRouteId = sourceRouteOutputId sourceId (originalIdentity "route_id" sourceRoutes.[sourceRouteId]) cisLineId
+                        sourceNativeRoutes.[outputRouteId] <- sourceRoutes.[sourceRouteId], cisLineId
+                        [| outputRouteId |]
+                    elif sourceNativeAllowed sourceTripRow sourceMode then
+                        let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                        let outputRouteId = sourceRouteOutputId sourceId (originalIdentity "route_id" sourceRoutes.[sourceRouteId]) cisLineId
                         sourceNativeRoutes.[outputRouteId] <- sourceRoutes.[sourceRouteId], cisLineId
                         [| outputRouteId |]
                     else [||]
@@ -374,7 +408,7 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
                 else
                     blockAuthorityDates cisLineId activeDates
                     addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "At least one source call has no resolved stop place"
-            | Some cisLineId, (true, activeDates), _ when anyDate activeDates ->
+            | Some (cisLineId, _), (true, activeDates), _ when anyDate activeDates ->
                 blockAuthorityDates cisLineId activeDates
                 addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The active source trip has no call pattern"
             | None, (true, activeDates), _ when anyDate activeDates ->
@@ -410,7 +444,9 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
             | _ -> ()
             if anyDate dates then
                 Some {
-                    sourceId = prepared.binding.sourceId
+                    sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                    sourceIds = [| sourceIdentity prepared.binding.sourceId sourceTripRow |]
+                    sourceTripReferences = [| sourceIdentity prepared.binding.sourceId sourceTripRow, originalIdentity "trip_id" sourceTripRow |]
                     sourceTripId = sourceTripId
                     sourceRouteId = rowValue sourceTripRow "route_id"
                     targetRouteId = targetRoutes.[0]

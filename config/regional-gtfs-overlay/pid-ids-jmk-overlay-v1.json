@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "calibration": true,
+  "publication_enabled": false,
+  "conflict_policy": "equal_priority_quarantine",
+  "minimum_coverage": {},
+  "sources": [
+    {
+      "source_id": "pid-gtfs",
+      "policy": "pid-overlay-v1.json",
+      "adapter": "pid-v1"
+    },
+    {
+      "source_id": "ids-jmk-gtfs",
+      "policy": "ids-jmk-overlay-v1.json",
+      "adapter": "ids-jmk-v1"
+    }
+  ]
+}

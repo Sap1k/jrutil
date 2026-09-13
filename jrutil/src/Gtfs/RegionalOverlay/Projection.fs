@@ -33,6 +33,7 @@ type Result = {
     outputShapeBySource: Dictionary<string, string>
     shapes: Shapes.Store
     bindingKey: MatchBinding -> string
+    selectionsCompatible: OverlaySelection -> OverlaySelection -> bool
     selectionByBinding: Dictionary<string, OverlaySelection>
     slicesByBaseTrip: Dictionary<string, TripSlice array>
     projectionsBySource: IDictionary<string, SourceTripProjection>
@@ -102,6 +103,22 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
             addDiagnostic prepared.diagnostics "headsign_unresolved" sourceTripId $"Call {sequence}: destination identity is ambiguous or unsupported: {raw}"
         value
     let outputStopForSource = Dictionary<string, string>(StringComparer.Ordinal)
+    let structuralPostIds = Dictionary<string, string>(StringComparer.Ordinal)
+    acceptedSourceStopIds
+    |> Seq.choose (fun sourceStopId ->
+        match source.mappedPlaceBySourceStop |> Map.tryFind sourceStopId with
+        | Some targetPlace when rowValue sourceStops.[sourceStopId] "location_type" <> "1" ->
+            match optionText (rowValue sourceStops.[sourceStopId] "platform_code") with
+            | Some platform -> Some (targetPlace + "\u001f" + platform.Trim().ToUpperInvariant(), sourceStopId)
+            | None -> None
+        | _ -> None)
+    |> Seq.groupBy fst
+    |> Seq.iter (fun (key, values) ->
+        let stops = values |> Seq.map snd |> Seq.toArray
+        let sources = stops |> Array.map (fun stopId -> sourceIdentity prepared.binding.sourceId sourceStops.[stopId]) |> Array.distinct
+        if sources.Length > 1 then
+            let outputId = "overlay:regional-all:post:" + (sha256Text key).Substring(0, 16)
+            for stopId in stops do structuralPostIds.[stopId] <- outputId)
     for sourceStopId in acceptedSourceStopIds do
         match source.mappedPlaceBySourceStop |> Map.tryFind sourceStopId with
         | Some targetPlace ->
@@ -110,7 +127,11 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
                || not (enabled prepared.policy "boarding_points" && enabled prepared.policy "call_boarding_points") then
                 outputStopForSource.[sourceStopId] <- targetPlace
             else
-                outputStopForSource.[sourceStopId] <- sourcePostId prepared.binding.sourceId sourceStopId
+                match structuralPostIds.TryGetValue(sourceStopId) with
+                | true, outputId -> outputStopForSource.[sourceStopId] <- outputId
+                | _ ->
+                    let sourceId = sourceIdentity prepared.binding.sourceId sourceStops.[sourceStopId]
+                    outputStopForSource.[sourceStopId] <- sourcePostId sourceId (originalIdentity "stop_id" sourceStops.[sourceStopId])
         | None -> ()
 
     let selectedShapeIds =
@@ -163,6 +184,7 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
             {
                 factKey = ""
                 sourceId = value.sourceId
+                sourceIds = [| value.sourceId |]
                 sourceTripId = value.sourceTripId
                 sourceStopIds = value.sourceCalls |> Array.map (fun call -> call.stopId)
                 outputStopIds = outputStops
@@ -185,10 +207,43 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
 
     let bindingKey (value: MatchBinding) =
         value.sourceTripId + "\u001f" + value.targetTripId + "\u001f" + value.method + "\u001f" + dateKey value.dates
+    let compatibleValue empty left right = left = empty || right = empty || left = right
+    let compatibleOption (left: 'a option) (right: 'a option) = left.IsNone || right.IsNone || left = right
+    let compatibleSelections (left: OverlaySelection) (right: OverlaySelection) =
+        Array.forall2 (compatibleValue "") left.outputStopIds right.outputStopIds
+        && compatibleOption left.outputShapeId right.outputShapeId
+        && Array.forall2 compatibleOption left.distances right.distances
+        && Array.forall2 compatibleOption left.arrivals right.arrivals
+        && Array.forall2 compatibleOption left.departures right.departures
+    let mergeSelections (values: OverlaySelection array) =
+        let ordered = values |> Array.sortBy (fun value -> value.sourceId, value.sourceTripId)
+        let mergeValue empty (items: 'a array) = items |> Array.tryFind ((<>) empty) |> Option.defaultValue empty
+        let mergeOptions (items: 'a option array) = items |> Array.tryPick id
+        let representative = ordered.[0]
+        let merged = {
+            representative with
+                sourceIds = ordered |> Array.collect (fun value -> value.sourceIds) |> Array.distinct |> Array.sort
+                outputStopIds = Array.init representative.outputStopIds.Length (fun index -> ordered |> Array.map (fun value -> value.outputStopIds.[index]) |> mergeValue "")
+                outputShapeId = ordered |> Array.map (fun value -> value.outputShapeId) |> mergeOptions
+                sourceShapeId = ordered |> Array.map (fun value -> value.sourceShapeId) |> mergeOptions
+                distances = Array.init representative.distances.Length (fun index -> ordered |> Array.map (fun value -> value.distances.[index]) |> mergeOptions)
+                arrivals = Array.init representative.arrivals.Length (fun index -> ordered |> Array.map (fun value -> value.arrivals.[index]) |> mergeOptions)
+                departures = Array.init representative.departures.Length (fun index -> ordered |> Array.map (fun value -> value.departures.[index]) |> mergeOptions)
+        }
+        { merged with factKey = sha256Text (selectionEncoding merged) }
     let selectionByBinding = Dictionary<string, OverlaySelection>(StringComparer.Ordinal)
     for value in matches.bindings do selectionByBinding.[bindingKey value] <- selectionForBinding value
 
     let representedDatesBySourceTrip = Dictionary<string, bool array>(StringComparer.Ordinal)
+    let markRepresented sourceTripId dateIndex =
+        let dates =
+            match representedDatesBySourceTrip.TryGetValue(sourceTripId) with
+            | true, values -> values
+            | _ ->
+                let values = emptyDates prepared.window
+                representedDatesBySourceTrip.[sourceTripId] <- values
+                values
+        dates.[dateIndex] <- true
     let authoritativeClaims = Dictionary<string, System.Collections.BitArray>(StringComparer.Ordinal)
     let projectionsBySource = source.tripProjections |> Array.map (fun projection -> projection.sourceTripId, projection) |> dict
     let bindingsByTarget = matches.bindings |> Seq.groupBy (fun binding -> binding.targetTripId) |> dict
@@ -204,22 +259,33 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
                     | _ -> byDate.[index] <- ResizeArray([| selection |])
         let resolved = Dictionary<int, OverlaySelection>()
         for KeyValue(dateIndex, selections) in byDate do
-            let unique = selections |> Seq.distinctBy (Some >> selectionKey) |> Seq.toArray
-            if unique.Length = 1 then resolved.[dateIndex] <- unique.[0]
+            let claims = selections |> Seq.distinctBy (Some >> selectionKey) |> Seq.toArray
+            let compatible = claims |> Array.allPairs claims |> Array.forall (fun (left, right) -> compatibleSelections left right)
+            if compatible then
+                let merged = mergeSelections claims
+                resolved.[dateIndex] <- merged
+                let sources = merged.sourceIds
+                if sources.Length > 1 then
+                    let sourceList = String.concat ";" sources
+                    addDiagnostic prepared.diagnostics "cross_source_fact_coalesced" targetTripId $"Identical claims from {sourceList} coalesced on {dateString prepared.window.dates.[dateIndex]}"
             else
-                let newestRevision = unique |> Array.map (fun value -> source.revision value.sourceTripId) |> Array.max
-                let newest = unique |> Array.filter (fun value -> source.revision value.sourceTripId = newestRevision)
-                if newest.Length = 1 then
+                let competingSources = claims |> Array.collect (fun value -> value.sourceIds) |> Array.distinct
+                let newestRevision = claims |> Array.map (fun value -> source.revision value.sourceTripId) |> Array.max
+                let newest = claims |> Array.filter (fun value -> source.revision value.sourceTripId = newestRevision)
+                if competingSources.Length = 1 && newest.Length = 1 then
                     resolved.[dateIndex] <- newest.[0]
                     let superseded =
-                        unique
+                        claims
                         |> Array.filter (fun value -> value.sourceTripId <> newest.[0].sourceTripId)
                         |> Array.map (fun value -> value.sourceTripId)
                         |> Array.distinct
                         |> String.concat ";"
                     addDiagnostic prepared.diagnostics "overlay_newer_source_selected" targetTripId $"{dateString prepared.window.dates.[dateIndex]} selected {newest.[0].sourceTripId} over older claims {superseded}"
                 else
-                    addDiagnostic prepared.diagnostics "overlay_fact_conflict" targetTripId $"Conflicting same-revision source facts on {prepared.window.dates.[dateIndex]}"
+                    let sources = competingSources |> Array.sort |> String.concat ";"
+                    let code = if competingSources.Length > 1 then "cross_source_fact_conflict" else "overlay_fact_conflict"
+                    addDiagnostic prepared.diagnostics code targetTripId $"Conflicting claims from {sources} quarantined on {dateString prepared.window.dates.[dateIndex]}; national value retained"
+                    for claim in claims do markRepresented claim.sourceTripId dateIndex
 
         // Partial evidence cannot represent a complete authoritative source instance.
         for binding in bindings do
@@ -251,18 +317,11 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
                 else claimed.[dateIndex] <- true
             | _ -> ()
         for binding in bindings do
-            let fingerprint = selectionKey (Some selectionByBinding.[bindingKey binding])
+            let bindingSelection = selectionByBinding.[bindingKey binding]
             for dateIndex in 0 .. binding.dates.Length - 1 do
                 match resolved.TryGetValue(dateIndex) with
-                | true, accepted when binding.dates.[dateIndex] && selectionKey (Some accepted) = fingerprint ->
-                    let dates =
-                        match representedDatesBySourceTrip.TryGetValue(binding.sourceTripId) with
-                        | true, values -> values
-                        | _ ->
-                            let values = emptyDates prepared.window
-                            representedDatesBySourceTrip.[binding.sourceTripId] <- values
-                            values
-                    dates.[dateIndex] <- true
+                | true, accepted when binding.dates.[dateIndex] && compatibleSelections accepted bindingSelection ->
+                    markRepresented binding.sourceTripId dateIndex
                 | _ -> ()
         resolved
 
@@ -373,6 +432,24 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
                     if represented.[dateIndex] then dates.[dateIndex] <- false
             | _ -> ()
             if anyDate dates then Some { projection with dates = DateSet.Dates.Of dates } else None)
+        |> Array.groupBy (fun projection ->
+            let route = source.routes.[projection.sourceRouteId]
+            String.concat "|" [
+                modeClass (rowValue route "route_type")
+                rowValue route "route_short_name"
+                dateKey projection.dates
+                projection.sourceCalls
+                |> Array.map (fun call -> String.concat "@" [ call.stopPlaceId; call.arrival; call.departure ])
+                |> String.concat ";"
+            ])
+        |> Array.map (fun (_, equivalents) ->
+            let ordered = equivalents |> Array.sortBy (fun value -> value.sourceId, originalIdentity "trip_id" value.sourceRow)
+            let representative = ordered.[0]
+            {
+                representative with
+                    sourceIds = ordered |> Array.collect (fun value -> value.sourceIds) |> Array.distinct |> Array.sort
+                    sourceTripReferences = ordered |> Array.collect (fun value -> value.sourceTripReferences) |> Array.distinct |> Array.sort
+            })
     let sourceTripAdditions =
         pendingSourceTripAdditions
         |> Array.map (fun projection ->
@@ -387,13 +464,22 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
                 trip = {
                     sourceTrip with
                         headsign = Some (fullHeadsign projection.sourceTripId -1 (sourceTrip.headsign |> Option.defaultValue ""))
-                        id = addedSourceTripId prepared.binding.sourceId projection.sourceTripId projection.dates
+                        id = addedSourceTripId projection.sourceId (originalIdentity "trip_id" projection.sourceRow) projection.dates
                         routeId = projection.targetRouteId
                         serviceId = outputServiceId
                         shapeId = outputShapeId
                 }
             })
-    let sourceTripAdditionsBySourceId = sourceTripAdditions |> Array.map (fun value -> value.projection.sourceTripId, value) |> dict
+    let sourceTripAdditionsBySourceId = Dictionary<string, SourceTripAddition>(StringComparer.Ordinal)
+    let internalTripIdsByReference =
+        source.tripProjections
+        |> Seq.map (fun value -> (value.sourceId, originalIdentity "trip_id" value.sourceRow), value.sourceTripId)
+        |> dict
+    for addition in sourceTripAdditions do
+        for reference in addition.projection.sourceTripReferences do
+            match internalTripIdsByReference.TryGetValue(reference) with
+            | true, sourceTripId -> sourceTripAdditionsBySourceId.[sourceTripId] <- addition
+            | _ -> ()
     prepared.baseDates.Clear()
     logProgress "release-slicing-indexes" 1L (Some 1L)
 
@@ -429,6 +515,7 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
         outputShapeBySource = outputShapeBySource
         shapes = shapes
         bindingKey = bindingKey
+        selectionsCompatible = compatibleSelections
         selectionByBinding = selectionByBinding
         slicesByBaseTrip = slicesByBaseTrip
         projectionsBySource = projectionsBySource

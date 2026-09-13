@@ -81,10 +81,12 @@ let write ({
     writeValues (Path.Combine(temporary, "mappings", "source_to_output_stops.csv"))
         [| "source_id"; "source_stop_id"; "output_stop_id"; "target_stop_place_id"; "method" |]
         (projection.acceptedSourceStopIds
+         |> Seq.filter (fun sourceStopId -> usedStopIds.Contains(projection.outputStopForSource.[sourceStopId]))
          |> Seq.sort
          |> Seq.map (fun sourceStopId ->
              let groupId = source.groupByMember.[sourceStopId]
-             [| prepared.binding.sourceId; sourceStopId; projection.outputStopForSource.[sourceStopId]; source.mappedPlaceBySourceStop.[sourceStopId]; source.stopMatchMethods.[groupId] |]))
+             let sourceRow = projection.sourceStops.[sourceStopId]
+             [| sourceIdentity prepared.binding.sourceId sourceRow; originalIdentity "stop_id" sourceRow; projection.outputStopForSource.[sourceStopId]; source.mappedPlaceBySourceStop.[sourceStopId]; source.stopMatchMethods.[groupId] |]))
     writeValues (Path.Combine(temporary, "reports", "post_pruning.csv"))
         [| "source_stop_id"; "output_post_id"; "disposition" |]
         (projection.outputStopForSource
@@ -140,32 +142,58 @@ let write ({
                 for slice, sharedDates in slicesForBinding matchBinding do
                     for firstDate, lastDate in dateRanges sharedDates do
                         yield [|
-                            prepared.binding.sourceId; matchBinding.sourceTripId; matchBinding.targetTripId; slice.trip.id
+                            matchBinding.sourceId; originalIdentity "trip_id" source.tripsById.[matchBinding.sourceTripId]; matchBinding.targetTripId; slice.trip.id
                             dateString firstDate; dateString lastDate; matchBinding.method; string matchBinding.editCount
                             string matchBinding.firstDepartureDelta; string matchBinding.aggregateTimeDelta; string matchBinding.durationDelta
                             matchBinding.runnerUpMargin |> Option.map string |> Option.defaultValue ""
                         |]
             for addition in projection.sourceTripAdditions do
-                for firstDate, lastDate in dateRanges addition.projection.dates do
-                    yield [|
-                        prepared.binding.sourceId; addition.projection.sourceTripId; ""; addition.trip.id
-                        dateString firstDate; dateString lastDate; "authoritative_source_trip_set"; ""
-                        ""; ""; ""; ""
-                    |]
+                for sourceId, sourceTripId in addition.projection.sourceTripReferences do
+                    for firstDate, lastDate in dateRanges addition.projection.dates do
+                        yield [|
+                            sourceId; sourceTripId; ""; addition.trip.id
+                            dateString firstDate; dateString lastDate; "authoritative_source_trip_set"; ""
+                            ""; ""; ""; ""
+                        |]
         }
+        |> Seq.distinctBy (fun row -> String.concat "\u001f" row)
+        |> Seq.toArray
     writeValues (Path.Combine(temporary, "mappings", "source_to_output_trips.csv"))
         [| "source_id"; "source_trip_id"; "base_trip_id"; "output_trip_id"; "valid_from"; "valid_to"; "method"; "pattern_edits"; "first_departure_delta_seconds"; "aggregate_time_delta_seconds"; "duration_delta_seconds"; "runner_up_margin" |]
         sourceTripMappings
+    let outputRangesBySourceTrip =
+        sourceTripMappings
+        |> Array.groupBy (fun row -> struct (row.[0], row.[1]))
+        |> dict
+    let operationalCandidates =
+        csvRows prepared.binding.payloadPath "operational_trip_candidates.txt"
+        |> Seq.filter (fun row -> source.tripsById.ContainsKey(rowValue row "trip_id"))
+        |> Seq.collect (fun row ->
+            let key = struct (rowValue row "source_id", rowValue row "original_trip_id")
+            match outputRangesBySourceTrip.TryGetValue(key) with
+            | true, ranges ->
+                ranges
+                |> Seq.map (fun mapping -> [|
+                    rowValue row "source_id"; rowValue row "operational_line_id"; rowValue row "operational_trip_id"
+                    rowValue row "original_trip_id"; mapping.[4]; mapping.[5]
+                |])
+            | _ -> Seq.empty)
+        |> Seq.distinctBy (fun row -> String.concat "\u001f" row)
+    writeValues (Path.Combine(temporary, "mappings", "operational_to_source_trips.csv"))
+        [| "source_id"; "operational_line_id"; "operational_trip_id"; "source_trip_id"; "valid_from"; "valid_to" |]
+        operationalCandidates
     let sourceRouteMappings =
         Seq.append
             (matches.bindings
              |> Seq.map (fun value ->
                  let sourceRouteId = rowValue source.tripsById.[value.sourceTripId] "route_id"
                  let targetRouteId = prepared.baseTrips.[value.targetTripId].routeId
-                 [| prepared.binding.sourceId; sourceRouteId; targetRouteId; value.method |]))
+                 let sourceRow = source.routes.[sourceRouteId]
+                 [| value.sourceId; originalIdentity "route_id" sourceRow; targetRouteId; value.method |]))
             (projection.sourceTripAdditions
-             |> Seq.map (fun value ->
-                 [| prepared.binding.sourceId; value.projection.sourceRouteId; value.trip.routeId; "authoritative_source_trip_set" |]))
+             |> Seq.collect (fun value ->
+                 value.projection.sourceIds
+                 |> Seq.map (fun sourceId -> [| sourceId; originalIdentity "route_id" source.routes.[value.projection.sourceRouteId]; value.trip.routeId; "authoritative_source_trip_set" |])))
         |> Seq.distinctBy (fun row -> String.concat "\u001f" row)
 
     writeValues (Path.Combine(temporary, "mappings", "source_to_output_routes.csv"))
@@ -181,7 +209,9 @@ let write ({
             let seen = HashSet<struct (int * string * string * int * string)>()
             let emit sourceOrdinal sourceStop outputTrip outputOrdinal outputStop =
                 if seen.Add(struct (sourceOrdinal, sourceStop, outputTrip, outputOrdinal, outputStop)) then
-                    Some [| prepared.binding.sourceId; sourceTripId; string sourceOrdinal; sourceStop; outputTrip; string outputOrdinal; outputStop |]
+                    let tripRow = source.tripsById.[sourceTripId]
+                    let stopRow = projection.sourceStops.[sourceStop]
+                    Some [| sourceIdentity prepared.binding.sourceId tripRow; originalIdentity "trip_id" tripRow; string sourceOrdinal; originalIdentity "stop_id" stopRow; outputTrip; string outputOrdinal; outputStop |]
                 else None
             match bindingsBySource.TryGetValue(sourceTripId) with
             | true, bindings ->
@@ -199,8 +229,9 @@ let write ({
             | _ -> ()
             match projection.sourceTripAdditionsBySourceId.TryGetValue(sourceTripId) with
             | true, addition ->
-                for sourceIndex in 0 .. addition.projection.sourceCalls.Length - 1 do
-                    let call = addition.projection.sourceCalls.[sourceIndex]
+                let sourceProjection = projection.projectionsBySource.[sourceTripId]
+                for sourceIndex in 0 .. sourceProjection.sourceCalls.Length - 1 do
+                    let call = sourceProjection.sourceCalls.[sourceIndex]
                     match emit (sourceIndex + 1) call.stopId addition.trip.id (sourceIndex + 1) projection.outputStopForSource.[call.stopId] with
                     | Some row -> yield row
                     | None -> ()
@@ -225,9 +256,12 @@ let write ({
             for dateIndex in 0 .. sharedDates.Length - 1 do
                 if sharedDates.[dateIndex] then acceptDate matchBinding.sourceTripId dateIndex
     for addition in projection.sourceTripAdditions do
-        for dateIndex in 0 .. addition.projection.dates.Length - 1 do
-            if addition.projection.dates.[dateIndex] then
-                acceptDate addition.projection.sourceTripId dateIndex
+        for sourceId, originalTripId in addition.projection.sourceTripReferences do
+            source.tripProjections
+            |> Array.tryFind (fun value -> value.sourceId = sourceId && originalIdentity "trip_id" value.sourceRow = originalTripId)
+            |> Option.iter (fun sourceProjection ->
+                for dateIndex in 0 .. sourceProjection.dates.Length - 1 do
+                    if sourceProjection.dates.[dateIndex] then acceptDate sourceProjection.sourceTripId dateIndex)
     let acceptedDates =
         acceptedDateBuilders
         |> Seq.map (fun pair ->
@@ -270,6 +304,66 @@ let write ({
          |])
          |> Seq.distinctBy (fun row -> String.concat "\u001f" row))
     logProgress "write-diagnostics" 0L None
+    let unmatchedTripCodes =
+        Set.ofList [
+            "trip_call_pattern_unavailable"; "trip_stop_unresolved"; "trip_route_candidate_unresolved"; "trip_signature_unresolved"
+            "trip_validity_unresolved"; "trip_same_date_ambiguous"; "base_snapshot_gap"
+            "base_snapshot_capacity_gap"
+        ]
+    let sourceTripRowsById = source.tripRows |> Array.map (fun row -> rowValue row "trip_id", row) |> dict
+    let matchedTripIds = matches.bindings |> Seq.map (fun value -> value.sourceTripId) |> Set.ofSeq
+    let projectedTripIds = source.tripProjections |> Seq.map (fun value -> value.sourceTripId) |> Set.ofSeq
+    let sourceNativeTripIds =
+        projection.sourceTripAdditions
+        |> Seq.filter (fun value -> value.projection.cisLineId.StartsWith("source:", StringComparison.Ordinal))
+        |> Seq.map (fun value -> value.projection.sourceTripId)
+        |> Set.ofSeq
+    let unmatchedDiagnostics =
+        prepared.diagnostics.Rows
+        |> Seq.filter (fun value -> unmatchedTripCodes.Contains(value.code) && sourceTripRowsById.ContainsKey(value.sourceObjectId))
+        |> Seq.toArray
+    let diagnosedTripIds = unmatchedDiagnostics |> Seq.map (fun value -> value.sourceObjectId) |> Set.ofSeq
+    let activeUnrepresentedTrips =
+        source.tripRows
+        |> Seq.filter (fun row ->
+            let sourceTripId = rowValue row "trip_id"
+            match source.dates.TryGetValue(rowValue row "service_id") with
+            | true, dates -> anyDate dates && not (acceptedDates.ContainsKey(sourceTripId)) && not (diagnosedTripIds.Contains(sourceTripId))
+            | _ -> false)
+    writeValues (Path.Combine(temporary, "reports", "unmatched_trip_reasons.csv"))
+        [| "source_id"; "source_trip_id"; "source_route_id"; "mode"; "reason_code"; "disposition"; "message" |]
+        (Seq.append
+          (unmatchedDiagnostics
+           |> Seq.map (fun value ->
+             let row = sourceTripRowsById.[value.sourceObjectId]
+             let sourceRouteId = rowValue row "route_id"
+             let disposition =
+                 if sourceNativeTripIds.Contains(value.sourceObjectId) then "source_native_addition"
+                 elif projectedTripIds.Contains(value.sourceObjectId) then "authoritative_projection"
+                 elif matchedTripIds.Contains(value.sourceObjectId) then "matched_on_other_dates"
+                 else "withheld"
+             [|
+                 sourceIdentity prepared.binding.sourceId row; originalIdentity "trip_id" row
+                 originalIdentity "route_id" source.routes.[sourceRouteId]
+                 modeClass (rowValue source.routes.[sourceRouteId] "route_type")
+                 value.code; disposition; value.message
+             |]))
+          (activeUnrepresentedTrips
+           |> Seq.map (fun row ->
+               let sourceTripId = rowValue row "trip_id"
+               let sourceRouteId = rowValue row "route_id"
+               let reason, message =
+                   if matchedTripIds.Contains(sourceTripId) || projectedTripIds.Contains(sourceTripId) then
+                       "trip_projection_unrepresented", "Matching or authority evidence existed, but no active source date survived resolution and projection"
+                   else
+                       "trip_unclassified_unmatched", "The active trip produced neither matching evidence nor a more specific matching diagnostic"
+               [|
+                   sourceIdentity prepared.binding.sourceId row; originalIdentity "trip_id" row
+                   originalIdentity "route_id" source.routes.[sourceRouteId]
+                   modeClass (rowValue source.routes.[sourceRouteId] "route_type")
+                   reason; "withheld"; message
+                |]))
+         |> Seq.distinctBy (fun row -> String.concat "\u001f" row))
     let effectiveDiagnostics =
         prepared.diagnostics.Rows
         |> Seq.filter (fun value ->

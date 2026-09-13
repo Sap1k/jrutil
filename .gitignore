@@ -12,6 +12,8 @@
 /rtview/wwwroot/rtview.css
 /scripts/*/
 /scripts/*
+!/scripts/audit_regional_overlay_references.py
+!/scripts/audit_duplicate_journeys.py
 !/scripts/find_jdf_with_mhd_naming.fsx
 !/scripts/czptt_agency_map.fsx
 !/scripts/verify_regional_overlay.py

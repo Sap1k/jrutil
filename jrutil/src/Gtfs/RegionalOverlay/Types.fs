@@ -8,7 +8,13 @@ open System.Collections.Generic
 let OverlayBundleVersion = 1
 
 [<Literal>]
+let MultiSourceOverlayBundleVersion = 2
+
+[<Literal>]
 let OverlayPolicySchemaVersion = 3
+
+[<Literal>]
+let OverlayAllPolicySchemaVersion = 1
 
 [<CLIMutable>]
 type CapabilityPolicy = {
@@ -30,6 +36,8 @@ type StopMatchPolicy = {
     groupColumn: string
     postColumn: string
     maximumDistanceMetres: float
+    coordinateIdentityMaximumMetres: float
+    coordinateIdentityMinimumMarginMetres: float
     splitFlatGroupsByName: bool
     contextualInference: ContextualStopInferencePolicy
 }
@@ -107,6 +115,23 @@ type OverlayPolicy = {
     source: SourcePolicy
 }
 
+[<CLIMutable>]
+type OverlayAllSourcePolicy = {
+    sourceId: string
+    policy: string
+    adapter: string
+}
+
+[<CLIMutable>]
+type OverlayAllPolicy = {
+    schemaVersion: int
+    calibration: bool
+    publicationEnabled: bool
+    conflictPolicy: string
+    minimumCoverage: Dictionary<string, float>
+    sources: OverlayAllSourcePolicy array
+}
+
 type SourceBinding = {
     sourceId: string
     payloadPath: string
@@ -122,4 +147,11 @@ type OverlayResult = {
     unmatchedStopGroups: int
     selectedShapes: int
     selectedTransfers: int
+}
+
+type MultiSourceOverlayResult = {
+    outputPath: string
+    sources: string array
+    aggregate: OverlayResult
+    perSource: IReadOnlyDictionary<string, OverlayResult>
 }
