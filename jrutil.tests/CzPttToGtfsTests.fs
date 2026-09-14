@@ -1320,6 +1320,31 @@ type CzPttToGtfsTests() =
                 manifestFiles
                 |> Array.forall (fun item ->
                     item.GetProperty("rows").ValueKind = JsonValueKind.Number))
+
+            result.feed
+            |> Gtfs.deduplicateCalendar
+            |> Gtfs.fillStandardRequiredFields
+            |> Gtfs.gtfsFeedToFolder () (Path.Combine(output, "gtfs-intermediate"))
+            let extensions = Path.Combine(output, "extensions")
+            Directory.CreateDirectory(extensions) |> ignore
+            for fileName in [| "cz_routes.txt"; "cz_trips.txt"; "cz_trip_stop_zones.txt" |] do
+                let source = Path.Combine(output, "gtfs-intermediate", fileName)
+                if File.Exists(source) then File.Move(source, Path.Combine(extensions, fileName))
+            CzPttBundle.writeManifest output
+            let production = Path.Combine(root, "production")
+            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) output production
+            JrUtil.Serving.Validation.validatePackage production |> ignore
+            let rows relation columns =
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(production, "serving", relation + ".parquet")) columns
+                |> Seq.toArray
+            Assert.AreEqual(2, (rows "operational_location" [|"source_location_id"|]).Length)
+            Assert.AreEqual(1, (rows "operational_journey" [|"source_journey_id"|]).Length)
+            Assert.AreEqual(2, (rows "operational_call" [|"source_journey_id"; "sequence"|]).Length)
+            let namespaces = rows "source_trip_map" [|"trip_namespace"|] |> Array.map (fun row -> row.[0])
+            CollectionAssert.Contains(namespaces, "czptt_pa_id")
+            CollectionAssert.Contains(namespaces, "czptt_tr_id")
+            Assert.IsTrue((rows "source_call_map" [|"call_namespace"; "source_sequence"|]) |> Array.exists (fun row -> row.[0] = "czptt_pa_sequence"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 

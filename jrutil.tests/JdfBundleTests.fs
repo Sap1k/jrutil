@@ -93,18 +93,18 @@ type JdfBundleTests() =
             supportWeight=1M;rawTags="";explicitModes=modes;deniedModes=denied
             lifecycle=lifecycle }
         let firstCall=
-            source.tripStops
+            source.tripStops |> Seq.toArray
             |> Array.find(fun value -> value.routeId="586001" && value.tripId=1L
                                        && value.routeStopId=1L)
         let thirdCall=
-            source.tripStops
+            source.tripStops |> Seq.toArray
             |> Array.find(fun value -> value.routeId="586001" && value.tripId=1L
                                        && value.routeStopId=3L)
         let routeStop3=
             source.routeStops
             |> Array.find(fun value -> value.routeId="586001" && value.routeStopId=3L)
         let tripStops=
-            source.tripStops
+            source.tripStops |> Seq.toArray
             |> Array.map(fun value ->
                 if value.routeId="586001" && value.tripId=1L && value.routeStopId=3L then
                     {value with departureTime=firstCall.departureTime}
@@ -265,336 +265,38 @@ type JdfBundleTests() =
             JdfBundle.writeBundleWithPolicyAndMemory true descriptorPath "test-commit" false
                 JdfToGtfs.KeepAll [||] fixturePath second
 
-            let expectedFiles = [|
-                "source_route_metadata.parquet"; "source_stop_metadata.parquet"
-                "source_call_metadata.parquet"; "source_route_stop_zone_metadata.parquet"
-                "source_notice_metadata.parquet"; "source_transfer_metadata.parquet"
-                "source_travel_restriction_metadata.parquet"
-                "derived_post_locations.parquet"; "derived_post_assignments.parquet"
-                "diagnostics.json"; "manifest.json"
-                Path.Combine("gtfs-intermediate", "stop_times.txt")
-                Path.Combine("gtfs-intermediate", "feed_info.txt")
-                Path.Combine("extensions", "cz_stop_zones.txt")
-            |]
-            expectedFiles |> Array.iter (fun relative ->
-                let firstPath = Path.Combine(first, relative)
-                let secondPath = Path.Combine(second, relative)
-                assertEqual true (File.Exists(firstPath))
-                CollectionAssert.AreEqual(File.ReadAllBytes(firstPath), File.ReadAllBytes(secondPath)))
+            JrUtil.Serving.Validation.validatePackage first |> ignore
+            JrUtil.Serving.Validation.validatePackage second |> ignore
+            JrUtil.Serving.Validation.compareByteIdentical first second
 
-            let expectedHashes = Map [
-                "diagnostics.json", "7b36c983aa87e7df22e67eeeb98ff23a5ce526131d6fed3db5b1e7244e940190"
-                "extensions/cz_routes.txt", "c3ac8a6f4972d29e0d87b2bc3ba279602d8b4232d493ad674bc8e6fd13c408cb"
-                "extensions/cz_stop_zones.txt", "304d0c3ce890925d768f976d374e3e81590caf474255cd676089d9b8842ebd27"
-                "extensions/cz_stops.txt", "c02a53e8f9e9faef7dd7e1fd9ce8ad3f6d13cdc1829ececcb4805a7fbc33b7f2"
-                "extensions/cz_trips.txt", "c4466c146bc2cb03fe567cbc6d804cf8dbee92160ec079573b289d671f41d963"
-                "gtfs-intermediate/agency.txt", "26cceaa6f4ff55077dd5a4bb516c09f77686dfd41557ba1a98cd858543239b95"
-                "gtfs-intermediate/calendar_dates.txt", "aaa66bee57e81ca0cd63d4afe576f993aba0441428a79cf6fe5c58721e39421f"
-                "gtfs-intermediate/calendar.txt", "5a5f58ecf2157ade68d72eaa2b247515ffaf849cdb762a24b1df2ba9595b94c0"
-                "gtfs-intermediate/feed_info.txt", "bcab51bae8d3ca3525c03edae4bc1d5166c9534a37d5f567611571a9f4173cfc"
-                "gtfs-intermediate/routes.txt", "a3b6ec8a99b071817d12032685c87de5f1b4f8f5e1f56637116b52d46b79581c"
-                "gtfs-intermediate/stop_times.txt", "a392c69c7d95c018fd7f2957a58245feff9ff75c95ba659ba810a07c6e8cbfeb"
-                "gtfs-intermediate/stops.txt", "922f56c4e4d801e0e3066f341032822d506b3b781032458e57b7ea127a8ff014"
-                "gtfs-intermediate/trips.txt", "dcf7b19da71d5700f3eeaaa9e2d7f1c5e86db7c8104f1713d46038a0eb5be16d"
-                "manifest.json", "20c9577bced2752fc11111c3b4bef35b14638ccd91ec8caa49ab8845a2bea176"
-                "source_call_metadata.parquet", "d0371213210d39f967020dff5d62e719578d701f1a181ae0cf772735e9cbe278"
-                "source_notice_metadata.parquet", "6d0fdf465786ac87faab9b6e200541dde04915842d8b3a09e14dbb1b3918eff5"
-                "source_route_metadata.parquet", "1275e718834fcc3faa10ce927931ba9ad64efad311f87f1c04a2fbe76c8c6de7"
-                "source_route_stop_zone_metadata.parquet", "482e8c310e995f1df813a4e9cc84412bbac6d2d21210852e82f8cf9d9a44cffd"
-                "source_stop_metadata.parquet", "3b2d09634dd92006d1ed736d6963c21e1eacd3af604bf72735146f6825e06243"
-                "source_transfer_metadata.parquet", "d02e1d71d127dbd48216c01b5c26c7ae45d8e2d26969ffbee0ce336e8974b26d"
-                "source_travel_restriction_metadata.parquet", "a2e1107359421b44d4f4f6d4d513dd65b559e86659804754e080826e4570fce6"
-            ]
-            let actualHashes =
-                Directory.GetFiles(first, "*", SearchOption.AllDirectories)
-                |> Seq.map (fun path ->
-                    let relative = Path.GetRelativePath(first, path).Replace('\\', '/')
-                    use stream = File.OpenRead(path)
-                    let hash =
-                        Security.Cryptography.SHA256.HashData(stream)
-                        |> Convert.ToHexString
-                        |> fun value -> value.ToLowerInvariant()
-                    relative, hash)
-                |> Map
-            let expectedPaths =
-                expectedHashes.Keys
-                |> Set.ofSeq
-                |> Set.add "derived_post_locations.parquet"
-                |> Set.add "derived_post_assignments.parquet"
-                |> Set.add "post_candidate_evidence.parquet"
-                |> Set.add "post_physical_hypotheses.parquet"
-                |> Set.add "post_side_groups.parquet"
-                |> Set.add "derived_post_scores.parquet"
-            assertEqual expectedPaths (actualHashes.Keys |> Set.ofSeq)
-            let secondHashes =
-                Directory.GetFiles(second, "*", SearchOption.AllDirectories)
-                |> Seq.map (fun path ->
-                    let relative = Path.GetRelativePath(second, path).Replace('\\', '/')
-                    use stream = File.OpenRead(path)
-                    let hash =
-                        Security.Cryptography.SHA256.HashData(stream)
-                        |> Convert.ToHexString
-                        |> fun value -> value.ToLowerInvariant()
-                    relative, hash)
-                |> Map
-            assertEqual actualHashes secondHashes
-
-            let stopTimesHeader =
-                File.ReadLines(Path.Combine(first, "gtfs-intermediate", "stop_times.txt"))
-                |> Seq.head
-            assertEqual false (stopTimesHeader.Contains("stop_zone_ids"))
-            assertEqual
-                "stop_place_id,zone_id,zone_code,route_id,ids_system_id,source_provenance"
-                (File.ReadLines(Path.Combine(first, "extensions", "cz_stop_zones.txt")) |> Seq.head)
-
-            let schemas = [|
-                "source_route_metadata.parquet", [|
-                    "gtfs_route_id", typeof<string>, false; "source_route_id", typeof<string>, false
-                    "route_distinction", typeof<int>, false; "source_agency_id", typeof<string>, false
-                    "source_agency_distinction", typeof<int>, false
-                    "source_transport_mode", typeof<string>, false
-                    "effective_transport_mode", typeof<string>, false
-                    "valid_from", typeof<string>, false; "valid_to", typeof<string>, false |]
-                "source_stop_metadata.parquet", [|
-                    "gtfs_stop_id", typeof<string>, false; "town", typeof<string>, false
-                    "district", typeof<string>, true; "nearby_place", typeof<string>, true
-                    "country", typeof<string>, true; "coordinates_missing", typeof<bool>, false
-                    "coordinate_precision", typeof<string>, false
-                    "coordinate_source", typeof<string>, true |]
-                "source_call_metadata.parquet", [|
-                    "gtfs_trip_id", typeof<string>, false; "stop_sequence", typeof<int>, false
-                    "source_route_stop_id", typeof<int64>, false |]
-                "source_route_stop_zone_metadata.parquet", [|
-                    "gtfs_route_id", typeof<string>, false
-                    "source_route_stop_id", typeof<int64>, false
-                    "zone_id", typeof<string>, false; "zone_order", typeof<int>, false |]
-                "source_notice_metadata.parquet", [|
-                    "source_notice_id", typeof<string>, false; "notice_kind", typeof<string>, false
-                    "gtfs_route_id", typeof<string>, true; "gtfs_trip_id", typeof<string>, true
-                    "label", typeof<string>, true; "text", typeof<string>, true
-                    "valid_from", typeof<string>, true; "valid_to", typeof<string>, true
-                    "service_note_type", typeof<string>, true |]
-                "source_transfer_metadata.parquet", [|
-                    "source_transfer_id", typeof<string>, false; "gtfs_trip_id", typeof<string>, false
-                    "source_route_stop_id", typeof<int64>, false; "transfer_type", typeof<string>, false
-                    "transfer_route_id", typeof<int64>, true; "transfer_stop_id", typeof<int64>, true
-                    "transfer_stop_post_id", typeof<int64>, true
-                    "transfer_end_stop_id", typeof<int64>, true
-                    "transfer_end_stop_post_id", typeof<int64>, true
-                    "wait_minutes", typeof<int>, true; "note", typeof<string>, true |]
-                "source_travel_restriction_metadata.parquet", [|
-                    "assignment_scope", typeof<string>, false
-                    "gtfs_route_id", typeof<string>, true; "gtfs_trip_id", typeof<string>, true
-                    "source_route_stop_id", typeof<int64>, false
-                    "group_code", typeof<string>, false |]
-                "derived_post_locations.parquet", [|
-                    "derived_location_id", typeof<string>, false
-                    "gtfs_stop_place_id", typeof<string>, false
-                    "selection_kind", typeof<string>, false
-                    "physical_candidate_id", typeof<string>, true
-                    "side_group_id", typeof<string>, true
-                    "representative_candidate_id", typeof<string>, true
-                    "diagnostic_label", typeof<string>, true
-                    "latitude", typeof<double>, false; "longitude", typeof<double>, false
-                    "candidate_ids", typeof<string>, false; "provenance", typeof<string>, false |]
-                "derived_post_assignments.parquet", [|
-                    "target_gtfs_stop_id", typeof<string>, false
-                    "assignment_kind", typeof<string>, false
-                    "derived_location_id", typeof<string>, true; "mode", typeof<string>, false
-                    "line_id", typeof<string>, true; "direction", typeof<int>, true
-                    "pattern_hash", typeof<string>, true; "pattern_position", typeof<int>, true
-                    "movement_family_id",typeof<string>,true
-                    "context_previous_stop_id", typeof<string>, true
-                    "context_next_stop_id", typeof<string>, true
-                    "same_stop_block_role", typeof<string>, false
-                    "score", typeof<double>, true; "margin", typeof<double>, true
-                    "selected_candidates", typeof<string>, false
-                    "rejected_candidates", typeof<string>, false; "status", typeof<string>, false |]
-                "post_candidate_evidence.parquet", [|
-                    "gtfs_stop_place_id", typeof<string>, false; "candidate_id", typeof<string>, false
-                    "observation_id", typeof<string>, false; "source_kind", typeof<string>, false
-                    "hypothesis_id", typeof<string>, true
-                    "source_object_id", typeof<string>, true; "observed_at", typeof<string>, true
-                    "latitude", typeof<double>, false; "longitude", typeof<double>, false
-                    "support_weight", typeof<double>, false; "raw_tags", typeof<string>, false
-                    "explicit_modes", typeof<string>, false; "denied_modes", typeof<string>, false
-                    "lifecycle", typeof<string>, false; "modality_status", typeof<string>, true
-                    "supported_modes", typeof<string>, true
-                    "distinct_supporting_patterns", typeof<int>, true
-                    "modality_confidence", typeof<double>, true |]
-                "post_physical_hypotheses.parquet", [|
-                    "gtfs_stop_place_id",typeof<string>,false; "hypothesis_id",typeof<string>,false
-                    "member_observation_ids",typeof<string>,false
-                    "member_legacy_candidate_ids",typeof<string>,false
-                    "representative_candidate_id",typeof<string>,false
-                    "latitude",typeof<double>,false; "longitude",typeof<double>,false
-                    "sources",typeof<string>,false |]
-                "post_side_groups.parquet", [|
-                    "gtfs_stop_place_id", typeof<string>, false; "side_group_id", typeof<string>, false
-                    "mode",typeof<string>,false
-                    "corridor_face_id", typeof<string>, false; "sector", typeof<string>, false
-                    "representative_candidate_id", typeof<string>, false
-                    "member_candidate_ids", typeof<string>, false
-                    "compactness_metres", typeof<double>, false
-                    "repeated_pattern_support", typeof<int>, false |]
-                "derived_post_scores.parquet", [|
-                    "gtfs_stop_place_id", typeof<string>, false; "candidate_id", typeof<string>, false
-                    "mode", typeof<string>, false; "line_id", typeof<string>, false
-                    "direction", typeof<int>, false; "pattern_hash", typeof<string>, false
-                    "pattern_position", typeof<int>, false
-                    "same_stop_block_role", typeof<string>, false; "eligible", typeof<bool>, false
-                    "alignment", typeof<double>, false; "side", typeof<double>, false
-                    "proximity", typeof<double>, false; "routed_fit", typeof<double>, false
-                    "corridor_id", typeof<string>, true
-                    "ingress_thread_id", typeof<string>, true
-                    "egress_thread_id", typeof<string>, true
-                    "corridor_face_id", typeof<string>, true
-                    "routing_availability", typeof<string>, false
-                    "alternative_corridor_count", typeof<int>, false
-                    "alternative_cost_gap", typeof<double>, true; "snap_edge_id", typeof<int>, true
-                    "snap_fraction", typeof<double>, true; "corridor_distance", typeof<double>, true
-                    "signed_lateral_offset", typeof<double>, true
-                    "corridor_heading", typeof<double>, true; "attachment_heading", typeof<double>, true
-                    "source_adjustment", typeof<double>, false
-                    "modality_adjustment", typeof<double>, false
-                    "popularity_prior", typeof<double>, false
-                    "total", typeof<double>, false; "rejection_reason", typeof<string>, true
-                    "movement_family_id",typeof<string>,false
-                    "routed_excess_metres",typeof<double>,true
-                    "tied_corridors_agree",typeof<bool>,false
-                    "topology_failure_reason",typeof<string>,true
-                    "route_distinction",typeof<int>,false |]
-            |]
-            let parquet =
-                schemas
-                |> Array.map (fun (fileName, schema) -> fileName, assertSchema first fileName schema)
-                |> Map
-            parquet |> Map.iter (fun _ value ->
-                assertEqual "7" (string value.CustomMetadata.["obehy.schema_version"])
-                assertEqual "national-jdf" (string value.CustomMetadata.["obehy.source_id"])
-                assertEqual ($"sha256:{sha}") (string value.CustomMetadata.["obehy.snapshot_id"]))
-
-            let mirroredFiles = [|
-                "source_routes.parquet"; "source_stop_places.parquet"
-                "source_boarding_points.parquet"; "source_trips.parquet"
-                "source_calls.parquet"; "fare_zones.parquet"; "source_stop_zones.parquet"
-                "source_stop_zone_metadata.parquet"
-            |]
-            mirroredFiles |> Array.iter (fun fileName ->
-                assertEqual false (File.Exists(Path.Combine(first, fileName))))
-
-            let memberships = parquet.["source_route_stop_zone_metadata.parquet"]
-            assertEqual 5 memberships.Data.Count
-            let calls = parquet.["source_call_metadata.parquet"]
-            assertEqual true (calls.Data.Count > 0)
-            assertEqual 3 parquet.["source_notice_metadata.parquet"].Data.Count
-            assertEqual 1 parquet.["source_transfer_metadata.parquet"].Data.Count
-            assertEqual 5 parquet.["source_travel_restriction_metadata.parquet"].Data.Count
-
-            let parsed = Gtfs.gtfsParseFolder () (Path.Combine(first, "gtfs-intermediate"))
-            parsed.trips |> Seq.iter (fun trip ->
-                assertEqual true (trip.serviceId.StartsWith("gtfs:service:")))
-            let routeIds = parsed.routes |> Seq.map (fun route -> route.id) |> set
-            parquet.["source_route_metadata.parquet"].Data |> Seq.iter (fun value ->
-                assertEqual true (routeIds.Contains(string value.["gtfs_route_id"])))
-            let stopIds = parsed.stops |> Seq.map (fun stop -> stop.id) |> set
-            parquet.["source_stop_metadata.parquet"].Data |> Seq.iter (fun value ->
-                assertEqual true (stopIds.Contains(string value.["gtfs_stop_id"])))
-            let callKeys = parsed.stopTimes |> Seq.map (fun call -> call.tripId, call.stopSequence) |> set
-            calls.Data |> Seq.iter (fun value ->
-                assertEqual true (callKeys.Contains(string value.["gtfs_trip_id"],
-                                                        Convert.ToInt32(value.["stop_sequence"]))))
-
-            let extensionZoneKeys =
-                GtfsParser.getGtfsFileParser<GtfsModel.CzStopZone>
-                    (Path.Combine(first, "extensions", "cz_stop_zones.txt"))
-                |> Seq.map (fun zone -> zone.routeId, zone.zoneId)
-                |> set
-            memberships.Data |> Seq.iter (fun value ->
-                assertEqual true (extensionZoneKeys.Contains(string value.["gtfs_route_id"],
-                                                               string value.["zone_id"])))
-
-            let tripIds = parsed.trips |> Seq.map (fun trip -> trip.id) |> set
-            parquet.["source_notice_metadata.parquet"].Data |> Seq.iter (fun value ->
-                if value.ContainsKey("gtfs_route_id") && not (isNull value.["gtfs_route_id"]) then
-                    assertEqual true (routeIds.Contains(string value.["gtfs_route_id"]))
-                if value.ContainsKey("gtfs_trip_id") && not (isNull value.["gtfs_trip_id"]) then
-                    assertEqual true (tripIds.Contains(string value.["gtfs_trip_id"])))
-            let sourceCallKeys =
-                calls.Data
-                |> Seq.map (fun value -> string value.["gtfs_trip_id"],
-                                         Convert.ToInt64(value.["source_route_stop_id"]))
-                |> set
-            parquet.["source_transfer_metadata.parquet"].Data |> Seq.iter (fun value ->
-                assertEqual true (sourceCallKeys.Contains(string value.["gtfs_trip_id"],
-                                                           Convert.ToInt64(value.["source_route_stop_id"]))))
-            parquet.["source_travel_restriction_metadata.parquet"].Data |> Seq.iter (fun value ->
-                let scope = string value.["assignment_scope"]
-                assertEqual true (scope = "route_stop" || scope = "trip_call")
-                if scope = "route_stop" then
-                    assertEqual true (routeIds.Contains(string value.["gtfs_route_id"]))
-                    assertEqual false (value.ContainsKey("gtfs_trip_id"))
-                else
-                    assertEqual false (value.ContainsKey("gtfs_route_id"))
-                    assertEqual true (sourceCallKeys.Contains(string value.["gtfs_trip_id"],
-                                                               Convert.ToInt64(value.["source_route_stop_id"]))))
-            let noticeKinds =
-                parquet.["source_notice_metadata.parquet"].Data
-                |> Seq.map (fun value -> string value.["notice_kind"])
-                |> set
-            assertEqual (set ["route_information"; "service_note"; "reservation"]) noticeKinds
-            let noticeIds =
-                parquet.["source_notice_metadata.parquet"].Data
-                |> Seq.map (fun value -> string value.["source_notice_id"])
-                |> set
-            assertEqual true (noticeIds |> Seq.forall (fun value -> value.StartsWith("jdf:notice:")))
-            assertEqual false
-                (noticeIds.Contains "jdf:notice:trip:586001:1:1:2")
-            assertEqual false
-                (noticeIds.Contains "jdf:notice:trip:586001:1:3:1")
-            parquet.["source_notice_metadata.parquet"].Data
-            |> Seq.find (fun value -> string value.["notice_kind"] = "service_note")
-            |> fun value -> assertEqual "Poznámka ke spoji" (string value.["text"])
-            let transfer = parquet.["source_transfer_metadata.parquet"].Data |> Seq.exactlyOne
-            assertEqual true ((string transfer.["source_transfer_id"]).StartsWith("jdf:transfer:"))
-            assertEqual 5 (Convert.ToInt32(transfer.["wait_minutes"]))
-            assertEqual "Vycka na pripoj" (string transfer.["note"])
-            let restrictionScopes =
-                parquet.["source_travel_restriction_metadata.parquet"].Data
-                |> Seq.countBy (fun value -> string value.["assignment_scope"])
-                |> Map
-            assertEqual 3 restrictionScopes.["route_stop"]
-            assertEqual 2 restrictionScopes.["trip_call"]
-
-            use diagnostics = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "diagnostics.json")))
-            let diagnosticCodes =
-                diagnostics.RootElement.GetProperty("diagnostics").EnumerateArray()
-                |> Seq.map (fun value -> value.GetProperty("code").GetString())
-                |> set
-            assertEqual true (diagnosticCodes.Contains "filtered_enrichment")
-            assertEqual true (diagnosticCodes.Contains "unjoinable_call_enrichment")
-            assertEqual true (diagnosticCodes.Contains "blank_notice")
-            assertEqual true (diagnosticCodes.Contains "singleton_travel_restriction")
-            assertEqual false (diagnosticCodes.Contains "unhandled_service_note")
-            let filteredEnrichmentIds =
-                diagnostics.RootElement.GetProperty("diagnostics").EnumerateArray()
-                |> Seq.filter (fun value -> value.GetProperty("code").GetString() = "filtered_enrichment")
-                |> Seq.map (fun value -> value.GetProperty("source_object_id").GetString())
-                |> set
-            assertEqual true
-                (filteredEnrichmentIds.Contains "jdf:restriction:586001:1:3:1")
+            let files = Directory.GetFiles(first, "*", SearchOption.AllDirectories)
+            assertEqual 44 files.Length
+            assertEqual false (Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
+            assertEqual false (File.Exists(Path.Combine(first, "source_call_metadata.parquet")))
 
             use manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "manifest.json")))
-            assertEqual "obehy-jrutil-jdf" (manifest.RootElement.GetProperty("bundle_format").GetString())
-            assertEqual "test-commit" (manifest.RootElement.GetProperty("conversion").GetProperty("version").GetString())
-            manifest.RootElement.GetProperty("files").EnumerateArray()
-            |> Seq.iter (fun entry ->
-                let relative = entry.GetProperty("path").GetString()
-                use stream = File.OpenRead(Path.Combine(first, relative))
-                let sha = Security.Cryptography.SHA256.HashData(stream)
-                          |> Convert.ToHexString
-                          |> fun value -> value.ToLowerInvariant()
-                assertEqual (entry.GetProperty("sha256").GetString()) sha)
+            assertEqual "jrutil-production" (manifest.RootElement.GetProperty("bundle_format").GetString())
+            assertEqual 1 (manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            assertEqual 2 (manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
+            assertEqual 37 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
+
+            let relation name columns =
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(first, "serving", name + ".parquet")) columns
+                |> Seq.toArray
+            assertEqual true ((relation "source_call_map" [|"binding_id"; "source_sequence"; "call_sequence"|]).Length > 0)
+            assertEqual 5 ((relation "route_stop_zone" [|"route_id"; "route_stop_id"; "zone_id"|]).Length)
+            assertEqual 3 ((relation "service_note" [|"note_id"; "kind"; "text"|]).Length)
+            assertEqual 1 ((relation "connection_claim" [|"connection_id"; "origin_trip_id"; "wait_minutes"|]).Length)
+            assertEqual 5 ((relation "travel_restriction_assignment" [|"assignment_id"; "scope"; "group_code"|]).Length)
+
+            let scratch = Path.Combine(root, "compiler-view")
+            let gtfsPath, _ = JrUtil.Serving.PackageReader.prepareCompilerView first scratch
+            let parsed = Gtfs.gtfsParseFolder () gtfsPath
+            parsed.trips |> Seq.iter (fun trip ->
+                assertEqual true (trip.serviceId.StartsWith("gtfs:service:")))
+            let callKeys = parsed.stopTimes |> Seq.map (fun call -> call.tripId, call.stopSequence) |> set
+            assertEqual true (callKeys.Count > 0)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -608,7 +310,7 @@ type JdfBundleTests() =
                 source.trips
                 |> Array.find (fun trip -> trip.routeId = "586001" && trip.id = 1L)
             let copiedCalls =
-                source.tripStops
+                source.tripStops |> Seq.toArray
                 |> Array.filter (fun call ->
                     call.routeId = templateTrip.routeId
                     && call.routeDistinction = templateTrip.routeDistinction
@@ -617,7 +319,7 @@ type JdfBundleTests() =
             let modified = {
                 source with
                     trips = Array.append source.trips [| { templateTrip with id = 11L } |]
-                    tripStops = Array.append source.tripStops copiedCalls
+                    tripStops = Array.append (source.tripStops |> Seq.toArray) copiedCalls
             }
             let input = Path.Combine(root, "jdf")
             Jdf.jdfBatchDirWriter () (Jdf.FsPath input) modified
@@ -627,27 +329,34 @@ type JdfBundleTests() =
             let output = Path.Combine(root, "bundle")
             JdfBundle.writeBundle descriptorPath "test-commit" false input output
 
-            let parquet = readParquet (Path.Combine(output, "source_call_metadata.parquet"))
-            let tripIds =
-                parquet.Data
-                |> Seq.map (fun row -> string row.["gtfs_trip_id"])
+            let bindings =
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(output, "serving", "source_trip_map.parquet"))
+                    [|"binding_id"; "trip_id"|]
                 |> Seq.toArray
-            let sorted = Array.copy tripIds
-            Array.Sort(sorted, StringComparer.Ordinal)
-            assertEqual sorted tripIds
+            let tripIds = bindings |> Array.map (fun row -> row.[1])
             let copiedTripId = "jdf:trip:586001:1:11"
             assertEqual true (tripIds |> Array.contains copiedTripId)
 
-            let gtfs = Gtfs.gtfsParseFolder () (Path.Combine(output, "gtfs-intermediate"))
+            let scratch = Path.Combine(root, "compiler-view")
+            let gtfsPath, _ = JrUtil.Serving.PackageReader.prepareCompilerView output scratch
+            let gtfs = Gtfs.gtfsParseFolder () gtfsPath
             let expectedSequences =
                 gtfs.stopTimes
                 |> Seq.filter (fun call -> call.tripId = copiedTripId)
                 |> Seq.map (fun call -> call.stopSequence)
                 |> Seq.toArray
+            let bindingIds =
+                bindings
+                |> Seq.filter (fun row -> row.[1] = copiedTripId)
+                |> Seq.map (fun row -> row.[0])
+                |> set
             let actualSequences =
-                parquet.Data
-                |> Seq.filter (fun row -> string row.["gtfs_trip_id"] = copiedTripId)
-                |> Seq.map (fun row -> Convert.ToInt32(row.["stop_sequence"]))
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(output, "serving", "source_call_map.parquet"))
+                    [|"binding_id"; "call_sequence"|]
+                |> Seq.filter (fun row -> bindingIds.Contains(row.[0]))
+                |> Seq.map (fun row -> Convert.ToInt32(row.[1]))
                 |> Seq.toArray
             assertEqual expectedSequences actualSequences
         finally
@@ -811,7 +520,7 @@ type JdfBundleTests() =
             let baseline,_,_=captureBounds batch
             let expanded,routed,derivedSpill=captureBounds repeated
             Assert.IsTrue(expanded.sourceContextCount>expanded.contextCount)
-            Assert.IsTrue(expanded.contextCount<int64 repeated.tripStops.Length)
+            Assert.IsTrue(expanded.contextCount<int64 repeated.tripStops.Count)
             Assert.IsTrue(expanded.routingEvidenceCount<expanded.contextCount)
             Assert.IsTrue(expanded.routingEvidenceCount>=baseline.routingEvidenceCount)
             assertEqual expanded.routingEvidenceCount routed
@@ -934,7 +643,7 @@ type JdfBundleTests() =
             use archive=ZipFile.OpenRead(input)
             let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
             let reversed={batch with
-                            tripStops=Array.rev batch.tripStops
+                            tripStops=Array.rev (batch.tripStops |> Seq.toArray)
                             postCandidateEvidence=Array.rev batch.postCandidateEvidence}
             let inputSha =
                 use stream=File.OpenRead(input)
@@ -1059,18 +768,17 @@ type JdfBundleTests() =
                 descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
                 JdfToGtfs.emptyTransportModeRules true None false
                 replayOptions input replayOutput |> ignore
-            let equalFiles=[|"derived_post_locations.parquet";"derived_post_assignments.parquet"
-                             "post_candidate_evidence.parquet";"post_physical_hypotheses.parquet"
-                             "post_side_groups.parquet";"derived_post_scores.parquet"
-                             Path.Combine("gtfs-intermediate","stops.txt")
-                             Path.Combine("gtfs-intermediate","stop_times.txt")
-                             Path.Combine("extensions","cz_stops.txt")|]
-            for relative in equalFiles do
-                CollectionAssert.AreEqual(
-                    File.ReadAllBytes(Path.Combine(liveOutput,relative)),
-                    File.ReadAllBytes(Path.Combine(replayOutput,relative)),relative)
-            let liveFeed=Gtfs.gtfsParseFolder () (Path.Combine(liveOutput,"gtfs-intermediate"))
-            let replayFeed=Gtfs.gtfsParseFolder () (Path.Combine(replayOutput,"gtfs-intermediate"))
+            JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
+            JrUtil.Serving.Validation.validatePackage replayOutput |> ignore
+            CollectionAssert.AreEqual(
+                File.ReadAllBytes(Path.Combine(liveOutput,"gtfs.zip")),
+                File.ReadAllBytes(Path.Combine(replayOutput,"gtfs.zip")),"gtfs.zip")
+            let liveView=Path.Combine(root,"live-view")
+            let replayView=Path.Combine(root,"replay-view")
+            let liveGtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView liveOutput liveView
+            let replayGtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView replayOutput replayView
+            let liveFeed=Gtfs.gtfsParseFolder () liveGtfs
+            let replayFeed=Gtfs.gtfsParseFolder () replayGtfs
             let stopShape (feed:GtfsModel.GtfsFeed) =
                 feed.stops |> Array.map(fun value -> value.id,value.parentStation) |> Array.sort
             assertEqual (stopShape liveFeed) (stopShape replayFeed)

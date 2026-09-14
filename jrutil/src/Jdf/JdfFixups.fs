@@ -847,7 +847,7 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
                   jdfBatch.routes.Length)
 
     let tripsMatrix1, tripsMatrix2 =
-        groupedTripsMatrices jdfBatch.routeStops jdfBatch.tripStops
+        groupedTripsMatrices jdfBatch.routeStops (jdfBatch.tripStops |> Seq.toArray)
 
     let stops = jdfBatch.stops |> Array.map moveRegionFromName
     let swamNonMhd =
@@ -1097,7 +1097,7 @@ let estimateMissingStopLocations (jdfBatch: JdfBatch) =
     let nextIndex length predicate index =
         seq { index + 1 .. length - 1 } |> Seq.tryFind predicate
 
-    orderedTimedTrips jdfBatch.tripStops
+    orderedTimedTrips (jdfBatch.tripStops |> Seq.toArray)
     |> Array.iter (fun calls ->
         let knownPoint index =
             let call, _ = calls.[index]
@@ -1230,7 +1230,7 @@ let checkMatchDistances
 let checkMissingRegionsCountries (jdfBatch: JdfBatch) =
     let isUsed stopId =
         jdfBatch.tripStops
-        |> Array.tryFind (fun ts ->
+        |> Seq.tryFind (fun ts ->
             ts.stopId = stopId
             && match ts.arrivalTime, ts.departureTime with
                | Some (StopTime _), _ -> true

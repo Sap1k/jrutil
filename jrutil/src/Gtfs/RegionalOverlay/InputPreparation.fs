@@ -104,8 +104,13 @@ let prepare ({
     let snapshotDate = Instant.FromDateTimeOffset(baseRetrievedAt).InZone(DateTimeZoneProviders.Tzdb.["Europe/Prague"]).Date
     let auditDate = auditDate |> Option.defaultValue snapshotDate
     if not (window.index.ContainsKey(auditDate)) then invalidArg "--audit-date" "Audit date is outside the GVD window"
-    let baseGtfs = Path.Combine(baseBundle, "gtfs-intermediate")
-    let baseExtensions = Path.Combine(baseBundle, "extensions")
+    let baseGtfs, baseExtensions =
+        if File.Exists(Path.Combine(baseBundle, "gtfs.zip")) then
+            JrUtil.Serving.PackageReader.prepareCompilerView baseBundle scratch.Directory
+        else
+            // Kept for in-process compiler fixtures only. The CLI rejects this
+            // historical package shape and no production writer emits it.
+            Path.Combine(baseBundle, "gtfs-intermediate"), Path.Combine(baseBundle, "extensions")
     let diagnostics = DiagnosticLog(scratch)
     logProgress "validate-inputs" 1L (Some 1L)
     let stopOverrides = loadOverrides policyPath policy.source.overrides.stops

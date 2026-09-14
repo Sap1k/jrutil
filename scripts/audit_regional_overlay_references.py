@@ -4,7 +4,10 @@ import csv
 import sqlite3
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
+
+import pyarrow.parquet as parquet
 
 
 def rows(path):
@@ -14,12 +17,14 @@ def rows(path):
 
 def main():
     root = Path(sys.argv[1])
-    gtfs = root / "gtfs-intermediate"
     extensions = root / "extensions"
-    mappings = root / "mappings"
     failures = []
     checked = 0
     with tempfile.TemporaryDirectory(prefix="overlay-reference-audit-") as scratch:
+        gtfs = Path(scratch) / "gtfs"
+        gtfs.mkdir()
+        with zipfile.ZipFile(root / "gtfs.zip") as archive:
+            archive.extractall(gtfs)
         db = sqlite3.connect(Path(scratch) / "references.db")
         db.execute("PRAGMA cache_size=-32768")
         db.execute("CREATE TABLE ids(kind TEXT, id TEXT, PRIMARY KEY(kind,id)) WITHOUT ROWID")
@@ -65,27 +70,20 @@ def main():
         audit(gtfs / "stops.txt", [("parent_station", "stop")])
         audit(gtfs / "stop_times.txt", [("trip_id", "trip"), ("stop_id", "stop")])
         audit(gtfs / "transfers.txt", [("from_stop_id", "stop"), ("to_stop_id", "stop"), ("from_route_id", "route"), ("to_route_id", "route"), ("from_trip_id", "trip"), ("to_trip_id", "trip")])
-        audit(extensions / "cz_routes.txt", [("route_id", "route")])
-        audit(extensions / "cz_trips.txt", [("trip_id", "trip")])
-        audit(extensions / "cz_stops.txt", [("stop_id", "stop"), ("stop_place_id", "stop")])
-        audit(extensions / "cz_stop_zones.txt", [("stop_place_id", "stop"), ("route_id", "route")])
-        audit(mappings / "source_to_output_trips.csv", [("output_trip_id", "trip")])
-        audit(mappings / "source_to_output_routes.csv", [("output_route_id", "route")])
-        audit(mappings / "source_to_output_stops.csv", [("output_stop_id", "stop"), ("target_stop_place_id", "stop")])
-        audit(mappings / "source_to_output_calls.csv", [("output_trip_id", "trip"), ("output_stop_id", "stop")])
+        audit(extensions / "cz_route_stop_zones.txt", [("route_id", "route"), ("stop_id", "stop")])
+        audit(extensions / "cz_call_zones.txt", [("trip_id", "trip")])
+        audit(extensions / "cz_transfer_constraints.txt", [("from_stop_id", "stop"), ("to_stop_id", "stop"), ("from_route_id", "route"), ("to_route_id", "route"), ("from_trip_id", "trip"), ("to_trip_id", "trip")])
 
-        db.execute("CREATE TABLE source_trips(source_id TEXT, source_trip_id TEXT, PRIMARY KEY(source_id,source_trip_id)) WITHOUT ROWID")
-        db.executemany(
-            "INSERT OR IGNORE INTO source_trips VALUES (?,?)",
-            ((row["source_id"], row["source_trip_id"]) for row in rows(mappings / "source_to_output_trips.csv")),
-        )
+        bindings = parquet.read_table(root / "serving" / "source_trip_map.parquet", columns=["binding_id", "trip_id"]).to_pylist()
+        db.execute("CREATE TABLE bindings(binding_id TEXT PRIMARY KEY, trip_id TEXT NOT NULL) WITHOUT ROWID")
+        db.executemany("INSERT INTO bindings VALUES (?,?)", ((row["binding_id"], row["trip_id"]) for row in bindings))
         db.commit()
         cursor = db.cursor()
-        for number, row in enumerate(rows(mappings / "operational_to_source_trips.csv"), 2):
-            checked += 1
-            key = row["source_id"], row["source_trip_id"]
-            if cursor.execute("SELECT 1 FROM source_trips WHERE source_id=? AND source_trip_id=?", key).fetchone() is None:
-                failures.append(f"mappings/operational_to_source_trips.csv:{number}:{key}")
+        for relation in ("source_call_map", "source_trip_coverage"):
+            for row in parquet.read_table(root / "serving" / f"{relation}.parquet", columns=["binding_id"]).to_pylist():
+                checked += 1
+                if cursor.execute("SELECT 1 FROM bindings WHERE binding_id=?", (row["binding_id"],)).fetchone() is None:
+                    failures.append(f"serving/{relation}.parquet:binding_id={row['binding_id']}")
         db.close()
     if failures:
         raise AssertionError("Invalid references:\n" + "\n".join(failures[:20]))

@@ -21,6 +21,25 @@ type RegionalGtfsOverlayTests() =
         use stream = File.OpenRead(path)
         Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant()
 
+    let diagnosticPath output section file = Path.Combine(output + ".diagnostics", section, file)
+
+    let readGtfs output file =
+        use archive = ZipFile.OpenRead(Path.Combine(output, "gtfs.zip"))
+        use reader = new StreamReader(archive.GetEntry(file).Open(), Encoding.UTF8)
+        reader.ReadToEnd()
+
+    let execute auditDate policy gvdYear binding basePath output =
+        (RegionalGtfsOverlay.compile {
+            auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
+            bindings = [| binding |]; baseBundle = basePath; outputBundle = output
+            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }).aggregate
+
+    let executeAll policy gvdYear bindings basePath output =
+        RegionalGtfsOverlay.compile {
+            auditDate = None; policyPath = policy; gvdYear = gvdYear
+            bindings = bindings; baseBundle = basePath; outputBundle = output
+            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }
+
     let policyJson = """{
       "schema_version": 3,
       "calibration": true,
@@ -169,33 +188,44 @@ type RegionalGtfsOverlayTests() =
                 |> Seq.map (fun path -> path, sha path)
                 |> Seq.toArray
             let output1 = Path.Combine(root, "output-1")
-            let result = RegionalGtfsOverlay.execute policy 2026 binding basePath output1
+            let result = execute None policy 2026 binding basePath output1
             Assert.AreEqual(5, result.matchedTrips)
             Assert.AreEqual(2, result.selectedShapes)
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "stop_context_inference.csv")).Contains("trip_context_unique"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "trip_candidate_scores.csv")).Contains("pattern_nearest"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "equivalent_ties.csv")).Contains("trip_equivalent_tie_expanded"))
-            Assert.IsFalse(File.ReadAllText(Path.Combine(output1, "reports", "ambiguities.csv")).Contains("st1_"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "mappings", "source_to_output_trips.csv")).Contains("bt1dup"))
-            let tripMappings = File.ReadAllText(Path.Combine(output1, "mappings", "source_to_output_trips.csv"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "stop_context_inference.csv").Contains("trip_context_unique"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "trip_candidate_scores.csv").Contains("pattern_nearest"))
+            let diagnosticEvents = File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv")
+            Assert.IsTrue(diagnosticEvents.Contains("trip_equivalent_tie_expanded"))
+            Assert.IsFalse(diagnosticEvents.Split('\n') |> Array.exists (fun line -> line.Contains("ambiguous") && line.Contains("st1_")))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "traces" "source_to_output_trips.csv").Contains("bt1dup"))
+            let tripMappings = File.ReadAllText(diagnosticPath output1 "traces" "source_to_output_trips.csv")
             Assert.IsTrue(tripMappings.Contains("st3_251201") && tripMappings.Contains("bt3good"), "Aligned intermediate call times must resolve an edited-pattern tie")
             Assert.IsFalse(tripMappings.Split('\n') |> Array.exists (fun line -> line.Contains("st3_251201") && line.Contains("bt3bad")))
             Assert.IsTrue(tripMappings.Split('\n') |> Array.exists (fun line -> line.Contains("st4amb_251201") && line.Contains("bt4b")))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "diagnostics.csv")).Contains("trip_target_availability_resolved"))
-            let trips = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "trips.txt"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("trip_target_availability_resolved"))
+            let baseTripMappings = File.ReadAllLines(diagnosticPath output1 "traces" "base_to_output_trips.csv") |> Array.skip 1
+            Assert.AreEqual(
+                baseTripMappings.Length,
+                baseTripMappings
+                |> Array.map (fun row ->
+                    let fields = row.Split(',')
+                    fields.[0], fields.[1])
+                |> Array.distinct
+                |> Array.length,
+                "Each base/output slice must use one enclosing validity range instead of one mapping per service-date run")
+            let trips = readGtfs output1 "trips.txt"
             Assert.IsFalse(trips.Contains("railtrip"))
             Assert.IsFalse(trips.Contains("PID headsign"))
             Assert.IsTrue(trips.Contains("National Alpha"))
             Assert.IsTrue(trips.Contains("Protected variant headsign"), "Equal-claim expansion must preserve target-specific national trip fields")
             Assert.AreEqual(2, trips.Split('\n') |> Array.filter (fun line -> line.Contains("bt1:overlay:")) |> Array.length)
-            let stopTimes = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "stop_times.txt"))
+            let stopTimes = readGtfs output1 "stop_times.txt"
             Assert.IsTrue(stopTimes.Contains("08:04:00"), "The newest overlapping source revision must provide authoritative times")
             Assert.IsFalse(stopTimes.Contains("08:03:00"), "An older overlapping source revision must be superseded")
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "diagnostics.csv")).Contains("overlay_newer_source_selected"))
-            let routes = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "routes.txt"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("overlay_newer_source_selected"))
+            let routes = readGtfs output1 "routes.txt"
             Assert.IsTrue(routes.Contains("PID bus"))
             Assert.IsTrue(routes.Contains("abcdef"))
-            let stops = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "stops.txt"))
+            let stops = readGtfs output1 "stops.txt"
             Assert.IsTrue(stops.Contains("overlay:pid-gtfs:post:"))
             Assert.IsFalse(stops.Contains("PID headsign"))
             let inferredParent = stops.Split('\n') |> Array.find (fun line -> line.StartsWith("bp4,", StringComparison.Ordinal) || line.StartsWith("\"bp4\",", StringComparison.Ordinal))
@@ -207,25 +237,27 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(sourcePostIds.Length > 0)
             for postId in sourcePostIds do
                 Assert.IsTrue(stopTimes.Contains(postId), $"Source-created post {postId} must be referenced by an output call")
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "post_pruning.csv")).Contains("disposition"))
-            let transfers = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "transfers.txt"))
-            Assert.IsTrue(transfers.Contains("300"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "post_pruning.csv").Contains("disposition"))
+            let transfers = readGtfs output1 "transfers.txt"
+            Assert.IsFalse(transfers.Contains("max_waiting_time"))
+            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "extensions", "cz_transfer_constraints.txt")).Contains("300"))
             Assert.IsFalse(File.Exists(Path.Combine(output1, "gtfs-intermediate", "pathways.txt")))
             Assert.IsFalse(File.Exists(Path.Combine(output1, "gtfs-intermediate", "levels.txt")))
-            Assert.AreEqual("national-evidence", File.ReadAllText(Path.Combine(output1, "base-evidence", "evidence.bin")))
+            let diagnosticManifest = File.ReadAllText(Path.Combine(output1 + ".diagnostics", "manifest.json"))
+            Assert.IsTrue(diagnosticManifest.Contains("base-package"), "Diagnostics must reference base evidence by digest instead of copying it")
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
-            Assert.IsFalse(manifest.RootElement.GetProperty("publishable").GetBoolean())
-            Assert.AreEqual("20251214", manifest.RootElement.GetProperty("gvd").GetProperty("start_date").GetString())
-            Assert.AreEqual("20261212", manifest.RootElement.GetProperty("gvd").GetProperty("end_date").GetString())
+            Assert.IsFalse(manifest.RootElement.GetProperty("publication_eligible").GetBoolean())
+            Assert.AreEqual("20251214", manifest.RootElement.GetProperty("service_horizon").GetProperty("start_date").GetString())
+            Assert.AreEqual("20261212", manifest.RootElement.GetProperty("service_horizon").GetProperty("end_date").GetString())
 
             let output2 = Path.Combine(root, "output-2")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output2 |> ignore
+            execute None policy 2026 binding basePath output2 |> ignore
             let files1 = Directory.EnumerateFiles(output1, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> Path.GetRelativePath(output1, path)) |> Seq.sort |> Seq.toArray
             let files2 = Directory.EnumerateFiles(output2, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> Path.GetRelativePath(output2, path)) |> Seq.sort |> Seq.toArray
             CollectionAssert.AreEqual(files1, files2)
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             for path, expected in inputHashes do Assert.AreEqual(expected, sha path, path)
-            Assert.ThrowsExactly<ArgumentException>(fun () -> RegionalGtfsOverlay.execute policy 2026 binding basePath output1 |> ignore) |> ignore
+            Assert.ThrowsExactly<ArgumentException>(fun () -> execute None policy 2026 binding basePath output1 |> ignore) |> ignore
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
 
         finally
@@ -239,7 +271,7 @@ type RegionalGtfsOverlayTests() =
             write descriptor "{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"deadbeef\"}"
             let output = Path.Combine(root, "output")
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
-            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore) |> ignore
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> execute None policy 2026 binding basePath output |> ignore) |> ignore
             Assert.IsFalse(Directory.Exists(output))
             Assert.AreEqual(0, Directory.EnumerateDirectories(root, ".output.tmp-*", SearchOption.TopDirectoryOnly) |> Seq.length)
         finally
@@ -259,7 +291,15 @@ type RegionalGtfsOverlayTests() =
                 "st2_251201,09:10:05,09:10:05,sb,5,0,0,1000"
             File.ReadAllText(sourceStopTimes)
                 .Replace("st2_251201,09:00:45,09:00:45,sa,1,0,0,0\nst2_251201,09:10:05,09:10:05,sb,2,0,0,1000", divergentCalls)
+                .TrimEnd() + "\n" + divergentCalls.Replace("st2_251201", "st2dup_251201") + "\n"
             |> write sourceStopTimes
+            let sourceTrips = Path.Combine(root, "source", "trips.txt")
+            File.ReadAllText(sourceTrips)
+                .Replace(
+                    "srtram,td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2",
+                    "srtram,td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2\n" +
+                    "srtram,td,st2dup_251201,PID tram headsign,PID tram short,1,sh2,sub2")
+            |> write sourceTrips
             File.Delete(sourceZip)
             ZipFile.CreateFromDirectory(Path.Combine(root, "source"), sourceZip)
             write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
@@ -268,22 +308,35 @@ type RegionalGtfsOverlayTests() =
                 sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor
             }
             let output = Path.Combine(root, "output")
-            let result = RegionalGtfsOverlay.execute policy 2026 binding basePath output
-            let tripMappings = File.ReadAllText(Path.Combine(output, "mappings", "source_to_output_trips.csv"))
-            Assert.AreEqual(5, result.matchedTrips)
+            let result = execute None policy 2026 binding basePath output
+            let tripMappings = File.ReadAllText(diagnosticPath output "traces" "source_to_output_trips.csv")
+            Assert.AreEqual(6, result.matchedTrips)
             let additionMapping =
                 tripMappings.Split('\n')
                 |> Array.find (fun line -> line.Contains("st2_251201") && line.Contains("authoritative_source_trip_set"))
             let additionTripId = additionMapping.Split(',').[3].Trim('"')
-            Assert.IsFalse(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "trips.txt")).Split('\n') |> Array.exists (fun line -> line.Contains(",bt2,")))
+            Assert.IsTrue(
+                tripMappings.Split('\n')
+                |> Array.exists (fun line -> line.Contains("st2dup_251201") && line.Contains(additionTripId)),
+                "Equivalent authoritative source trips must map to one output trip")
+            let unmatchedReasons = File.ReadAllText(diagnosticPath output "events" "unmatched_trip_reasons.csv")
+            Assert.IsTrue(
+                unmatchedReasons.Split('\n')
+                |> Array.filter (fun line -> line.Contains("\"st2_251201\"", StringComparison.Ordinal))
+                |> Array.forall (fun line -> not (line.Contains("\"withheld\"", StringComparison.Ordinal))),
+                "An authoritative source addition must not be classified as withheld")
+            Assert.IsTrue(
+                File.ReadAllText(Path.Combine(output, "diagnostics.json")).Contains("\"trip\"", StringComparison.Ordinal),
+                "Authoritative additions must reach coverage report generation")
+            Assert.IsFalse((readGtfs output "trips.txt").Split('\n') |> Array.exists (fun line -> line.Contains(",bt2,")))
             let additionCalls =
-                File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stop_times.txt")).Split('\n')
+                (readGtfs output "stop_times.txt").Split('\n')
                 |> Array.filter (fun line -> line.StartsWith(additionTripId + ",", StringComparison.Ordinal) || line.StartsWith("\"" + additionTripId + "\",", StringComparison.Ordinal))
             Assert.AreEqual(5, additionCalls.Length)
             Assert.IsTrue(additionCalls |> Array.exists (fun line -> line.Contains("09:04:00")))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "reports", "source_trip_additions.csv")).Contains("st2_251201"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output "events" "source_trip_additions.csv").Contains("st2_251201"))
             let czTrip =
-                File.ReadAllText(Path.Combine(output, "extensions", "cz_trips.txt")).Split('\n')
+                File.ReadAllText(diagnosticPath output "projection/legacy-extensions" "cz_trips.txt").Split('\n')
                 |> Array.find (fun line -> line.StartsWith(additionTripId + ",", StringComparison.Ordinal) || line.StartsWith("\"" + additionTripId + "\",", StringComparison.Ordinal))
             Assert.IsTrue(czTrip.Contains("\"199010\",\"\",\"\""), $"A PID-native pattern must not inherit a fabricated CIS trip identity: {czTrip}")
         finally
@@ -327,24 +380,24 @@ type RegionalGtfsOverlayTests() =
                 sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor
             }
             let output = Path.Combine(root, "output")
-            let result = RegionalGtfsOverlay.executeWithAuditDate (Some (NodaTime.LocalDate(2025, 12, 15))) policy 2026 binding basePath output
+            let result = execute (Some (NodaTime.LocalDate(2025, 12, 15))) policy 2026 binding basePath output
             Assert.AreEqual(3, result.matchedTrips, "Context inference is disabled in this native-stop fixture")
             let routeMapping =
-                File.ReadAllText(Path.Combine(output, "mappings", "source_to_output_routes.csv")).Split('\n')
+                File.ReadAllText(diagnosticPath output "traces" "source_to_output_routes.csv").Split('\n')
                 |> Array.find (fun line -> line.Contains("srtram") && line.Contains("authoritative_source_trip_set"))
             let outputRouteId = routeMapping.Split(',').[2].Trim('"')
             Assert.IsTrue(mode = "tram" || outputRouteId.StartsWith("overlay:pid-gtfs:route:", StringComparison.Ordinal))
-            let routes = File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "routes.txt"))
+            let routes = readGtfs output "routes.txt"
             Assert.IsTrue(routes.Contains(outputRouteId))
-            if mode <> "tram" then Assert.IsTrue(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "agency.txt")).Contains("overlay:pid-gtfs:agency:"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "trips.txt")).Contains("Ferry Island"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stop_times.txt")).Contains("Ferry Island"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "reports", "headsigns.csv")).Contains("Island"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "reports", "snapshot_day_coverage.csv")).Contains("audit_day"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stops.txt")).Contains("overlay:pid-gtfs:stop-place:"))
-            let czRoutes = File.ReadAllText(Path.Combine(output, "extensions", "cz_routes.txt"))
+            if mode <> "tram" then Assert.IsTrue((readGtfs output "agency.txt").Contains("overlay:pid-gtfs:agency:"))
+            Assert.IsTrue((readGtfs output "trips.txt").Contains("Ferry Island"))
+            Assert.IsTrue((readGtfs output "stop_times.txt").Contains("Ferry Island"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output "events" "headsigns.csv").Contains("Island"))
+            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "diagnostics.json")).Contains("audit_day"))
+            Assert.IsTrue((readGtfs output "stops.txt").Contains("overlay:pid-gtfs:stop-place:"))
+            let czRoutes = File.ReadAllText(diagnosticPath output "projection/legacy-extensions" "cz_routes.txt")
             Assert.IsTrue(czRoutes.Contains(outputRouteId) && czRoutes.Contains(cis))
-            let stopMappings = File.ReadAllText(Path.Combine(output, "mappings", "source_to_output_stops.csv"))
+            let stopMappings = File.ReadAllText(diagnosticPath output "traces" "source_to_output_stops.csv")
             Assert.IsTrue(stopMappings.Split('\n') |> Array.exists (fun line -> line.Contains("\"sf\"") && line.Contains("source_native")))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -359,12 +412,16 @@ type RegionalGtfsOverlayTests() =
                 .Replace("\"source_native_modes\": []", "\"source_native_modes\": [\"bus\"]") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore
-            let mappings = File.ReadAllLines(Path.Combine(output, "mappings", "source_to_output_trips.csv"))
+            execute None policy 2026 binding basePath output |> ignore
+            let mappings = File.ReadAllLines(diagnosticPath output "traces" "source_to_output_trips.csv")
             let selected = mappings |> Array.filter (fun row -> row.Contains("\"st1_251215\""))
             Assert.AreEqual(1, selected.Length, "One PID trip must not inherit two baseline instances")
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "reports", "semantic_inheritance.csv")).Contains("requires_explicit_notice_validity"))
-            Assert.AreEqual("national-evidence", File.ReadAllText(Path.Combine(output, "base-evidence", "evidence.bin")))
+            let noteAssignments =
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(output, "serving", "service_note_assignment.parquet")) [|"assignment_id"|]
+                |> Seq.length
+            Assert.AreEqual(0, noteAssignments, "Snapshot-only evidence must not become an unbounded semantic assignment")
+            Assert.IsTrue(File.ReadAllText(Path.Combine(output + ".diagnostics", "manifest.json")).Contains("base-package"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -386,12 +443,12 @@ type RegionalGtfsOverlayTests() =
                 .Replace("\"source_native_modes\": []", "\"source_native_modes\": [\"trolleybus\"]") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore
-            let trips = File.ReadAllLines(Path.Combine(output, "gtfs-intermediate", "trips.txt"))
+            execute None policy 2026 binding basePath output |> ignore
+            let trips = (readGtfs output "trips.txt").Split('\n')
             let trip = trips |> Array.find (fun row -> row.Contains("\"bt2\""))
             let routeId = trip.Split(',').[0].Trim('"')
             Assert.IsTrue(routeId.StartsWith("overlay:pid-gtfs:route:"))
-            let routes = File.ReadAllLines(Path.Combine(output, "gtfs-intermediate", "routes.txt"))
+            let routes = (readGtfs output "routes.txt").Split('\n')
             Assert.IsTrue(routes |> Array.exists (fun row -> row.Contains(routeId) && row.Contains("\"11\"")), "Every mode-split trip route must survive pruning")
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -407,8 +464,8 @@ type RegionalGtfsOverlayTests() =
             File.ReadAllText(policy).Replace("\"maximum_distance_metres\": 125", "\"maximum_distance_metres\": 300") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore
-            let report = File.ReadAllText(Path.Combine(output, "reports", "stop_group_matches.csv"))
+            execute None policy 2026 binding basePath output |> ignore
+            let report = File.ReadAllText(diagnosticPath output "events" "stop_group_matches.csv")
             Assert.IsTrue(report.Split('\n') |> Array.exists (fun row -> row.Contains("\"sb\"") && row.Contains("name_geo_unique")))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -432,8 +489,8 @@ type RegionalGtfsOverlayTests() =
                 .Replace("\"source_native_modes\": []", "\"source_native_modes\": [\"bus\"]") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore
-            let row = File.ReadAllLines(Path.Combine(output, "reports", "stop_group_matches.csv")) |> Array.find (fun line -> line.Contains("\"sg\""))
+            execute None policy 2026 binding basePath output |> ignore
+            let row = File.ReadAllLines(diagnosticPath output "events" "stop_group_matches.csv") |> Array.find (fun line -> line.Contains("\"sg\""))
             Assert.IsTrue(row.Contains("source_native") && not (row.Contains("jdf:stop:bp4")), row)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -449,10 +506,10 @@ type RegionalGtfsOverlayTests() =
             File.ReadAllText(policy).Replace("\"modes\": []", "\"modes\": [\"tram\"]") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore
-            let stop = File.ReadAllLines(Path.Combine(output, "gtfs-intermediate", "stops.txt")) |> Array.find (fun row -> row.StartsWith("bp2,", StringComparison.Ordinal) || row.StartsWith("\"bp2\",", StringComparison.Ordinal))
+            execute None policy 2026 binding basePath output |> ignore
+            let stop = (readGtfs output "stops.txt").Split('\n') |> Array.find (fun row -> row.StartsWith("bp2,", StringComparison.Ordinal) || row.StartsWith("\"bp2\",", StringComparison.Ordinal))
             Assert.IsTrue(stop.Contains("Beta") && not (stop.Contains("[?]")) && stop.Contains("50.0011") && stop.Contains("14.0011"), stop)
-            let report = File.ReadAllText(Path.Combine(output, "reports", "stop_group_matches.csv"))
+            let report = File.ReadAllText(diagnosticPath output "events" "stop_group_matches.csv")
             Assert.IsTrue(report.Contains("gtfs_authoritative") && report.Contains("pid_name_and_coordinates"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -489,17 +546,17 @@ type RegionalGtfsOverlayTests() =
             write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
             let binding: SourceBinding = { sourceId = "generic-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            let result = RegionalGtfsOverlay.execute policy 2026 binding basePath output
+            let result = execute None policy 2026 binding basePath output
             Assert.IsTrue(result.matchedTrips > 0, "Structural matching must work without proprietary columns")
-            let diagnostics = File.ReadAllText(Path.Combine(output, "reports", "diagnostics.csv"))
+            let diagnostics = File.ReadAllText(diagnosticPath output "events" "diagnostics.csv")
             Assert.IsTrue(diagnostics.Contains("overlay_fact_conflict"), "Conflicting unversioned claims must be quarantined")
             Assert.IsFalse(diagnostics.Contains("source_revision_unresolved"))
             Assert.IsFalse(diagnostics.Contains("overlay_newer_source_selected"))
-            let calls = File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stop_times.txt"))
+            let calls = readGtfs output "stop_times.txt"
             Assert.IsFalse(calls.Contains("08:03:00") || calls.Contains("08:04:00"))
-            let additions = File.ReadAllLines(Path.Combine(output, "reports", "source_trip_additions.csv"))
+            let additions = File.ReadAllLines(diagnosticPath output "events" "source_trip_additions.csv")
             Assert.AreEqual((if authority then 2 else 1), additions.Length, "Structural route/date proof may authorize the configured complete regional trip set without fabricating a CIS trip identity")
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stops.txt")).Contains("overlay:generic-gtfs:post:"))
+            Assert.IsTrue((readGtfs output "stops.txt").Contains("overlay:generic-gtfs:post:"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -517,7 +574,7 @@ type RegionalGtfsOverlayTests() =
             write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore) |> ignore
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> execute None policy 2026 binding basePath output |> ignore) |> ignore
             Assert.IsFalse(Directory.Exists(output))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -541,12 +598,12 @@ type RegionalGtfsOverlayTests() =
             write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore
-            let diagnostics = File.ReadAllText(Path.Combine(output, "reports", "diagnostics.csv"))
+            execute None policy 2026 binding basePath output |> ignore
+            let diagnostics = File.ReadAllText(diagnosticPath output "events" "diagnostics.csv")
             Assert.IsTrue(diagnostics.Contains("overlay_fact_conflict"))
             Assert.AreEqual(unresolved, diagnostics.Contains("source_revision_unresolved"))
             Assert.IsFalse(diagnostics.Contains("overlay_newer_source_selected"))
-            let calls = File.ReadAllText(Path.Combine(output, "gtfs-intermediate", "stop_times.txt"))
+            let calls = readGtfs output "stop_times.txt"
             Assert.IsFalse(calls.Contains("08:03:00") || calls.Contains("08:04:00"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -564,7 +621,7 @@ type RegionalGtfsOverlayTests() =
             let inputHashes = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> path, sha path) |> Seq.toArray
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
-            let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.execute policy 2026 binding basePath output |> ignore)
+            let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> execute None policy 2026 binding basePath output |> ignore)
             Assert.IsTrue(error.Message.Contains("minimum coverage"))
             Assert.IsFalse(Directory.Exists(output))
             Assert.AreEqual(0, Directory.EnumerateDirectories(root, ".output.tmp-*") |> Seq.length)
@@ -633,40 +690,58 @@ type RegionalGtfsOverlayTests() =
             let jmk: SourceBinding = { sourceId = "ids-jmk-gtfs"; payloadPath = jmkZip; descriptorPath = jmkDescriptor }
             let output1 = Path.Combine(root, "combined-1")
             let output2 = Path.Combine(root, "combined-2")
-            let result = RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; jmk |] basePath output1
-            RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| jmk; pid |] basePath output2 |> ignore
+            let result = executeAll combinedPolicy 2026 [| pid; jmk |] basePath output1
+            executeAll combinedPolicy 2026 [| jmk; pid |] basePath output2 |> ignore
             CollectionAssert.AreEqual([| "ids-jmk-gtfs"; "pid-gtfs" |], result.sources)
             let files1 = Directory.EnumerateFiles(output1, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> Path.GetRelativePath(output1, path)) |> Seq.sort |> Seq.toArray
             let files2 = Directory.EnumerateFiles(output2, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> Path.GetRelativePath(output2, path)) |> Seq.sort |> Seq.toArray
             CollectionAssert.AreEqual(files1, files2)
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
-            Assert.AreEqual(2, manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            Assert.AreEqual(1, manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            Assert.AreEqual(2, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
             Assert.AreEqual(2, manifest.RootElement.GetProperty("sources").GetArrayLength())
-            Assert.AreEqual(2, manifest.RootElement.GetProperty("counts").GetProperty("per_source").GetArrayLength())
-            let mappings = File.ReadAllText(Path.Combine(output1, "mappings", "operational_to_source_trips.csv"))
+            JrUtil.Serving.Validation.validatePackage output1 |> ignore
+            let mappings = File.ReadAllText(diagnosticPath output1 "traces" "operational_to_source_trips.csv")
             Assert.IsTrue(mappings.Contains("\"10\",\"42\",\"j1\"") && mappings.Contains("\"10\",\"42\",\"j2\""), mappings)
-            let trips = File.ReadAllText(Path.Combine(output1, "gtfs-intermediate", "trips.txt"))
+            let authoritativeMappings = File.ReadAllText(diagnosticPath output1 "traces" "source_to_output_trips.csv")
+            Assert.IsTrue(
+                authoritativeMappings.Split('\n')
+                |> Array.exists (fun line -> line.Contains("\"ids-jmk-gtfs\"") && line.Contains("authoritative_source_trip_set")),
+                "The combined overlay must retain IDS JMK authoritative additions")
+            let unmatchedReasons = File.ReadAllText(diagnosticPath output1 "events" "unmatched_trip_reasons.csv")
+            Assert.IsFalse(
+                unmatchedReasons.Split('\n')
+                |> Array.exists (fun line -> line.Contains("\"jf\"") && line.Contains("\"withheld\"")),
+                "A combined-source authoritative addition must not be classified as withheld")
+            let trips = readGtfs output1 "trips.txt"
             Assert.IsTrue(trips.Contains("overlay:ids-jmk-gtfs:trip:"), "An unmatched ferry must be imported with a deterministic source namespace")
             Assert.IsFalse(trips.Contains("jr"), "Heavy rail must remain excluded")
-            Assert.IsFalse(File.ReadAllText(Path.Combine(output1, "reports", "substitutions.csv")).Contains("ids-jmk-gtfs:jt"), "PID native-mode permissions must not make an unmatched JMK trolleybus native")
-            let zones = File.ReadAllText(Path.Combine(output1, "extensions", "cz_stop_zones.txt"))
+            let jmkTripBindings =
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(output1, "serving", "source_trip_map.parquet"))
+                    [| "source_id"; "source_trip_id" |]
+                |> Seq.toArray
+            Assert.IsFalse(
+                jmkTripBindings |> Array.exists (fun row -> row.[0] = "ids-jmk-gtfs" && row.[1] = "jt"),
+                "PID native-mode permissions must not make an unmatched JMK trolleybus native")
+            let zones = File.ReadAllText(diagnosticPath output1 "projection/legacy-extensions" "cz_stop_zones.txt")
             Assert.IsTrue(zones.Contains("ids-jmk-gtfs") && zones.Contains("overlay:ids-jmk-gtfs:zone:"), zones)
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "diagnostics.csv")).Contains("cross_source_fact_coalesced"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "reports", "stop_group_matches.csv")).Contains("coordinate_identity_unique"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("cross_source_fact_coalesced"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "stop_group_matches.csv").Contains("coordinate_identity_unique"))
 
-            Assert.ThrowsExactly<ArgumentException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; pid |] basePath (Path.Combine(root, "duplicate")) |> ignore) |> ignore
-            Assert.ThrowsExactly<ArgumentException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid |] basePath (Path.Combine(root, "missing")) |> ignore) |> ignore
+            Assert.ThrowsExactly<ArgumentException>(fun () -> executeAll combinedPolicy 2026 [| pid; pid |] basePath (Path.Combine(root, "duplicate")) |> ignore) |> ignore
+            Assert.ThrowsExactly<ArgumentException>(fun () -> executeAll combinedPolicy 2026 [| pid |] basePath (Path.Combine(root, "missing")) |> ignore) |> ignore
 
             let badChecksumDescriptor = Path.Combine(root, "jmk-bad-checksum.json")
             write badChecksumDescriptor "{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"deadbeef\"}"
             let badChecksum = { jmk with descriptorPath = badChecksumDescriptor }
-            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; badChecksum |] basePath (Path.Combine(root, "bad-checksum")) |> ignore) |> ignore
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> executeAll combinedPolicy 2026 [| pid; badChecksum |] basePath (Path.Combine(root, "bad-checksum")) |> ignore) |> ignore
 
             let skewDescriptor = Path.Combine(root, "jmk-skew.json")
             write skewDescriptor ($"{{\"retrieved_at\":\"2026-09-20T00:00:00+02:00\",\"payload_sha256\":\"{sha jmkZip}\"}}")
             let skewed = { jmk with descriptorPath = skewDescriptor }
-            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; skewed |] basePath (Path.Combine(root, "skew")) |> ignore) |> ignore
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> executeAll combinedPolicy 2026 [| pid; skewed |] basePath (Path.Combine(root, "skew")) |> ignore) |> ignore
 
             let jmkStopTimes = Path.Combine(jmkDir, "stop_times.txt")
             File.ReadAllText(jmkStopTimes).Replace("j1,09:00:45,09:00:45", "j1,09:01:45,09:01:45") |> write jmkStopTimes
@@ -676,9 +751,9 @@ type RegionalGtfsOverlayTests() =
             write conflictingDescriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha conflictingZip}\"}}")
             let conflicting = { jmk with payloadPath = conflictingZip; descriptorPath = conflictingDescriptor }
             let conflictOutput = Path.Combine(root, "conflicting")
-            RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; conflicting |] basePath conflictOutput |> ignore
-            Assert.IsTrue(File.ReadAllText(Path.Combine(conflictOutput, "reports", "diagnostics.csv")).Contains("cross_source_fact_conflict"))
-            Assert.IsFalse(File.ReadAllText(Path.Combine(conflictOutput, "gtfs-intermediate", "stop_times.txt")).Contains("09:01:45"), "A cross-source conflict must retain the national schedule")
+            executeAll combinedPolicy 2026 [| pid; conflicting |] basePath conflictOutput |> ignore
+            Assert.IsTrue(File.ReadAllText(diagnosticPath conflictOutput "events" "diagnostics.csv").Contains("cross_source_fact_conflict"))
+            Assert.IsFalse((readGtfs conflictOutput "stop_times.txt").Contains("09:01:45"), "A cross-source conflict must retain the national schedule")
 
             write (Path.Combine(jmkDir, "api.txt")) "Linka/CVlaku = trip_id: malformed\n"
             let malformedZip = Path.Combine(root, "IDSJMK-malformed.zip")
@@ -686,6 +761,6 @@ type RegionalGtfsOverlayTests() =
             let malformedDescriptor = Path.Combine(root, "jmk-malformed.json")
             write malformedDescriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha malformedZip}\"}}")
             let malformed = { jmk with payloadPath = malformedZip; descriptorPath = malformedDescriptor }
-            Assert.ThrowsExactly<InvalidOperationException>(fun () -> RegionalGtfsOverlay.executeAll combinedPolicy 2026 [| pid; malformed |] basePath (Path.Combine(root, "malformed")) |> ignore) |> ignore
+            Assert.ThrowsExactly<InvalidOperationException>(fun () -> executeAll combinedPolicy 2026 [| pid; malformed |] basePath (Path.Combine(root, "malformed")) |> ignore) |> ignore
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)

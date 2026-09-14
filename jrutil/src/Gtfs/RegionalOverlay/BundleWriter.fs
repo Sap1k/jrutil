@@ -24,6 +24,8 @@ type Input = {
     source: SourceAnalysis.Result
     matches: TripMatching.Result
     gvdYear: int
+    diagnosticsOutput: string option
+    diagnosticTraces: bool
 }
 
 /// Stream the resolved bundle, write reports and atomically activate the output.
@@ -33,6 +35,8 @@ let write ({
     source = source
     matches = matches
     gvdYear = gvdYear
+    diagnosticsOutput = diagnosticsOutput
+    diagnosticTraces = diagnosticTraces
 }: Input) =
     let sibling = Path.GetDirectoryName(prepared.outputBundle)
     let temporary = Path.Combine(sibling, "." + Path.GetFileName(prepared.outputBundle) + ".tmp-" + Guid.NewGuid().ToString("N"))
@@ -105,31 +109,50 @@ let write ({
         let mutable previousTrip = ""
         let mutable ordinal = 0
         let mutable outputBaseCallsRead = 0L
-        for row in csvValues prepared.baseGtfs "stop_times.txt" stopTimeColumns do
-            let baseTripId = getCallField row "trip_id"
-            if baseTripId <> previousTrip then
-                previousTrip <- baseTripId
-                ordinal <- 0
-            match projection.slicesByBaseTrip.TryGetValue(baseTripId) with
-            | true, slices ->
-                for slice in slices do
-                    let outputRow = retainedCall ordinal (slices.Length > 1) row slice
+        let outputCalls = seq {
+            for row in csvValues prepared.baseGtfs "stop_times.txt" stopTimeColumns do
+                let baseTripId = getCallField row "trip_id"
+                if baseTripId <> previousTrip then
+                    previousTrip <- baseTripId
+                    ordinal <- 0
+                match projection.slicesByBaseTrip.TryGetValue(baseTripId) with
+                | true, slices ->
+                    for slice in slices do
+                        let outputRow = retainedCall ordinal (slices.Length > 1) row slice
+                        usedStopIds.Add(getCallField outputRow "stop_id") |> ignore
+                        writtenCallCount <- writtenCallCount + 1L
+                        yield outputRow
+                | _ -> ()
+                ordinal <- ordinal + 1
+                outputBaseCallsRead <- outputBaseCallsRead + 1L
+                if outputBaseCallsRead % 1000000L = 0L then logProgress "write-output-calls" outputBaseCallsRead None
+            for sourceRow in csvValues prepared.binding.payloadPath "stop_times.txt" stopTimeColumns do
+                let sourceTripId = getCallField sourceRow "trip_id"
+                match projection.sourceTripAdditionsBySourceId.TryGetValue(sourceTripId) with
+                | true, addition when sourceTripId = addition.projection.sourceTripId ->
+                    let outputRow = addedCall sourceTripId sourceRow addition
                     usedStopIds.Add(getCallField outputRow "stop_id") |> ignore
-                    writeCsvRow stopTimeWriter outputRow
                     writtenCallCount <- writtenCallCount + 1L
-            | _ -> ()
-            ordinal <- ordinal + 1
-            outputBaseCallsRead <- outputBaseCallsRead + 1L
-            if outputBaseCallsRead % 1000000L = 0L then logProgress "write-output-calls" outputBaseCallsRead None
-        for sourceRow in csvValues prepared.binding.payloadPath "stop_times.txt" stopTimeColumns do
-            let sourceTripId = getCallField sourceRow "trip_id"
-            match projection.sourceTripAdditionsBySourceId.TryGetValue(sourceTripId) with
-            | true, addition ->
-                let outputRow = addedCall sourceTripId sourceRow addition
-                usedStopIds.Add(getCallField outputRow "stop_id") |> ignore
-                writeCsvRow stopTimeWriter outputRow
-                writtenCallCount <- writtenCallCount + 1L
-            | _ -> ()
+                    yield outputRow
+                | _ -> ()
+        }
+        // Validity slices interleave output trip IDs. Normalize native output
+        // once, before serialization, so every downstream call reader can stream.
+        let compareCalls left right =
+            let trip = StringComparer.Ordinal.Compare(getCallField left "trip_id", getCallField right "trip_id")
+            if trip <> 0 then trip
+            else compare (Int32.Parse(getCallField left "stop_sequence", CultureInfo.InvariantCulture))
+                         (Int32.Parse(getCallField right "stop_sequence", CultureInfo.InvariantCulture))
+        do
+            use scratch = new Scratch.Storage(sibling)
+            logProgress "sort-output-calls" 0L None
+            let ordered = Scratch.sortRows scratch compareCalls Scratch.defaultBufferBytes outputCalls
+            let mutable written = 0L
+            for row in ordered do
+                writeCsvRow stopTimeWriter row
+                written <- written + 1L
+                if written % 1000000L = 0L then logProgress "write-sorted-output-calls" written (Some writtenCallCount)
+            logProgress "write-sorted-output-calls" written (Some writtenCallCount)
         stopTimeWriter.Flush()
         stopTimeWriter.Dispose()
         logProgress "write-output-calls" outputBaseCallsRead (Some outputBaseCallsRead)
@@ -762,14 +785,22 @@ let write ({
         Directory.CreateDirectory(baseEvidence) |> ignore
         logProgress "copy-base-evidence" 0L None
         let mutable copiedEvidenceFiles = 0L
-        for file in Directory.EnumerateFiles(prepared.baseBundle) do
-            File.Copy(file, Path.Combine(baseEvidence, Path.GetFileName(file)), false)
-            copiedEvidenceFiles <- copiedEvidenceFiles + 1L
-            logProgress "copy-base-evidence" copiedEvidenceFiles None
-        for directory in Directory.EnumerateDirectories(prepared.baseBundle) do
-            let name = Path.GetFileName(directory)
-            if name <> "gtfs-intermediate" && name <> "extensions" then
-                copyDirectory directory (Path.Combine(baseEvidence, name))
+        if File.Exists(Path.Combine(prepared.baseBundle, "gtfs.zip")) then
+            // The production base can be read in place until finalization.  Do
+            // not duplicate its (potentially national-scale) serving payloads
+            // in compiler scratch merely to pass them to the package writer.
+            File.WriteAllText(Path.Combine(temporary, "base-package.path"), prepared.baseBundle, new UTF8Encoding(false))
+            File.Copy(Path.Combine(prepared.baseBundle, "manifest.json"), Path.Combine(baseEvidence, "manifest.json"), false)
+            copiedEvidenceFiles <- 1L
+        else
+            for file in Directory.EnumerateFiles(prepared.baseBundle) do
+                File.Copy(file, Path.Combine(baseEvidence, Path.GetFileName(file)), false)
+                copiedEvidenceFiles <- copiedEvidenceFiles + 1L
+                logProgress "copy-base-evidence" copiedEvidenceFiles None
+            for directory in Directory.EnumerateDirectories(prepared.baseBundle) do
+                let name = Path.GetFileName(directory)
+                if name <> "gtfs-intermediate" && name <> "extensions" then
+                    copyDirectory directory (Path.Combine(baseEvidence, name))
         logProgress "copy-base-evidence" copiedEvidenceFiles (Some copiedEvidenceFiles)
         let policyOutput = Path.Combine(temporary, "policy")
         Directory.CreateDirectory(policyOutput) |> ignore
@@ -854,8 +885,16 @@ let write ({
         File.WriteAllText(Path.Combine(temporary, "manifest.json"), JsonSerializer.Serialize(manifest, jsonOptions), new UTF8Encoding(false))
 
         prepared.scratch.Flush()
-        Directory.Move(temporary, prepared.outputBundle)
+        let productionTemporary = temporary + ".production"
+        JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) temporary productionTemporary
+        diagnosticsOutput
+        |> Option.iter (fun path ->
+            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact temporary path diagnosticTraces)
+        Directory.Delete(temporary, true)
+        Directory.Move(productionTemporary, prepared.outputBundle)
         finalResult
     with error ->
         if Directory.Exists(temporary) then Directory.Delete(temporary, true)
-        raise error
+        let productionTemporary = temporary + ".production"
+        if Directory.Exists(productionTemporary) then Directory.Delete(productionTemporary, true)
+        reraise ()

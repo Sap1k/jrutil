@@ -1,0 +1,1974 @@
+{
+  "serving_schema_version": 2,
+  "parquet_metadata": {
+    "obehy.schema_version": "2",
+    "obehy.relation": "<relation name>",
+    "jrutil.bundle_format": "jrutil-production"
+  },
+  "rules": {
+    "dates": "date32, inclusive service dates",
+    "times": "signed int32 seconds from service-day midnight; values above 86400 allowed",
+    "strings": "opaque case-sensitive UTF-8, sorted by ordinal UTF-8 bytes",
+    "lists": "repeated rows only",
+    "row_group_maximum": 65536
+  },
+  "relations": [
+    {
+      "name": "agency",
+      "fields": [
+        {
+          "name": "agency_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "timezone",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "language",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "phone",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "fare_url",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "email",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "agency_id"
+      ],
+      "sort_key": [
+        "agency_id"
+      ]
+    },
+    {
+      "name": "location",
+      "fields": [
+        {
+          "name": "location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "domain",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "parent_location_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "public_code",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "municipality_name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "district_name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "district_code",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "nearby_place",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "country_code",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "coordinate_precision",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "longitude",
+          "type": "double",
+          "nullable": true
+        },
+        {
+          "name": "latitude",
+          "type": "double",
+          "nullable": true
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "timezone",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "wheelchair_boarding",
+          "type": "int16",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "location_id"
+      ],
+      "sort_key": [
+        "location_id"
+      ]
+    },
+    {
+      "name": "route",
+      "fields": [
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "agency_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "gtfs_route_type",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "short_name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "long_name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "description",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "url",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "text_color",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "sort_order",
+          "type": "int32",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "route_id"
+      ],
+      "sort_key": [
+        "route_id"
+      ]
+    },
+    {
+      "name": "service_calendar",
+      "fields": [
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "weekday_mask",
+          "type": "int16",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "service_id"
+      ],
+      "sort_key": [
+        "service_id"
+      ]
+    },
+    {
+      "name": "service_exception",
+      "fields": [
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "service_date",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "added",
+          "type": "bool",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "service_id",
+        "service_date"
+      ],
+      "sort_key": [
+        "service_id",
+        "service_date"
+      ]
+    },
+    {
+      "name": "shape",
+      "fields": [
+        {
+          "name": "shape_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "generation_method",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "shape_id"
+      ],
+      "sort_key": [
+        "shape_id"
+      ]
+    },
+    {
+      "name": "shape_point",
+      "fields": [
+        {
+          "name": "shape_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "longitude",
+          "type": "double",
+          "nullable": false
+        },
+        {
+          "name": "latitude",
+          "type": "double",
+          "nullable": false
+        },
+        {
+          "name": "distance_traveled",
+          "type": "double",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "shape_id",
+        "sequence"
+      ],
+      "sort_key": [
+        "shape_id",
+        "sequence"
+      ]
+    },
+    {
+      "name": "trip",
+      "fields": [
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "direction",
+          "type": "int16",
+          "nullable": true
+        },
+        {
+          "name": "headsign",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "short_name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "block_key",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "wheelchair_accessible",
+          "type": "int16",
+          "nullable": true
+        },
+        {
+          "name": "bikes_allowed",
+          "type": "int16",
+          "nullable": true
+        },
+        {
+          "name": "shape_id",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "trip_id"
+      ],
+      "sort_key": [
+        "trip_id"
+      ]
+    },
+    {
+      "name": "trip_call",
+      "fields": [
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "passenger_service",
+          "type": "bool",
+          "nullable": false
+        },
+        {
+          "name": "boarding_point_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "route_stop_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_arrival",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_departure",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_passage",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "pickup_type",
+          "type": "int16",
+          "nullable": false
+        },
+        {
+          "name": "dropoff_type",
+          "type": "int16",
+          "nullable": false
+        },
+        {
+          "name": "timepoint",
+          "type": "bool",
+          "nullable": false
+        },
+        {
+          "name": "stop_headsign",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "shape_distance_traveled",
+          "type": "double",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "trip_id",
+        "sequence"
+      ],
+      "sort_key": [
+        "trip_id",
+        "sequence"
+      ]
+    },
+    {
+      "name": "route_segment",
+      "fields": [
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "from_sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "to_sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "trip_id",
+        "from_sequence"
+      ],
+      "sort_key": [
+        "trip_id",
+        "from_sequence"
+      ]
+    },
+    {
+      "name": "transfer",
+      "fields": [
+        {
+          "name": "transfer_key",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "from_location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "to_location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "from_route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "to_route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "from_trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "to_trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "transfer_type",
+          "type": "int16",
+          "nullable": false
+        },
+        {
+          "name": "minimum_transfer_time",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "maximum_waiting_time",
+          "type": "int32",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "transfer_key"
+      ],
+      "sort_key": [
+        "transfer_key"
+      ]
+    },
+    {
+      "name": "fare_system",
+      "fields": [
+        {
+          "name": "fare_system_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "fare_system_id"
+      ],
+      "sort_key": [
+        "fare_system_id"
+      ]
+    },
+    {
+      "name": "fare_zone",
+      "fields": [
+        {
+          "name": "zone_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "fare_system_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "zone_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_scope",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "zone_id"
+      ],
+      "sort_key": [
+        "zone_id"
+      ]
+    },
+    {
+      "name": "location_zone",
+      "fields": [
+        {
+          "name": "location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "zone_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "location_id",
+        "zone_id"
+      ],
+      "sort_key": [
+        "location_id",
+        "zone_id"
+      ]
+    },
+    {
+      "name": "call_zone",
+      "fields": [
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "zone_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_order",
+          "type": "int32",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "trip_id",
+        "sequence",
+        "zone_id"
+      ],
+      "sort_key": [
+        "trip_id",
+        "sequence",
+        "zone_id"
+      ]
+    },
+    {
+      "name": "service_note",
+      "fields": [
+        {
+          "name": "note_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": true
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": true
+        },
+        {
+          "name": "service_note_type",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "note_id"
+      ],
+      "sort_key": [
+        "note_id"
+      ]
+    },
+    {
+      "name": "service_note_assignment",
+      "fields": [
+        {
+          "name": "assignment_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "note_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "scope",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "assignment_id"
+      ],
+      "sort_key": [
+        "assignment_id"
+      ]
+    },
+    {
+      "name": "service_feature_assignment",
+      "fields": [
+        {
+          "name": "feature_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "scope",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "call_sequence",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "note_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "feature_id"
+      ],
+      "sort_key": [
+        "feature_id"
+      ]
+    },
+    {
+      "name": "location_feature",
+      "fields": [
+        {
+          "name": "feature_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "kind",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "feature_id"
+      ],
+      "sort_key": [
+        "feature_id"
+      ]
+    },
+    {
+      "name": "connection_claim",
+      "fields": [
+        {
+          "name": "connection_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "direction",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "origin_trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "origin_sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_source_route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_source_trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_source_stop_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_source_post_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_source_end_stop_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_source_end_post_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "wait_minutes",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_public_line",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_destination_text",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_derivation",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "resolution_status",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "target_route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "target_location_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "connection_id"
+      ],
+      "sort_key": [
+        "connection_id"
+      ]
+    },
+    {
+      "name": "travel_restriction_assignment",
+      "fields": [
+        {
+          "name": "assignment_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "scope",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_route_stop_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_stop_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "call_sequence",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "group_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "assignment_id"
+      ],
+      "sort_key": [
+        "assignment_id"
+      ]
+    },
+    {
+      "name": "operational_location",
+      "fields": [
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "country_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "primary_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "longitude",
+          "type": "double",
+          "nullable": true
+        },
+        {
+          "name": "latitude",
+          "type": "double",
+          "nullable": true
+        },
+        {
+          "name": "coordinate_source",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "coordinate_source_object_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "coordinate_match_method",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "source_id",
+        "source_location_id"
+      ],
+      "sort_key": [
+        "source_id",
+        "source_location_id"
+      ]
+    },
+    {
+      "name": "operational_journey",
+      "fields": [
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_journey_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "domain",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "source_id",
+        "source_journey_id"
+      ],
+      "sort_key": [
+        "source_id",
+        "source_journey_id"
+      ]
+    },
+    {
+      "name": "operational_call",
+      "fields": [
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_journey_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "source_location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "passenger_service",
+          "type": "bool",
+          "nullable": false
+        },
+        {
+          "name": "scheduled_arrival",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_departure",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_passage",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "subsidiary_code",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "subsidiary_name",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "active_line_code",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "source_id",
+        "source_journey_id",
+        "sequence"
+      ],
+      "sort_key": [
+        "source_id",
+        "source_journey_id",
+        "sequence"
+      ]
+    },
+    {
+      "name": "source_entity_map",
+      "fields": [
+        {
+          "name": "entity_binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "identifier_namespace",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "entity_kind",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "public_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "entity_binding_id"
+      ],
+      "sort_key": [
+        "entity_binding_id"
+      ]
+    },
+    {
+      "name": "source_trip_map",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "trip_namespace",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "binding_status",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "scheduled_start",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_end",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "source_route_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_direction_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_start_location_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_end_location_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_block_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_run_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "source_duty_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "call_pattern_sha256",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "variant_key",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "binding_id"
+      ],
+      "sort_key": [
+        "binding_id"
+      ]
+    },
+    {
+      "name": "source_call_map",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "call_namespace",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_sequence",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "call_sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "source_stop_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_arrival",
+          "type": "int32",
+          "nullable": true
+        },
+        {
+          "name": "scheduled_departure",
+          "type": "int32",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "binding_id",
+        "call_namespace",
+        "source_sequence",
+        "call_sequence"
+      ],
+      "sort_key": [
+        "binding_id",
+        "call_namespace",
+        "source_sequence",
+        "call_sequence"
+      ]
+    },
+    {
+      "name": "source_trip_coverage",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "coverage_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "service_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "from_sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "to_sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "coverage_type",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "system_id",
+          "type": "string",
+          "nullable": true
+        },
+        {
+          "name": "coverage_role",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "binding_id",
+        "coverage_id",
+        "from_sequence",
+        "to_sequence"
+      ],
+      "sort_key": [
+        "binding_id",
+        "coverage_id",
+        "from_sequence",
+        "to_sequence"
+      ]
+    },
+    {
+      "name": "identifier_alias",
+      "fields": [
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "namespace",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "observed_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "canonical_value",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "source_id",
+        "namespace",
+        "observed_id",
+        "valid_from"
+      ],
+      "sort_key": [
+        "source_id",
+        "namespace",
+        "observed_id",
+        "valid_from"
+      ]
+    },
+    {
+      "name": "road_route_key",
+      "fields": [
+        {
+          "name": "entity_binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "cis_line_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "entity_binding_id",
+        "cis_line_id"
+      ],
+      "sort_key": [
+        "entity_binding_id",
+        "cis_line_id"
+      ]
+    },
+    {
+      "name": "road_trip_key",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "cis_line_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "cis_trip_id",
+          "type": "int64",
+          "nullable": false
+        },
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "binding_id",
+        "cis_line_id",
+        "cis_trip_id"
+      ],
+      "sort_key": [
+        "binding_id",
+        "cis_line_id",
+        "cis_trip_id"
+      ]
+    },
+    {
+      "name": "rail_trip_key",
+      "fields": [
+        {
+          "name": "binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "train_number",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "trip_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "valid_from",
+          "type": "date32",
+          "nullable": false
+        },
+        {
+          "name": "valid_to",
+          "type": "date32",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "binding_id",
+        "train_number"
+      ],
+      "sort_key": [
+        "binding_id",
+        "train_number"
+      ]
+    },
+    {
+      "name": "selected_field_provenance",
+      "fields": [
+        {
+          "name": "object_type",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "object_key",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "field_name",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "selection_rule",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "object_type",
+        "object_key",
+        "field_name",
+        "source_id",
+        "source_snapshot_sha256",
+        "source_object_id",
+        "selection_rule"
+      ],
+      "sort_key": [
+        "object_type",
+        "object_key",
+        "field_name",
+        "source_id",
+        "source_snapshot_sha256",
+        "source_object_id",
+        "selection_rule"
+      ]
+    },
+    {
+      "name": "object_origin",
+      "fields": [
+        {
+          "name": "object_type",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "object_key",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "identifier_namespace",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "selection_rule",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "object_type",
+        "object_key"
+      ],
+      "sort_key": [
+        "object_type",
+        "object_key"
+      ]
+    },
+    {
+      "name": "binding_evidence",
+      "fields": [
+        {
+          "name": "binding_kind",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "binding_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "evidence_source_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_snapshot_sha256",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "identifier_namespace",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_object_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "selection_rule",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "binding_kind",
+        "binding_id",
+        "evidence_source_id",
+        "source_snapshot_sha256",
+        "identifier_namespace",
+        "source_object_id",
+        "selection_rule"
+      ],
+      "sort_key": [
+        "binding_kind",
+        "binding_id",
+        "evidence_source_id",
+        "source_snapshot_sha256",
+        "identifier_namespace",
+        "source_object_id",
+        "selection_rule"
+      ]
+    },
+    {
+      "name": "route_stop",
+      "fields": [
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_stop_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "location_id",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "route_id",
+        "route_stop_id"
+      ],
+      "sort_key": [
+        "route_id",
+        "route_stop_id"
+      ]
+    },
+    {
+      "name": "route_stop_zone",
+      "fields": [
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_stop_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "zone_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_order",
+          "type": "int32",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "route_id",
+        "route_stop_id",
+        "zone_id"
+      ],
+      "sort_key": [
+        "route_id",
+        "route_stop_id",
+        "zone_id"
+      ]
+    }
+  ]
+}

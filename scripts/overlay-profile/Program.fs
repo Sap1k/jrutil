@@ -46,7 +46,16 @@ let run (args: string array) =
     printfn "profile_pid=%d" Environment.ProcessId
     try
         let binding: RegionalOverlay.Types.SourceBinding = { sourceId = source; payloadPath = zip; descriptorPath = descriptor }
-        RegionalGtfsOverlay.executeWithAuditDate (Some auditDate) policy year binding baseline output |> printfn "%A"
+        RegionalGtfsOverlay.compile {
+            auditDate = Some auditDate
+            policyPath = policy
+            gvdYear = year
+            bindings = [| binding |]
+            baseBundle = baseline
+            outputBundle = output
+            diagnosticsOutput = None
+            diagnosticTraces = false
+        } |> printfn "%A"
     finally
         timer.DisposeAsync().AsTask().GetAwaiter().GetResult()
         record()

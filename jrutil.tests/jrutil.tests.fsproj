@@ -26,6 +26,7 @@
     <Compile Include="CzPttToGtfsTests.fs" />
     <Compile Include="RegionalGtfsOverlayTests.fs" />
     <Compile Include="RegionalOverlayStorageTests.fs" />
+    <Compile Include="ServingContractTests.fs" />
     <Compile Include="EntryPoint.fs" />
   </ItemGroup>
 

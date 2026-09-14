@@ -149,6 +149,17 @@ type OverlayResult = {
     selectedTransfers: int
 }
 
+type CompilationOptions = {
+    auditDate: NodaTime.LocalDate option
+    policyPath: string
+    gvdYear: int
+    bindings: SourceBinding array
+    baseBundle: string
+    outputBundle: string
+    diagnosticsOutput: string option
+    diagnosticTraces: bool
+}
+
 type MultiSourceOverlayResult = {
     outputPath: string
     sources: string array

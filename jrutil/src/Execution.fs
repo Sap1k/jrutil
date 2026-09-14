@@ -16,6 +16,11 @@ let MiB = 1024L * 1024L
 [<Literal>]
 let GiB = 1024L * 1024L * 1024L
 
+/// Process-memory target leaves space below the aggregate acceptance ceiling for the build runner.
+/// It guides worker admission and spill decisions; it is not a runtime hard limit.
+[<Literal>]
+let ProductionProcessBudgetBytes = 3_500_000_000L
+
 type MemoryBudget =
     | AutoMemory
     | FixedMemory of bytes: int64

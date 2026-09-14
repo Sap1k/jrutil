@@ -7,6 +7,14 @@ public transport data, such as:
 - real-time timetable changes (TODO)
 - vehicle positions (scraping GRAPP, viewing historical data)
 
+Production schedule writers emit the closed `jrutil-production` contract:
+`gtfs.zip`, four public Czech enrichment extensions, serving-v2 Parquet
+relations, `manifest.json`, and bounded `diagnostics.json`. The normative
+contract is [docs/PRODUCTION_CONTRACT.md](docs/PRODUCTION_CONTRACT.md), with
+[migration instructions](docs/OUTPUT_MIGRATION.md) and the
+[historical output audit](docs/OUTPUT_AUDIT.md). Older sidecar layouts
+described below are compiler staging details, not consumer interfaces.
+
 ## Regional GTFS overlays
 
 `regional-gtfs-overlay` enriches an immutable national JDF bundle with facts
@@ -41,7 +49,7 @@ any order. The base is prepared once and both feeds are resolved in one pass;
 the command does not chain independently produced overlays.
 
 ```text
-jrutil-multitool regional-gtfs-overlay-all \
+jrutil-multitool regional-gtfs-overlay \
   --policy=config/regional-gtfs-overlay/pid-ids-jmk-overlay-v1.json \
   --gvd-year=2026 \
   --source=pid-gtfs=PID_GTFS.zip \
@@ -105,10 +113,9 @@ make the calibration percentage misleading.
 
 `--audit-date=YYYY-MM-DD` defaults to the CIS snapshot retrieval date in
 Europe/Prague. `reports/snapshot_day_coverage.csv` separates that day's service
-coverage from future, unverified JDF comparisons. `reports/semantic_inheritance.csv`
-separates aligned snapshot evidence from source-only trips and claims requiring
-explicit notice validity; trip identity mappings alone do not authorize future
-notice inheritance. Original sidecars remain unchanged in `base-evidence/`.
+coverage from future, unverified JDF comparisons. Semantic applicability is
+compiled into calendar-backed serving assignments; trip identity mappings alone
+do not authorize future notice inheritance.
 Ambiguous national route versions use a source-native route for new trips rather
 than inheriting an arbitrary version. Exact CIS identity permits bus/trolleybus
 compatibility, with a separate source-mode route preserving retained base service.
@@ -116,14 +123,14 @@ compatibility, with a separate source-mode route preserving retained base servic
 GTFS-derived destination displays which identify the final stop are expanded to
 that stop's full canonical overlay name. Genuinely distinct source displays,
 including bilingual, via and intermediate-destination text, remain unchanged.
-`reports/headsigns.csv` preserves raw and output values, the decision reason and
-snapshot-day scope. Retained national headsigns are not rewritten. Bounded pattern edits are not complete service coverage and
+Optional detailed diagnostics preserve raw and output headsign decisions.
+Retained national headsigns are not rewritten. Bounded pattern edits are not complete service coverage and
 yield to full source trip projection on authoritative dates.
 
-The bundle contains regenerated `gtfs-intermediate/` and `extensions/`, copied
-national non-GTFS evidence under `base-evidence/`, complete mappings and field
-provenance, quarantine/conflict/exclusion/coverage reports, and a deterministic
-manifest. The checked-in PID v1 policy is deliberately a non-publishable
+The production package contains `gtfs.zip`, four public extension tables, the
+declared serving-v2 Parquet relations, `manifest.json`, and bounded
+`diagnostics.json`. Detailed matching evidence is written only to an explicitly
+requested diagnostics artifact. The checked-in PID v1 policy is deliberately a non-publishable
 calibration policy. Publication requires a reviewed policy-only update which
 sets coverage floors and enables publication.
 
@@ -215,12 +222,9 @@ report are legacy classification labels even for another source. Consult the
 source identity and provenance rather than interpreting these values as feed IDs.
 Human-readable diagnostics use the configured source identity.
 
-The future regional `overlay-all` command should prepare one immutable national
-base, analyze each feed against that base, resolve source-qualified claims, and
-write one bundle. It must not chain overlays of already-overlaid bundles. The
-current internal preparation/analysis/projection/writer boundaries are the seams
-for that work; cross-source conflict resolution, priority semantics and a
-multi-source manifest remain future work.
+The regional overlay command prepares one national model from every declared
+source binding, resolves source-qualified claims, and writes one bundle. It
+does not chain overlays of already-overlaid bundles.
 
 # Project parts
 
@@ -245,41 +249,39 @@ PostgreSQL database.
 
 *mkscriptenv.sh* creates an environment for writing .fsx scripts in *scripts*.
 
-# Oběhy JDF schedule extensions
+# Czech schedule extensions
 
-JDF-to-GTFS conversion also writes four optional Czech extension files used
-by the Oběhy canonical importer:
+Production packages expose only portable schedule facts that standard GTFS
+cannot represent. Identity and provenance are available exclusively through
+the typed serving relations documented in `docs/PRODUCTION_CONTRACT.md`.
 
 | File | Purpose |
 | --- | --- |
-| `cz_routes.txt` | CIS line identity, passenger-facing line number and JDF provenance |
-| `cz_trips.txt` | CIS line/trip identity and source-trip provenance |
-| `cz_stops.txt` | Source stop-place, CIS stop and post identities |
-| `cz_stop_zones.txt` | Normalized, route-scoped stop-to-zone memberships |
+| `cz_zones.txt` | Zone identity and optional fare-system ownership |
+| `cz_route_stop_zones.txt` | Ordered route-stop-specific zone memberships |
+| `cz_call_zones.txt` | Ordered call-specific zone memberships |
+| `cz_transfer_constraints.txt` | Waiting limits attached to standard GTFS transfers |
 
-The selected public line number is written to both `cz_routes.txt` and
-`routes.txt`'s `route_short_name`. A preferred JDF `LinExt` designation wins;
+The selected public line number is written to `routes.txt`'s
+`route_short_name`. A preferred JDF `LinExt` designation wins;
 otherwise the last three digits of the six-digit CIS line ID are used.
 Numeric designations have leading zeroes removed, while alphanumeric
 designations retain their spelling and case.
 
 JDF post references from `Oznacniky.txt` and text-only station numbers from
 `Zasspoje.txt` are both projected as distinct child stops with standard GTFS
-`parent_station` links. In `cz_stops.txt`, `stop_id` identifies the exact GTFS
-place-or-post row while `stop_place_id` always identifies its containing stop
-place; they are equal for a place and differ for a post. Post IDs share one
+`parent_station` links. Typed `location` and `source_entity_map` rows preserve
+the place/boarding-point hierarchy and source identity. Post IDs share one
 hierarchy while retaining source semantics: `:post:id:` is an authoritative
 `Oznacniky` ID and bare `:post:<value>` is a textual `Zasspoje` designation.
 
 Raw zone lists are split, trimmed and deduplicated without attempting to infer
-their IDS system. Per-membership `ids_system_id` in `cz_stop_zones.txt`
-therefore remains empty for this conversion. A route
+their IDS system. `fare_system_id` therefore remains null when ownership is
+unknown. A route
 distinction and raw token form the source zone identity. Standard GTFS
-`stops.zone_id` is populated only when a stop has exactly one such identity;
-plural memberships remain authoritative in `cz_stop_zones.txt`. The bundle's
-zone Parquet contains only the JDF route-stop provenance and source order that
-cannot be reconstructed from that extension. Standard `stop_times.txt` never contains the old
-non-standard `stop_zone_ids` column.
+route-stop occurrences and source order are retained in `route_stop_zone` and
+projected to `cz_route_stop_zones.txt`. Standard `stop_times.txt` never contains
+the old non-standard `stop_zone_ids` column.
 
 Generated intermediate identifiers consistently use colon-separated
 namespaces: `jdf:agency:…`, `jdf:route:…`, `jdf:trip:…`, `jdf:stop:…`,
@@ -400,36 +402,22 @@ The output path must not exist. The command writes through a temporary sibling
 directory and activates the result only after every file and checksum has been
 produced. Conversion or packaging failures return a non-zero exit code.
 
-Bundle format v1 deliberately treats standard GTFS plus the four extension
-tables as the primary normalized representation. It does not mirror those
-entities into Parquet:
+Production packages use the versioned contract documented in
+`docs/PRODUCTION_CONTRACT.md`:
 
 ```text
-bundle/
-├── gtfs-intermediate/
+output/
+├── gtfs.zip
 ├── extensions/
-├── source_route_metadata.parquet
-├── source_stop_metadata.parquet
-├── source_call_metadata.parquet
-├── source_route_stop_zone_metadata.parquet
-├── source_notice_metadata.parquet
-├── source_transfer_metadata.parquet
-├── source_travel_restriction_metadata.parquet
-├── derived_post_locations.parquet
-├── derived_post_assignments.parquet
-├── post_candidate_evidence.parquet
-├── post_side_groups.parquet
-├── derived_post_scores.parquet
-├── diagnostics.json
-└── manifest.json
+├── serving/
+├── manifest.json
+└── diagnostics.json
 ```
 
-The source Parquet tables retain facts that would otherwise be
-lost. The original route/stop/call metadata tables preserve JDF distinctions,
-structured stop-name components, coordinate absence and route-stop IDs. The
-additional relations preserve route-stop zone scope, textual notices,
-connection context and the `§`/`A`/`B`/`C` travel-exclusion groups. Trip,
-boarding-point, call and fare-zone entity mirrors are intentionally absent.
+Serving relations retain normalized identities, exact route-stop and call
+scope, zones, notices, connection claims, restrictions, and source
+provenance. The private source metadata used to build them is not a published
+consumer interface.
 
 Estimated posts are disabled by default unless `--routing-osm-pbf` or
 `--post-inference-evidence` is supplied.
@@ -524,10 +512,9 @@ source_travel_restriction_metadata
     source_route_stop_id, group_code
 ```
 
-`source_notice_metadata` maps `Udaje` to route notices, text-bearing or
-otherwise unhandled `Caskody` to trip notices, and `Mistenky` to reservation
-notices. Calendar-only `Caskody` are not repeated because their complete effect
-is already present in GTFS calendars. `Navaznosti` records retain their source
+The internal JDF extraction maps `Udaje` to route notices, all typed `Caskody`
+including text-free calendar designations to trip facts, and `Mistenky` to
+reservation facts. `Navaznosti` records retain their source
 target IDs and waiting context without guessing a canonical target.
 
 Travel exclusions retain their source scope: `Zaslinky` produces
@@ -539,7 +526,8 @@ union route-stop and trip-call assignments rather than expecting expanded rows.
 The join path is deliberately relational: GTFS identifies routes, trips and
 calls; `source_call_metadata` maps a GTFS call to its JDF route-stop;
 route-stop zone, transfer and restriction relations add only facts missing
-from GTFS. These Parquet files are an immutable import format. A runtime
+from GTFS. These historical Parquet files are compiler inputs. Serving v2 is
+the immutable import format. A runtime
 application should import them into indexed database tables rather than query
 bundle files per request.
 
@@ -569,15 +557,10 @@ path; the tree digest appends each path, a NUL byte and that file's SHA-256.
 `payload_bytes` is the sum of file sizes. ZIP input must contain exactly one
 JDF batch root and is rejected if paths are unsafe or collide by case.
 
-Bundle Parquet files use schema version 1, Snappy compression and fixed row
-groups. `source_id` and `snapshot_id` are stored once in Parquet file metadata
-and in `manifest.json`, not repeated on every row. The manifest also records
-JDF-declared metadata, conversion options, row counts, byte sizes and SHA-256
-for every other output. Identical input, descriptor, converter version and
-options produce identical bytes. When JDF lacks coordinates, standard GTFS
-uses JrUtil's existing `0,0` required-field fallback and
-`source_stop_metadata.parquet.coordinates_missing` preserves that fact without
-duplicating coordinate values.
+Production Parquet relations use serving schema v2, Snappy compression and
+fixed row groups of at most 65,536 rows. The manifest records schemas, keys,
+source snapshots, row counts, byte sizes and SHA-256 for every payload.
+Identical inputs, converter version and options produce identical bytes.
 
 # Installation:
 

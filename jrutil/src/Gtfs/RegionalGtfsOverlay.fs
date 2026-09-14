@@ -17,17 +17,17 @@ let private analyzeSource prepared =
     let matches = TripMatching.matchTrips { prepared = prepared; source = source; indexes = indexes }
     source, matches
 
-let executeWithAuditDate auditDate policyPath gvdYear (binding: SourceBinding) baseBundle outputBundle =
+let private executeSingle (options: CompilationOptions) (binding: SourceBinding) =
     use scratch = new Scratch.Storage(System.IO.Path.GetTempPath())
     Serilog.Log.Information("Regional overlay scratch: {ScratchDirectory}", scratch.Directory)
     let prepared = InputPreparation.prepare {
         scratch = scratch
-        auditDate = auditDate
-        policyPath = policyPath
-        gvdYear = gvdYear
+        auditDate = options.auditDate
+        policyPath = options.policyPath
+        gvdYear = options.gvdYear
         binding = binding
-        baseBundle = baseBundle
-        outputBundle = outputBundle
+        baseBundle = options.baseBundle
+        outputBundle = options.outputBundle
     }
 
     let source, matches = analyzeSource prepared
@@ -44,28 +44,30 @@ let executeWithAuditDate auditDate policyPath gvdYear (binding: SourceBinding) b
         projection = projection
         source = source
         matches = matches
-        gvdYear = gvdYear
+        gvdYear = options.gvdYear
+        diagnosticsOutput = options.diagnosticsOutput
+        diagnosticTraces = options.diagnosticTraces
     }
 
-let execute policyPath gvdYear binding baseBundle outputBundle =
-    executeWithAuditDate None policyPath gvdYear binding baseBundle outputBundle
-
-let executeAllWithAuditDate auditDate policyPath gvdYear (bindings: SourceBinding array) baseBundle outputBundle =
+let private executeMultiple (options: CompilationOptions) =
     use scratch = new Scratch.Storage(System.IO.Path.GetTempPath())
-    let combined = MultiSourcePreparation.prepare scratch.Directory policyPath baseBundle bindings
+    let combined = MultiSourcePreparation.prepare scratch.Directory options.policyPath options.baseBundle options.bindings
     let prepared = InputPreparation.prepare {
         scratch = scratch
-        auditDate = auditDate
+        auditDate = options.auditDate
         policyPath = combined.policyPath
-        gvdYear = gvdYear
+        gvdYear = options.gvdYear
         binding = combined.binding
-        baseBundle = baseBundle
-        outputBundle = outputBundle
+        baseBundle = options.baseBundle
+        outputBundle = options.outputBundle
     }
     let source, matches = analyzeSource prepared
     Runtime.releaseAnalysisMemory ()
     let projection = Projection.resolve { prepared = prepared; source = source; matches = matches }
-    let result = BundleWriter.write { prepared = prepared; projection = projection; source = source; matches = matches; gvdYear = gvdYear }
+    let result = BundleWriter.write {
+        prepared = prepared; projection = projection; source = source; matches = matches
+        gvdYear = options.gvdYear; diagnosticsOutput = options.diagnosticsOutput
+        diagnosticTraces = options.diagnosticTraces }
     let perSource = Dictionary<string, OverlayResult>(System.StringComparer.Ordinal)
     for sourceId in combined.sourceIds do
         let sourceTrips = source.tripRows |> Array.filter (fun row -> Support.sourceIdentity prepared.binding.sourceId row = sourceId)
@@ -90,5 +92,15 @@ let executeAllWithAuditDate auditDate policyPath gvdYear (bindings: SourceBindin
         perSource = perSource
     }
 
-let executeAll policyPath gvdYear bindings baseBundle outputBundle =
-    executeAllWithAuditDate None policyPath gvdYear bindings baseBundle outputBundle
+/// The single production compilation API. The source array may contain one
+/// binding or the exact set declared by a combined-source policy.
+let compile (options: CompilationOptions) =
+    if isNull options.bindings || options.bindings.Length = 0 then
+        invalidArg "options" "At least one source binding is required"
+    elif options.bindings.Length = 1 then
+        let result = executeSingle options options.bindings.[0]
+        let perSource = Dictionary<string, OverlayResult>(System.StringComparer.Ordinal)
+        perSource.[options.bindings.[0].sourceId] <- result
+        { outputPath = result.outputPath; sources = [| options.bindings.[0].sourceId |]
+          aggregate = result; perSource = perSource }
+    else executeMultiple options

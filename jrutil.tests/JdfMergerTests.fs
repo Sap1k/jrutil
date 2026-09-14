@@ -305,7 +305,7 @@ type JdfMergerTests() =
         Directory.CreateDirectory(root) |> ignore
         try
             let interleavedTripStops =
-                template.Value.tripStops
+                template.Value.tripStops |> Seq.toArray
                 |> Array.groupBy (fun value -> value.routeId)
                 |> Array.map snd
                 |> fun groups -> [|

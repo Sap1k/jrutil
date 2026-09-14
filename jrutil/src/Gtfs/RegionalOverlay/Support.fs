@@ -859,16 +859,22 @@ let descriptorRetrievedAtFromBase basePath =
     let root = document.RootElement
     let mutable snapshot = Unchecked.defaultof<JsonElement>
     let mutable retrieved = Unchecked.defaultof<JsonElement>
-    if not (root.TryGetProperty("source_snapshot", &snapshot))
-       || not (snapshot.TryGetProperty("retrieved_at", &retrieved)) then
-        invalidOp "Base manifest does not pin source_snapshot.retrieved_at"
+    if root.TryGetProperty("source_snapshot", &snapshot) then ()
+    else
+        let mutable sources = Unchecked.defaultof<JsonElement>
+        if root.TryGetProperty("sources", &sources) && sources.GetArrayLength() > 0 then
+            snapshot <- sources.[0]
+        else invalidOp "Base manifest does not pin source retrieval metadata"
+    if not (snapshot.TryGetProperty("retrieved_at", &retrieved)) then
+        invalidOp "Base manifest does not pin source retrieved_at"
     DateTimeOffset.Parse(retrieved.GetString(), CultureInfo.InvariantCulture)
 
 let validateInputs policyPath basePath outputPath gvdYear (binding: SourceBinding) =
     if gvdYear < 2000 || gvdYear > 9999 then invalidArg "--gvd-year" "GVD year is invalid"
     if not (Directory.Exists(basePath)) then invalidArg "base-bundle" $"Base bundle does not exist: {basePath}"
-    if not (Directory.Exists(Path.Combine(basePath, "gtfs-intermediate"))) then
-        invalidArg "base-bundle" "Base bundle is missing gtfs-intermediate"
+    if not (File.Exists(Path.Combine(basePath, "gtfs.zip")))
+       && not (Directory.Exists(Path.Combine(basePath, "gtfs-intermediate"))) then
+        invalidArg "base-bundle" "Base bundle has neither a production GTFS ZIP nor compiler staging GTFS"
     if Directory.Exists(outputPath) || File.Exists(outputPath) then
         invalidArg "output-bundle" "Output already exists; overlay bundles are immutable"
     if not (File.Exists(policyPath)) then invalidArg "--policy" $"Policy does not exist: {policyPath}"

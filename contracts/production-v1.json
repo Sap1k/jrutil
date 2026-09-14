@@ -1,0 +1,37 @@
+{
+  "bundle_format": "jrutil-production",
+  "bundle_version": 1,
+  "serving_schema_version": 2,
+  "extension_schema_version": 2,
+  "diagnostics_schema_version": 1,
+  "identity_contract": "jrutil-identity-v1",
+  "required_files": [
+    "gtfs.zip",
+    "extensions/cz_zones.txt",
+    "extensions/cz_route_stop_zones.txt",
+    "extensions/cz_call_zones.txt",
+    "extensions/cz_transfer_constraints.txt",
+    "serving/<relation>.parquet",
+    "manifest.json",
+    "diagnostics.json"
+  ],
+  "inventory_policy": "closed",
+  "gtfs_representation": "zip-only",
+  "diagnostics": {
+    "production_summary": "bounded",
+    "detailed_artifact": "explicit-output-only"
+  },
+  "determinism": {
+    "zip_entry_timestamp": "1980-01-01T00:00:00Z",
+    "zip_entry_order": "ordinal-name",
+    "csv_encoding": "utf-8-no-bom",
+    "csv_line_ending": "LF",
+    "parquet_row_group_maximum": 65536,
+    "manifest_self_hash": false
+  },
+  "compatibility": {
+    "regional_overlay_bundle_v1": false,
+    "regional_overlay_bundle_v2": false,
+    "obehy_serving_v1": false
+  }
+}

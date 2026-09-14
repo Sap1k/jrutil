@@ -1,0 +1,33 @@
+{
+  "extension_schema_version": 2,
+  "encoding": "utf-8-no-bom",
+  "line_ending": "LF",
+  "quoting": "RFC-4180",
+  "nullable_encoding": "empty-cell",
+  "list_encoding": "repeated-rows-only",
+  "files": [
+    {
+      "name": "cz_zones.txt",
+      "columns": ["zone_id", "zone_code", "fare_system_id", "source_id", "source_scope"],
+      "primary_key": ["zone_id"]
+    },
+    {
+      "name": "cz_route_stop_zones.txt",
+      "columns": ["route_id", "route_stop_id", "stop_id", "zone_id", "source_order"],
+      "primary_key": ["route_id", "route_stop_id", "zone_id"],
+      "foreign_keys": ["route_id -> GTFS routes.route_id", "stop_id -> GTFS stops.stop_id", "zone_id -> cz_zones.zone_id"]
+    },
+    {
+      "name": "cz_call_zones.txt",
+      "columns": ["trip_id", "stop_sequence", "zone_id", "source_order"],
+      "primary_key": ["trip_id", "stop_sequence", "zone_id"],
+      "foreign_keys": ["(trip_id,stop_sequence) -> GTFS stop_times", "zone_id -> cz_zones.zone_id"]
+    },
+    {
+      "name": "cz_transfer_constraints.txt",
+      "columns": ["transfer_key", "from_stop_id", "to_stop_id", "from_route_id", "to_route_id", "from_trip_id", "to_trip_id", "max_waiting_time"],
+      "primary_key": ["transfer_key"],
+      "semantics": "one row decorates the standard GTFS transfer selected by its six selectors"
+    }
+  ]
+}

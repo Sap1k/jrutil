@@ -128,6 +128,8 @@ type BundleExecutionOptions = {
     postInferenceEvidencePath: string option
     postInferencePolicyPath: string option
     includePostInferenceScores: bool
+    diagnosticsOutput: string option
+    diagnosticTraces: bool
     progress: BundleProgressEvent -> unit
 }
 
@@ -140,6 +142,8 @@ let defaultBundleExecutionOptions = {
     postInferenceEvidencePath = None
     postInferencePolicyPath = None
     includePostInferenceScores = true
+    diagnosticsOutput = None
+    diagnosticTraces = false
     progress = ignore
 }
 
@@ -457,9 +461,11 @@ let private scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Hash
                                  (candidateStopsWithMultiple: HashSet<int64>)
                                  progress =
     let restrictions = restrictionLookup batch
-    let routeStops = Dictionary<struct(string*int*int64),JdfModel.RouteStop>()
+    let routeRestrictions = Dictionary<struct(string*int*int64),int>()
     for stop in batch.routeStops do
-        routeStops.[struct(stop.routeId,stop.routeDistinction,stop.routeStopId)] <- stop
+        let mask = restrictionMask restrictions stop.attributes
+        routeRestrictions.[struct(stop.routeId,stop.routeDistinction,stop.routeStopId)] <- mask
+    let groupCodes = Array.init 16 (restrictionGroupCodes >> Seq.toArray)
     let modeByRoute = Dictionary<struct(string*int),JdfModel.TransportMode>()
     for route in batch.routes do
         modeByRoute.[struct(route.id,route.idDistinction)] <- route.transportMode
@@ -469,13 +475,16 @@ let private scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Hash
     let singletonDiagnostics = ResizeArray<Diagnostic>()
     let authoredModes = Dictionary<struct(int64*string),HashSet<JdfModel.TransportMode>>()
     let postNumbers = Dictionary<struct(int64*int64),HashSet<string>>()
-    let mutable currentTripId: string option = None
+    let mutable currentTripId: string = null
+    let mutable currentRoute: string = null
+    let mutable currentDistinction = 0
+    let mutable currentTrip = 0L
+    let mutable retained = false
     let mutable emittedCallCount = 0L
     let mutable restrictionMembers = Dictionary<string,HashSet<int64>>(StringComparer.Ordinal)
     let flushTrip () =
-        match currentTripId with
-        | None -> ()
-        | Some tripId ->
+        if not (isNull currentTripId) then
+            let tripId = currentTripId
             for pair in restrictionMembers do
                 if pair.Value.Count = 1 then
                     singletonDiagnostics.Add({
@@ -483,16 +492,20 @@ let private scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Hash
                         sourceObjectId = $"{tripId}:restriction-group:{sourceSegment pair.Key}"
                         message = "Effective travel-exclusion group has only one emitted call" })
         restrictionMembers <- Dictionary<string,HashSet<int64>>(StringComparer.Ordinal)
-    for index=0 to batch.tripStops.Length-1 do
+    for index=0 to batch.tripStops.Count-1 do
         let call=batch.tripStops.[index]
-        let tripId=JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
-        if currentTripId<>Some tripId then
-            flushTrip(); currentTripId <- Some tripId
-        let retained=retainedTrips.Contains(tripId)
+        if isNull currentTripId || currentRoute <> call.routeId || currentDistinction <> call.routeDistinction || currentTrip <> call.tripId then
+            flushTrip()
+            currentRoute <- call.routeId
+            currentDistinction <- call.routeDistinction
+            currentTrip <- call.tripId
+            currentTripId <- JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId
+            retained <- retainedTrips.Contains(currentTripId)
+        let tripId = currentTripId
         let emitted=callIsEmitted call
         if retained && emitted then emittedCallCount <- emittedCallCount+1L
-        let callRestrictionGroups =
-            restrictionGroupCodes (restrictionMask restrictions call.attributes) |> Seq.toArray
+        let callMask = restrictionMask restrictions call.attributes
+        let callRestrictionGroups = groupCodes.[callMask]
         if callRestrictionGroups.Length>0 then
             let sourceId=restrictionId call.routeId call.routeDistinction call.tripId call.routeStopId
             if not retained then filtered.Add(sourceId)
@@ -501,12 +514,8 @@ let private scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Hash
                 for groupCode in callRestrictionGroups do
                     assignments.Add(struct(tripId,call.routeStopId,groupCode))
         if retained && emitted then
-            let routeStop=routeStops.[struct(call.routeId,call.routeDistinction,call.routeStopId)]
-            Seq.append
-                (restrictionGroupCodes (restrictionMask restrictions routeStop.attributes))
-                callRestrictionGroups
-            |> Seq.distinct
-            |> Seq.iter (fun groupCode ->
+            let routeMask = routeRestrictions.[struct(call.routeId,call.routeDistinction,call.routeStopId)]
+            for groupCode in groupCodes.[routeMask ||| callMask] do
                 let members =
                     match restrictionMembers.TryGetValue(groupCode) with
                     | true,values -> values
@@ -514,7 +523,7 @@ let private scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Hash
                         let values=HashSet<int64>()
                         restrictionMembers.[groupCode] <- values
                         values
-                members.Add(call.routeStopId) |> ignore)
+                members.Add(call.routeStopId) |> ignore
         if candidateStopsWithMultiple.Contains(call.stopId) then
             let authoredKey =
                 match call.stopPostId,nonEmptyText call.stopPostNum with
@@ -545,7 +554,7 @@ let private scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Hash
                     values
             numbers.Add(postNumber) |> ignore
         | _ -> ()
-        if (index+1)%250_000=0 then progress (int64(index+1)) (Some(int64 batch.tripStops.Length))
+        if (index+1)%250_000=0 then progress (int64(index+1)) (Some(int64 batch.tripStops.Count))
     flushTrip()
     let conflictingPosts =
         postNumbers
@@ -642,6 +651,41 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
                 "coordinate_precision", box coordinatePrecision
                 "coordinate_source", nullableObj (stopLocationSources |> Map.tryFind stop.id) ])
 
+    let locationFeatures () =
+        batch.stops
+        |> Seq.collect (fun stop ->
+            let gtfsStopId = JdfToGtfs.jdfStopId stopIdsCis stop.id
+            if not (retainedStopIds.Contains(gtfsStopId)) then Seq.empty else
+            Jdf.parseAttributes batch stop.attributes
+            |> Seq.map (fun attribute ->
+                let code = attribute.CsvSerialize()
+                row [
+                    "gtfs_stop_id", box gtfsStopId; "source_code", box code
+                    "feature_kind", box (match attribute with | JdfModel.WheelchairAccessible -> "wheelchair_boarding_accessible" | _ -> "jdf_stop_attribute")
+                    "source_object_id", box $"{gtfsStopId}:attribute:{Uri.EscapeDataString(code)}" ]))
+        |> Seq.sortBy (fun value -> string value.["gtfs_stop_id"], string value.["source_code"])
+        |> Seq.toArray
+
+    let tripFeatures () : seq<JrUtil.Serving.FeatureWriter.Row> =
+        batch.trips
+        |> Seq.collect (fun trip ->
+            let gtfsTripId = JdfToGtfs.jdfTripId trip.routeId trip.routeDistinction trip.id
+            if not (retainedTripIds.Contains(gtfsTripId)) then Seq.empty
+            else
+                Jdf.parseAttributes batch trip.attributes
+                |> Seq.map (fun attribute ->
+                    let code = attribute.CsvSerialize()
+                    let kind =
+                        match attribute with
+                        | JdfModel.WheelchairAccessible -> "wheelchair_accessible_full"
+                        | JdfModel.PartlyWheelchairAccessible -> "wheelchair_accessible_partial"
+                        | JdfModel.ReservationAvailable -> "reservation_available"
+                        | JdfModel.OnlyWithReservation -> "reservation_required"
+                        | JdfModel.BicycleTransport -> "bicycle_transport"
+                        | _ -> "jdf_trip_attribute"
+                    { trip = gtfsTripId; code = code; kind = kind
+                      sourceObject = $"{gtfsTripId}:attribute:{Uri.EscapeDataString(code)}" }))
+
     let routeStopZones () =
         batch.routeStops
         |> Seq.collect (fun routeStop ->
@@ -659,68 +703,30 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             unbox<int> value.["zone_order"], string value.["zone_id"])
         |> Seq.toArray
 
-    let notices () =
-        let routeNotices =
-            batch.routeInfo
-            |> Array.choose (fun notice ->
-                if String.IsNullOrWhiteSpace(notice.text) then None else
-                let gtfsRouteId = JdfToGtfs.jdfRouteId notice.routeId notice.routeDistinction
-                if not (retainedRouteIds.Contains gtfsRouteId) then None else
-                Some (row [
-                    "source_notice_id", box (routeNoticeId notice.routeId notice.routeDistinction notice.id)
-                    "notice_kind", box "route_information"
-                    "gtfs_route_id", box gtfsRouteId
-                    "gtfs_trip_id", null
-                    "label", null
-                    "text", box notice.text
-                    "valid_from", null
-                    "valid_to", null
-                    "service_note_type", null ]))
-        let serviceNotices =
-            batch.serviceNotes
-            |> Array.choose (fun notice ->
-                let text = nonEmptyText notice.note
-                let label = nonEmptyText (Some notice.designation)
-                // A typed, text-free time code is already represented exactly
-                // by calendar.txt/calendar_dates.txt.
-                if notice.noteType.IsSome && text.IsNone then None
-                elif text.IsNone && label.IsNone then None
-                else
-                    let gtfsTripId =
-                        JdfToGtfs.jdfTripId notice.routeId notice.routeDistinction notice.tripId
-                    if not (retainedTripIds.Contains gtfsTripId) then None else
-                    Some (row [
-                        "source_notice_id", box (tripNoticeId notice.routeId notice.routeDistinction notice.tripId notice.id)
-                        "notice_kind", box "service_note"
-                        "gtfs_route_id", null
-                        "gtfs_trip_id", box gtfsTripId
-                        "label", nullableObj label
-                        "text", nullableObj text
-                        "valid_from", notice.dateFrom |> Option.map localDateString |> nullableObj
-                        "valid_to", notice.dateTo |> Option.map localDateString |> nullableObj
-                        "service_note_type", notice.noteType |> Option.map serviceNoteTypeName |> nullableObj ]))
-        let reservationNotices =
-            batch.reservationOptions
-            |> withOwnerOrdinals (fun notice -> notice.routeId, notice.routeDistinction, notice.tripId)
-            |> Seq.choose (fun (ordinal, notice) ->
-                if String.IsNullOrWhiteSpace(notice.note) then None else
-                let gtfsTripId =
-                    JdfToGtfs.jdfTripId notice.routeId notice.routeDistinction notice.tripId
-                if not (retainedTripIds.Contains gtfsTripId) then None else
-                Some (row [
-                    "source_notice_id", box (reservationNoticeId notice.routeId notice.routeDistinction notice.tripId ordinal)
-                    "notice_kind", box "reservation"
-                    "gtfs_route_id", null
-                    "gtfs_trip_id", box gtfsTripId
-                    "label", null
-                    "text", box notice.note
-                    "valid_from", null
-                    "valid_to", null
-                    "service_note_type", null ]))
-            |> Seq.toArray
-        Array.concat [routeNotices; serviceNotices; reservationNotices]
-        |> Array.sortBy (fun value -> string value.["source_notice_id"])
-
+    let notices () : seq<JrUtil.Serving.NoteWriter.Row> = seq {
+        let date value = value |> Option.map (fun (day: LocalDate) -> Nullable(DateOnly(day.Year, day.Month, day.Day))) |> Option.defaultValue (Nullable())
+        let empty id kind route trip : JrUtil.Serving.NoteWriter.Row = {
+            id = id; kind = kind; route = route; trip = trip; label = ""; text = ""
+            validFrom = Nullable(); validTo = Nullable(); serviceNoteType = "" }
+        for notice in batch.routeInfo do
+            let route = JdfToGtfs.jdfRouteId notice.routeId notice.routeDistinction
+            if not (String.IsNullOrWhiteSpace(notice.text)) && retainedRouteIds.Contains(route) then
+                yield { empty (routeNoticeId notice.routeId notice.routeDistinction notice.id) "route_information" route "" with text = notice.text }
+        for notice in batch.serviceNotes do
+            let text = nonEmptyText notice.note
+            let label = nonEmptyText (Some notice.designation)
+            if not (notice.noteType.IsSome && text.IsNone) && (text.IsSome || label.IsSome) then
+                let trip = JdfToGtfs.jdfTripId notice.routeId notice.routeDistinction notice.tripId
+                if retainedTripIds.Contains(trip) then
+                    yield { empty (tripNoticeId notice.routeId notice.routeDistinction notice.tripId notice.id) "service_note" "" trip with
+                                text = text |> Option.defaultValue ""; label = label |> Option.defaultValue ""
+                                validFrom = date notice.dateFrom; validTo = date notice.dateTo
+                                serviceNoteType = notice.noteType |> Option.map serviceNoteTypeName |> Option.defaultValue "" }
+        for ordinal, notice in batch.reservationOptions |> withOwnerOrdinals (fun notice -> notice.routeId, notice.routeDistinction, notice.tripId) do
+            let trip = JdfToGtfs.jdfTripId notice.routeId notice.routeDistinction notice.tripId
+            if not (String.IsNullOrWhiteSpace(notice.note)) && retainedTripIds.Contains(trip) then
+                yield { empty (reservationNoticeId notice.routeId notice.routeDistinction notice.tripId ordinal) "reservation" "" trip with text = notice.note }
+    }
     let transfers () =
         batch.transfers
         |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
@@ -1021,15 +1027,12 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             stringField "district" true; stringField "nearby_place" true
             stringField "country" true; boolField "coordinates_missing" false
             stringField "coordinate_precision" false; stringField "coordinate_source" true |] stopPlaces
+        "source_location_feature_metadata.parquet", producer [|
+            stringField "gtfs_stop_id" false; stringField "source_code" false
+            stringField "feature_kind" false; stringField "source_object_id" false |] locationFeatures
         "source_route_stop_zone_metadata.parquet", producer [|
             stringField "gtfs_route_id" false; int64Field "source_route_stop_id" false
             stringField "zone_id" false; intField "zone_order" false |] routeStopZones
-        "source_notice_metadata.parquet", producer [|
-            stringField "source_notice_id" false; stringField "notice_kind" false
-            stringField "gtfs_route_id" true; stringField "gtfs_trip_id" true
-            stringField "label" true; stringField "text" true
-            stringField "valid_from" true; stringField "valid_to" true
-            stringField "service_note_type" true |] notices
         "source_transfer_metadata.parquet", producer [|
             stringField "source_transfer_id" false; stringField "gtfs_trip_id" false
             int64Field "source_route_stop_id" false; stringField "transfer_type" false
@@ -1070,7 +1073,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             stringField "representative_candidate_id" false
             stringField "member_candidate_ids" false; doubleField "compactness_metres" false
             intField "repeated_pattern_support" false |] sideGroupRows
-    |], assignmentTotal, derivedPostAssignments
+    |], assignmentTotal, derivedPostAssignments, notices, tripFeatures
 
 let private writeParquet descriptor path table =
     task {
@@ -1566,84 +1569,6 @@ let replayPostInferenceEvidence evidencePath policyPath policyGridPath expectati
                           JdfPostEvidenceStore.noIdentityExpectation evidenceFull
     JdfPostInferenceEvaluator.writeReplayReport evidenceStore policyPath policyGridPath
         expectationsPath reviewStopsPath outputPath
-type private CallMetadataParquetWriter(descriptor: SnapshotDescriptor, path: string) =
-    let fields: DataField array = [|
-            field<string> "gtfs_trip_id" false
-            field<int> "stop_sequence" false
-            field<int64> "source_route_stop_id" false
-    |]
-    let schema = ParquetSchema(fields |> Array.map (fun value -> value :> Field))
-    let options = ParquetOptions(CompressionMethod = CompressionMethod.Snappy)
-    let metadata = Dictionary<string, string>()
-    let stream = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)
-    let writer =
-        ParquetWriter.CreateAsync(schema, stream, options, false, CancellationToken.None)
-        |> fun operation -> operation.GetAwaiter().GetResult()
-    let rowGroupSize = 65536
-    let mutable tripIds = Array.zeroCreate<string> rowGroupSize
-    let mutable stopSequences = Array.zeroCreate<int> rowGroupSize
-    let mutable sourceRouteStopIds = Array.zeroCreate<int64> rowGroupSize
-    let mutable buffered = 0
-    let mutable rowCount = 0
-    let mutable completed = false
-    let mutable disposed = false
-    let flush () =
-        task {
-            let writtenTripIds =
-                if buffered = rowGroupSize then tripIds else tripIds |> Array.take buffered
-            let writtenStopSequences =
-                if buffered = rowGroupSize then stopSequences else stopSequences |> Array.take buffered
-            let writtenSourceRouteStopIds =
-                if buffered = rowGroupSize then sourceRouteStopIds
-                else sourceRouteStopIds |> Array.take buffered
-            use rowGroup = writer.CreateRowGroup()
-            do! rowGroup.WriteAsync(
-                    fields.[0], writtenTripIds :> IReadOnlyCollection<string>,
-                    Nullable<ReadOnlyMemory<int>>())
-            do! rowGroup.WriteAsync<int>(
-                    fields.[1], ReadOnlyMemory<int>(writtenStopSequences),
-                    Nullable<ReadOnlyMemory<int>>(), null, CancellationToken.None)
-            do! rowGroup.WriteAsync<int64>(
-                    fields.[2], ReadOnlyMemory<int64>(writtenSourceRouteStopIds),
-                    Nullable<ReadOnlyMemory<int>>(), null, CancellationToken.None)
-        }
-        |> fun operation -> operation.GetAwaiter().GetResult()
-        tripIds <- Array.zeroCreate rowGroupSize
-        stopSequences <- Array.zeroCreate rowGroupSize
-        sourceRouteStopIds <- Array.zeroCreate rowGroupSize
-        buffered <- 0
-    do
-        metadata.Add("obehy.bundle_version", string BundleVersion)
-        metadata.Add("obehy.schema_version", string ParquetSchemaVersion)
-        metadata.Add("obehy.source_id", descriptor.sourceId)
-        metadata.Add("obehy.snapshot_id", $"sha256:{descriptor.payloadSha256}")
-        writer.CustomMetadata <- metadata
-    member _.Append(tripId: string, stopSequence: int, sourceRouteStopId: int64) =
-        if completed then invalidOp "Call metadata writer is already complete"
-        tripIds.[buffered] <- tripId
-        stopSequences.[buffered] <- stopSequence
-        sourceRouteStopIds.[buffered] <- sourceRouteStopId
-        buffered <- buffered + 1
-        rowCount <- rowCount + 1
-        if buffered = rowGroupSize then flush ()
-    member _.Complete(expectedRows: int) =
-        if not completed then
-            if buffered > 0 then flush ()
-            completed <- true
-        if rowCount <> expectedRows then
-            failwith $"Source/GTFS call count mismatch: expected {expectedRows}, got {rowCount}"
-        if not disposed then
-            disposed <- true
-            (writer :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
-            stream.Dispose()
-        rowCount
-    interface IDisposable with
-        member _.Dispose() =
-            if not disposed then
-                disposed <- true
-                (writer :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
-                stream.Dispose()
-
 let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
                         (callFacts: CallDerivedFacts)
                         (emittedTransferCalls: HashSet<struct (string * int64)>) =
@@ -2205,7 +2130,7 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
     withJdfInput inputPath (fun source ->
         progress "parse-jdf" "started" 0L None "bytes" None 0
         let sourceBatch=Jdf.jdfBatchDirParser () source
-        progress "parse-jdf" "completed" (int64 sourceBatch.tripStops.Length) None "calls" None 0
+        progress "parse-jdf" "completed" (int64 sourceBatch.tripStops.Count) None "calls" None 0
         progress "prepare-calendar" "started" 0L (Some(int64 sourceBatch.trips.Length)) "trips" None 0
         let sourceCalendar =
             JdfToGtfs.prepareGtfsCalendarWithWorkersAndProgress
@@ -2383,6 +2308,14 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
     Directory.CreateDirectory(temp) |> ignore
     let mutable completed = false
     let mutable liveEvidenceTemporaryDirectory:string option=None
+    let nativeCallPath = temp + ".trip_call.parquet"
+    let nativeSummaryPath = temp + ".call-summaries.bin"
+    let nativeSourceCallsPath = nativeSummaryPath + ".calls"
+    let nativeTripFactsPath = nativeSummaryPath + ".trips"
+    let nativeRouteStopsPath = temp + ".route_stop.parquet"
+    let mutable nativeCallCount = 0L
+    let mutable nativeRelations = Map.empty
+    let nativeTransferSequences = Dictionary<struct(string * int64), int>()
     // PBF decoding and JDF parsing are independent and predominantly use
     // different resources. Starting the graph build here hides most of the
     // parse/calendar/filter latency without changing either result.
@@ -2407,9 +2340,13 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
         withJdfInput inputPath (fun source ->
             started "parse-jdf" None "bytes"
             Log.Information("Bundle phase: parsing merged JDF")
-            let sourceBatch = Jdf.jdfBatchDirParser () source
+            use calls = new JdfCallStore.Store(parent, Threading.CancellationToken.None)
+            let sourceBatch =
+                Jdf.jdfCompilationParser calls
+                    (fun count -> reportProgress executionOptions phaseTimer "parse-jdf" "running" count None "calls" None 1)
+                    source
             logPhaseResources "parse-jdf" phaseTimer
-            progressCompleted "parse-jdf" (int64 sourceBatch.tripStops.Length) None "calls"
+            progressCompleted "parse-jdf" (int64 sourceBatch.tripStops.Count) None "calls"
             started "prepare-calendar" (Some (int64 sourceBatch.trips.Length)) "trips"
             let sourceCalendar =
                 JdfToGtfs.prepareGtfsCalendarWithWorkersAndProgress
@@ -2570,16 +2507,15 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 |> Seq.map (fun trip -> JdfToGtfs.jdfTripId trip.routeId trip.routeDistinction trip.id)
                 |> Seq.filter (preparation.tripsToDelete.Contains >> not)
                 |> HashSet
-            started "prepare-call-diagnostics" (Some(int64 batch.tripStops.Length)) "calls"
+            started "prepare-call-diagnostics" (Some(int64 batch.tripStops.Count)) "calls"
             let callFacts =
                 scanCallDerivedFacts batch retainedTripIdsForCalls candidateStopsWithMultiple (fun count total ->
                     reportProgress executionOptions phaseTimer "prepare-call-diagnostics" "running"
                                    count total "calls" None 1)
-            progressCompleted "prepare-call-diagnostics" (int64 batch.tripStops.Length)
-                              (Some(int64 batch.tripStops.Length)) "calls"
+            progressCompleted "prepare-call-diagnostics" (int64 batch.tripStops.Count)
+                              (Some(int64 batch.tripStops.Count)) "calls"
             let referencedStopIds = HashSet<string>(StringComparer.Ordinal)
             let mutable stopTimeCount = 0
-            let callTableName = "source_call_metadata.parquet"
             let transferCallQueries = HashSet<struct (string * int64)>()
             for transfer in batch.transfers do
                 transferCallQueries.Add(
@@ -2587,36 +2523,55 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                             transfer.routeStopId))
                 |> ignore
             let emittedTransferCalls = HashSet<struct (string * int64)>()
-            use callMetadataWriter =
-                new CallMetadataParquetWriter(descriptor, Path.Combine(temp, callTableName))
+            let bufferedCalls = executionOptions.maximumWorkers > 1 && executionOptions.memoryBudgetBytes >= 512L * 1024L * 1024L
+            use nativeCalls = new JrUtil.Serving.TripCallWriter.Writer(nativeCallPath, Threading.CancellationToken.None, bufferedOutput = bufferedCalls)
+            use nativeSummaries = new JrUtil.Serving.TripCallWriter.SummaryWriter(nativeSummaryPath)
+            use nativeSourceCalls = new JrUtil.Serving.SourceCallWriter.Spool(nativeSourceCallsPath)
+            use nativeRouteStops = new JrUtil.Serving.RouteStopWriter.Writer(nativeRouteStopsPath, Threading.CancellationToken.None)
+            let parents =
+                JdfToGtfs.getGtfsStopsWithPlan stopIdsCis preparation.postPlan batch
+                |> Seq.map (fun stop -> stop.id, stop.parentStation)
+                |> dict
             let stopTimes =
                 JdfToGtfs.getStreamingBundleStopTimeRows preparation
                 |> Seq.map (fun row ->
                     let stopTime = row.stopTime
                     referencedStopIds.Add(stopTime.stopId) |> ignore
                     stopTimeCount <- stopTimeCount + 1
-                    callMetadataWriter.Append(
-                        stopTime.tripId, stopTime.stopSequence, row.sourceRouteStopId)
+                    let parent = parents.[stopTime.stopId]
+                    let location = parent |> Option.defaultValue stopTime.stopId
+                    let boarding = if parent.IsSome then stopTime.stopId else null
+                    let routeStop = JrUtil.Serving.Identity.compositeKey [row.routeId; string row.sourceRouteStopId]
+                    nativeCalls.Append(JrUtil.Serving.TripCallWriter.fromGtfs stopTime location boarding routeStop)
+                    nativeSummaries.Append(stopTime)
+                    nativeSourceCalls.Append(stopTime)
+                    nativeRouteStops.Append(row.routeId, routeStop, stopTime.stopId)
                     let transferKey = struct (stopTime.tripId, row.sourceRouteStopId)
                     if transferCallQueries.Contains(transferKey) then
                         emittedTransferCalls.Add(transferKey) |> ignore
+                        nativeTransferSequences.TryAdd(transferKey, stopTime.stopSequence) |> ignore
                     if stopTimeCount % 250_000 = 0 then
                         reportProgress executionOptions phaseTimer "stream-stop-times" "running"
                                        (int64 stopTimeCount) (Some callFacts.emittedCallCount)
-                                       "rows" None 1
+                                       "rows" None (1 + nativeCalls.ActiveCompressionWorkers)
                     stopTime)
             let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
             let extensionsPath = Path.Combine(temp, "extensions")
             Log.Information("Bundle phase: streaming GTFS stop times")
             started "stream-stop-times" (Some callFacts.emittedCallCount) "calls"
             Gtfs.gtfsStopTimesToFolder () gtfsPath stopTimes
+            nativeCallCount <- nativeCalls.Complete()
+            nativeSummaries.Complete()
+            nativeSourceCalls.Complete()
+            let routeStopCount = nativeRouteStops.Complete(fun phase count ->
+                reportProgress executionOptions phaseTimer ("route-stops-" + phase) "running" count None "rows" None 1)
+            nativeRelations <- nativeRelations |> Map.add "route_stop" (nativeRouteStopsPath, routeStopCount)
             logPhaseResources "stream-stop-times" phaseTimer
             progressCompleted "stream-stop-times" (int64 stopTimeCount) (Some callFacts.emittedCallCount) "rows"
             Log.Information("Bundle phase: preparing remaining GTFS relations")
             started "prepare-remaining-gtfs" (Some 1L) "feeds"
             let feed =
-                JdfToGtfs.finishStreamingBundleFeed preparation (referencedStopIds |> Set.ofSeq)
-                |> Gtfs.deduplicateCalendar
+                JdfToGtfs.finishStreamingFeedWithUniqueCalendars preparation (referencedStopIds |> Set.ofSeq)
                 |> Gtfs.fillStandardRequiredFields
                 |> fun value ->
                     if diagnosticPostLabels then
@@ -2625,22 +2580,39 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             logPhaseResources "prepare-remaining-gtfs" phaseTimer
             progressCompleted "prepare-remaining-gtfs" 1L (Some 1L) "feeds"
             validateStopCoordinates feed
+            JrUtil.Serving.BindingWriter.writeNativeFacts nativeTripFactsPath descriptor.sourceId feed
+            let nativeTripPath = temp + ".trip.parquet"
+            let nativeTripCount =
+                JrUtil.Serving.TripWriter.write nativeTripPath Threading.CancellationToken.None
+                    (fun phase count -> reportProgress executionOptions phaseTimer ("trips-" + phase) "running" count None "rows" None 1)
+                    feed.trips
+            nativeRelations <- nativeRelations |> Map.add "trip" (nativeTripPath, nativeTripCount)
             Log.Information("Bundle phase: writing remaining GTFS tables")
             started "write-relations" None "tables"
             Gtfs.gtfsStandardTablesExceptStopTimesToFolder () gtfsPath feed
             Log.Information("Bundle phase: writing GTFS extension tables")
             Gtfs.gtfsExtensionsToFolder () extensionsPath feed
             let retainedTrips = HashSet<string>(feed.trips |> Seq.map (fun trip -> trip.id))
-            let callRows = callMetadataWriter.Complete(stopTimeCount)
             Log.Information("Bundle phase: preparing Parquet relations")
-            let tables, assignmentCount, assignmentRows =
+            let tables, assignmentCount, assignmentRows, nativeNotes, nativeFeatures =
                 getTableProducers stopIdsCis sourceTransportModes batch feed preparation.postPlan callFacts
                     (fun phase count total ->
                         reportProgress executionOptions phaseTimer phase "running"
                                        count total "rows" None 1)
                     emittedTransferCalls
-            let totalParquetTables=tables.Length+2
-            let mutable parquetRows = Map [callTableName, callRows]
+            let noteRelations =
+                JrUtil.Serving.NoteWriter.write temp descriptor.sourceId descriptor.payloadSha256 Threading.CancellationToken.None
+                    (fun phase count -> reportProgress executionOptions phaseTimer phase "running" count None "rows" None 1)
+                    nativeNotes
+            nativeRelations <- noteRelations |> Map.fold (fun state name value -> Map.add name value state) nativeRelations
+            let featurePath = temp + ".service_feature_assignment.parquet"
+            let featureCount =
+                JrUtil.Serving.FeatureWriter.write featurePath descriptor.sourceId descriptor.payloadSha256 Threading.CancellationToken.None
+                    (fun phase count -> reportProgress executionOptions phaseTimer ("service-features-" + phase) "running" count None "rows" None 1)
+                    (nativeFeatures ())
+            nativeRelations <- nativeRelations |> Map.add "service_feature_assignment" (featurePath, featureCount)
+            let totalParquetTables=tables.Length+1
+            let mutable parquetRows = Map.empty
             for index, (name, produceTable) in tables |> Array.indexed do
                 reportProgress executionOptions phaseTimer "write-parquet" "running"
                                (int64 index) (Some (int64 totalParquetTables)) "tables" (Some name) 1
@@ -2747,7 +2719,21 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                           diagnosticPostLabels batch feed files)
         Log.Information("Bundle phase: activating completed bundle")
         JdfPostInferencePolicy.PostInferencePhaseProbe.record "activation"
-        Directory.Move(temp, outputFull)
+        let productionTemp = temp + ".production"
+        JrUtil.Serving.PackageWriter.finalizeLegacyStaging (nativeRelations |> Map.add "trip_call" (nativeCallPath, int nativeCallCount))
+            (Some { summaries = nativeSummaryPath; sourceCalls = nativeSourceCallsPath
+                    tripFacts = nativeTripFactsPath; transferSequences = nativeTransferSequences })
+            (fun phase count -> reportProgress executionOptions phaseTimer phase "running" count None "items" None 1)
+            temp productionTemp
+        File.Delete(nativeSummaryPath)
+        File.Delete(nativeSourceCallsPath)
+        File.Delete(nativeSourceCallsPath + ".index")
+        File.Delete(nativeTripFactsPath)
+        executionOptions.diagnosticsOutput
+        |> Option.iter (fun output ->
+            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact temp output executionOptions.diagnosticTraces)
+        Directory.Delete(temp, true)
+        Directory.Move(productionTemp, outputFull)
         completed <- true
     finally
         replayEvidence
@@ -2761,9 +2747,12 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 routingGraphTask.GetAwaiter().GetResult()
                 |> Option.iter (fun graph -> (graph :> IDisposable).Dispose())
             with _ -> ()
-        if not completed && Directory.Exists(temp) then Directory.Delete(temp, true)
+        if not completed && Directory.Exists(temp) then
+            Log.Error("JDF compilation failed; diagnostic staging retained at {StagingPath}", temp)
         liveEvidenceTemporaryDirectory
-        |> Option.iter(fun path -> if Directory.Exists(path) then Directory.Delete(path,true))
+        |> Option.iter(fun path ->
+            if completed && Directory.Exists(path) then Directory.Delete(path,true)
+            elif Directory.Exists(path) then Log.Error("Inference evidence retained at {EvidencePath}", path))
     BundleCompleted
 
 let writeBundleWithPolicyAndMemory releaseStopTimesAfterMaterialization

@@ -17,6 +17,36 @@ type JdfParserTests() =
         JdfParser.getJdfParser<JdfModel.RouteInfo> stream |> Seq.toArray
 
     [<TestMethod>]
+    member _.``Native call storage preserves exact values and filtered ordering``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-native-calls-" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            use store = new JdfCallStore.Store(root, Threading.CancellationToken.None)
+            let sample: JdfModel.TripStop = {
+                routeId = "česká"; tripId = Int64.MaxValue; routeStopId = -77L; stopId = 98L
+                stopPostId = Some 0L; stopPostNum = Some ""; attributes = [| None; Some 0; Some Int32.MinValue |]
+                kilometer = Some -123.4567890123456789012345678M
+                arrivalTime = Some (JdfModel.StopTime (NodaTime.LocalTime.FromNanosecondsSinceMidnight(123456789L)))
+                departureTime = Some JdfModel.Passing; minArrivalTime = Some JdfModel.NotPassing
+                maxDepartureTime = None; routeDistinction = 7 }
+            let input = [| sample; { sample with tripId = 7L; routeDistinction = 8; stopId = 99L; stopPostNum = None; kilometer = None }; sample |]
+            let calls = store.Write(input, ignore)
+            let spans rows = JdfCallStore.tripSpans rows |> Seq.toArray
+            assertEqual (spans input) (spans calls)
+            assertEqual input (calls |> Seq.toArray)
+            assertEqual sample calls.[2]
+            let filtered = calls |> JdfCallStore.filter (fun call -> call.stopId = 98L)
+            assertEqual [| sample; sample |] (filtered |> Seq.toArray)
+            let beforeSecondFilter = store.ScratchBytes
+            let twice = filtered |> JdfCallStore.filter (fun call -> call.stopId = 98L)
+            assertEqual [| sample; sample |] (twice |> Seq.toArray)
+            assertEqual (spans [| sample; sample |]) (spans twice)
+            Assert.IsTrue(store.ScratchBytes > beforeSecondFilter, "Repeated filtering must retain disk-backed indexes")
+            assertEqual 0 (calls |> JdfCallStore.filter (fun _ -> false)).Count
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``JDF parser retains a terminator split across read buffers``() =
         let bufferSize = 1024 * 1024
         let prefix = "\"R\",\"1\",\""

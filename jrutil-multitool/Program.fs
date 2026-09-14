@@ -26,8 +26,10 @@ Usage:
     jrutil-multitool.exe jdf-replay-post-inference [options] --evidence=DIR --output=DIR
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
-    jrutil-multitool.exe regional-gtfs-overlay [--audit-date=DATE] --policy=FILE --gvd-year=YEAR --source=BINDING --source-descriptor=BINDING <base-bundle> <overlay-bundle-out>
-    jrutil-multitool.exe regional-gtfs-overlay-all [--audit-date=DATE] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
+    jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
+    jrutil-multitool.exe regional-gtfs-overlay-all [options]
+    jrutil-multitool.exe validate-package <package-dir>
+    jrutil-multitool.exe compare-packages (--byte-identical | --migration-audit) <left-package> <right-package>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
@@ -61,6 +63,10 @@ Options:
     --audit-date=DATE                     Coverage audit date YYYY-MM-DD (default: CIS snapshot Prague date)
     --source=BINDING                      Overlay source binding SOURCE_ID=GTFS.zip
     --source-descriptor=BINDING           Source checksum binding SOURCE_ID=descriptor.json
+    --diagnostics-out=DIR                 Optional separate detailed diagnostics artifact
+    --diagnostic-traces                   Include large compiler trace relations in diagnostics
+    --byte-identical                      Require every production byte to match
+    --migration-audit                     Validate an explicit legacy-to-production migration
     --policy-grid=FILE                     Deterministic policy variants for replay
     --expectations=FILE                    Labelled routed-post expectation TSV
     --review-stops=FILE                    Stop selectors for replay diagnostics
@@ -163,7 +169,7 @@ let private parseOverlayArguments args =
         |> Option.map (fun value -> NodaTime.Text.LocalDatePattern.Iso.Parse(value).Value)
     gvdYear, sourceBinding, auditDate
 
-let private parseOverlayAllArguments args =
+let private parseOverlayBindingsArguments args =
     let parseBinding argumentName (value: string) =
         let separator = value.IndexOf('=')
         if separator <= 0 || separator = value.Length - 1 then
@@ -171,7 +177,7 @@ let private parseOverlayAllArguments args =
         value.Substring(0, separator), value.Substring(separator + 1)
     let sources = argValues args "--source" |> Seq.map (parseBinding "--source") |> Seq.toArray
     let descriptorBindings = argValues args "--source-descriptor" |> Seq.map (parseBinding "--source-descriptor") |> Seq.toArray
-    if sources.Length < 2 then invalidArg "--source" "regional-gtfs-overlay-all requires at least two sources"
+    if sources.Length < 1 then invalidArg "--source" "regional-gtfs-overlay requires at least one source"
     if sources |> Array.map fst |> Array.distinct |> Array.length <> sources.Length then invalidArg "--source" "Duplicate source ID"
     if descriptorBindings |> Array.map fst |> Array.distinct |> Array.length <> descriptorBindings.Length then invalidArg "--source-descriptor" "Duplicate source descriptor ID"
     let descriptors = descriptorBindings |> dict
@@ -201,6 +207,12 @@ let main (args: string array) =
             optArgValue args "--memory-budget"
             |> Option.defaultValue "auto"
             |> Execution.parseMemoryBudget
+        let processBudget =
+            Execution.resolveMemoryBudget memoryRequest
+            |> min Execution.ProductionProcessBudgetBytes
+        let memoryRequest = Execution.FixedMemory processBudget
+        Log.Information("Memory target: process target {ProcessBudget} bytes for worker admission and spill decisions; the GC heap is not hard limited",
+                        processBudget)
         let jobRequest =
             optArgValue args "--jobs"
             |> Option.defaultValue "auto"
@@ -428,41 +440,55 @@ let main (args: string array) =
             invalidArg "--international-route-overrides"
                 "International route overrides require --international-route-policy=regional-adjacent"
         let mutable exitCode = 0
-        if argFlagSet args "regional-gtfs-overlay-all" then
-            try
-                let gvdYear, sourceBindings, auditDate = parseOverlayAllArguments args
-                let result =
-                    RegionalGtfsOverlay.executeAllWithAuditDate auditDate (argValue args "--policy") gvdYear sourceBindings
-                        (argValue args "<base-bundle>") (argValue args "<overlay-bundle-out>")
-                Log.Information(
-                    "Combined regional overlay complete: sources={Sources}; matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}",
-                    String.concat "," result.sources, result.aggregate.matchedTrips, result.aggregate.unmatchedTrips, result.aggregate.ambiguousTrips)
-            with error ->
-                exitCode <- 1
-                Log.Error(error, "Combined regional GTFS overlay failed")
+        if args.ContainsKey("regional-gtfs-overlay-all") && argFlagSet args "regional-gtfs-overlay-all" then
+            exitCode <- 2
+            Log.Error("regional-gtfs-overlay-all was removed; use regional-gtfs-overlay with repeated --source and --source-descriptor options")
         else if argFlagSet args "regional-gtfs-overlay" then
             try
-                let gvdYear, sourceBinding, auditDate = parseOverlayArguments args
+                let gvdYear, sourceBindings, auditDate = parseOverlayBindingsArguments args
+                let baseBundle = argValue args "<base-bundle>"
+                JrUtil.Serving.Validation.validatePackage baseBundle |> ignore
                 let result =
-                    RegionalGtfsOverlay.executeWithAuditDate
-                        auditDate
-                        (argValue args "--policy")
-                        gvdYear
-                        sourceBinding
-                        (argValue args "<base-bundle>")
-                        (argValue args "<overlay-bundle-out>")
+                    RegionalGtfsOverlay.compile {
+                        auditDate = auditDate
+                        policyPath = argValue args "--policy"
+                        gvdYear = gvdYear
+                        bindings = sourceBindings
+                        baseBundle = baseBundle
+                        outputBundle = argValue args "<overlay-bundle-out>"
+                        diagnosticsOutput = optArgValue args "--diagnostics-out"
+                        diagnosticTraces = argFlagSet args "--diagnostic-traces" }
                 Log.Information(
-                    "Regional overlay complete: matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}; shapes={Shapes}; transfers={Transfers}",
-                    result.matchedTrips, result.unmatchedTrips, result.ambiguousTrips,
-                    result.selectedShapes, result.selectedTransfers)
+                    "Regional overlay complete: sources={Sources}; matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}",
+                    String.concat "," result.sources, result.aggregate.matchedTrips,
+                    result.aggregate.unmatchedTrips, result.aggregate.ambiguousTrips)
             with error ->
                 exitCode <- 1
                 Log.Error(error, "Regional GTFS overlay failed")
+        else if argFlagSet args "validate-package" then
+            try
+                let result = JrUtil.Serving.Validation.validatePackage (argValue args "<package-dir>")
+                Log.Information("Production package valid: files={Files}; relations={Relations}", result.fileCount, result.relationCount)
+            with error ->
+                exitCode <- 1
+                Log.Error(error, "Production package validation failed")
+        else if argFlagSet args "compare-packages" then
+            try
+                let left, right = argValue args "<left-package>", argValue args "<right-package>"
+                if argFlagSet args "--byte-identical" then
+                    JrUtil.Serving.Validation.compareByteIdentical left right
+                    Log.Information("Production packages are byte-identical")
+                else
+                    JrUtil.Serving.Validation.migrationAudit left right
+                    Log.Information("Production migration structure is valid")
+            with error ->
+                exitCode <- 1
+                Log.Error(error, "Package comparison failed")
         else if argFlagSet args "jdf-to-bundle" then
             try
                 let bundlePlan =
                     jobsFor "jdf-to-bundle" Execution.BundleWork
-                            (6L * Execution.GiB)
+                            (max (512L * Execution.MiB) (processBudget - 256L * Execution.MiB))
                 let bundleProgress (event: JdfBundle.BundleProgressEvent) =
                     emitProgressEvent progressEvents "work_progress" (
                         [ "stage", box "jdf-to-bundle"
@@ -487,6 +513,8 @@ let main (args: string array) =
                     postInferenceEvidencePath = postInferenceEvidence
                     postInferencePolicyPath = optArgValue args "--post-inference-policy"
                     includePostInferenceScores = not(argFlagSet args "--no-post-inference-scores")
+                    diagnosticsOutput = optArgValue args "--diagnostics-out"
+                    diagnosticTraces = argFlagSet args "--diagnostic-traces"
                     progress = bundleProgress
                 }
                 phase "jdf-to-bundle" "write-bundle" "started"
@@ -555,14 +583,14 @@ let main (args: string array) =
                 Log.Error(e,"JDF post-inference replay failed")
         else if argFlagSet args "jdf-to-gtfs" then
             let stopIdsCis = argFlagSet args "--stop-ids-cis"
-            let jdfPar = Jdf.jdfBatchDirParser ()
             inOutFiles (argValues args "<JDF-in-dir>" |> Seq.head)
                        (argValue args "<GTFS-out-dir>")
             |> Seq.iter (fun (inpath, out) ->
                 Log.Information("Processing {Batch}", inpath)
                 try
                     Log.Information("Reading JDF")
-                    let jdf = jdfPar (Jdf.FsPath inpath)
+                    use calls = new JdfCallStore.Store(Path.GetDirectoryName(Path.GetFullPath(out)), Threading.CancellationToken.None)
+                    let jdf = Jdf.jdfCompilationParser calls (fun count -> Log.Information("Parsed {Calls} JDF calls", count)) (Jdf.FsPath inpath)
                     let routeKeys =
                         jdf.routes
                         |> Seq.map (fun route -> route.id, route.idDistinction)
@@ -599,9 +627,8 @@ let main (args: string array) =
                             stopTime)
                     Gtfs.gtfsStopTimesToFolder () out stopTimes
                     let gtfs =
-                        JdfToGtfs.finishStreamingBundleFeed
+                        JdfToGtfs.finishStreamingFeedWithUniqueCalendars
                             preparation (referencedStopIds |> Set.ofSeq)
-                        |> Gtfs.deduplicateCalendar
                         |> gtfsWithCoords stopCoordsByIdPath
 
                     Log.Information("Writing GTFS")
@@ -709,7 +736,13 @@ let main (args: string array) =
                 resourceUsage "convert" "write-diagnostics" (CzPttBundle.currentSpillBytes())
                 CzPttBundle.writeManifest outputPath
                 resourceUsage "convert" "write-manifest" (CzPttBundle.currentSpillBytes())
-                Directory.Move(outputPath, finalOutputPath)
+                let productionOutput = outputPath + ".production"
+                JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) outputPath productionOutput
+                optArgValue args "--diagnostics-out"
+                |> Option.iter (fun diagnostics ->
+                    JrUtil.Serving.PackageWriter.writeDiagnosticArtifact outputPath diagnostics (argFlagSet args "--diagnostic-traces"))
+                Directory.Delete(outputPath, true)
+                Directory.Move(productionOutput, finalOutputPath)
                 temporaryOutput <- None
                 Log.Information("Finished!")
             with e ->
@@ -843,7 +876,7 @@ let main (args: string array) =
                                 JdfFixups.fixPublicCisJrBatch stopMatcher batch
                             let stopsWithMatches =
                                 Array.zip batchFixed.stops stopMatches
-                                |> JdfFixups.rejectImplausibleMatches batchFixed.tripStops
+                                |> JdfFixups.rejectImplausibleMatches (batchFixed.tripStops |> Seq.toArray)
                             let retainedCandidateStops =
                                 stopsWithMatches
                                 |> Seq.choose (fun (stop, match_) ->
@@ -861,7 +894,7 @@ let main (args: string array) =
                                 // Take one trip most likely to contain all stops'
                                 // km distances (testing all takes too much time).
                                 JdfFixups.checkMatchDistances
-                                    (longestTripStops batchFixed.tripStops) stopsWithMatches
+                                    (longestTripStops (batchFixed.tripStops |> Seq.toArray)) stopsWithMatches
 
                                 JdfFixups.checkMissingRegionsCountries batchFixed
                             ]
