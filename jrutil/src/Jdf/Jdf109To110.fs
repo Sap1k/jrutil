@@ -27,6 +27,12 @@ let nameOptGetters<'f> (gs: (string * ('f -> obj)) list) =
             then Some (constant None >> box)
             else None)
 
+let jdf109TripStopTo110Converter () =
+    getAutoCopier<Jdf109Model.TripStop, Jdf110Model.TripStop> (nameOptGetters [
+        "routeDistinction", (fun _ -> box 0)
+        "agencyDistinction", (fun _ -> box 0)
+    ])
+
 let jdf109To110Converter () =
     let versionAC = getAutoCopier<Jdf109Model.JdfVersion, JdfModel.JdfVersion>
                         (nameOptGetters [])
@@ -51,8 +57,7 @@ let jdf109To110Converter () =
                           (idDistGG())
     let tripAC = getAutoCopier<Jdf109Model.Trip, JdfModel.Trip>
                      (idDistGG())
-    let tripStopAC = getAutoCopier<Jdf109Model.TripStop, Jdf110Model.TripStop>
-                         (idDistGG())
+    let tripStopAC = jdf109TripStopTo110Converter ()
     let routeInfoAC = getAutoCopier<Jdf109Model.RouteInfo, JdfModel.RouteInfo>
                           (idDistGG())
     let serviceNoteAC = getAutoCopier<Jdf109Model.ServiceNote, JdfModel.ServiceNote>

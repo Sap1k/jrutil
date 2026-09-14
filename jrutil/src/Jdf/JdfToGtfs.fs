@@ -787,7 +787,7 @@ let inferredPostId stopIdsCis (plan: PostEstimationPlan) (selection: DerivedPost
         invalidOp
             $"Inferred JDF post has no deterministic ordinal: stop={selection.stopId}; location={selection.locationId}"
 
-let private getGtfsStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
+let internal getGtfsStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
                                     (jdfBatch: JdfModel.JdfBatch) =
     let stopLocationsById =
         jdfBatch.stopLocations
@@ -1035,9 +1035,43 @@ let gtfsCalendarBitmap (calendar: GtfsModel.CalendarEntry) =
 
 type CalendarPreparation = {
     tripsToDelete: Set<string>
-    calendar: GtfsModel.CalendarEntry array
-    calendarExceptions: GtfsModel.CalendarException array
+    // Equal schedules share one exception array. A national trip-date object
+    // collection is never needed by streaming compilation.
+    schedules: Map<string, GtfsModel.CalendarEntry option * GtfsModel.CalendarException array>
 }
+
+// Materialized API callers retain their original trip order and service IDs.
+// Production sinks use the distinct schedules below and never expand per trip.
+let private materializeTripCalendars (batch: JdfModel.JdfBatch) (prepared: CalendarPreparation) =
+    let calendar = ResizeArray<GtfsModel.CalendarEntry>()
+    let exceptions = ResizeArray<GtfsModel.CalendarException>()
+    for trip in batch.trips do
+        let id = jdfTripId trip.routeId trip.routeDistinction trip.id
+        match prepared.schedules |> Map.tryFind id with
+        | None -> ()
+        | Some (entry, changes) ->
+            entry |> Option.iter (fun value -> calendar.Add({ value with id = id }))
+            for change in changes do exceptions.Add({ change with id = id })
+    calendar.ToArray(), exceptions.ToArray()
+
+let private materializeUniqueCalendars (prepared: CalendarPreparation) =
+    let unique = Dictionary<GtfsModel.CalendarEntry option * GtfsModel.CalendarException array, string>(HashIdentity.Structural)
+    let services = Dictionary<string, string>(StringComparer.Ordinal)
+    let calendar = ResizeArray<GtfsModel.CalendarEntry>()
+    let exceptions = ResizeArray<GtfsModel.CalendarException>()
+    // Map iteration matches v1's ordinal service-ID traversal, preserving IDs.
+    for KeyValue(trip, schedule) in prepared.schedules do
+        match unique.TryGetValue(schedule) with
+        | true, service -> services.Add(trip, service)
+        | _ ->
+            let entry, changes = schedule
+            let bitmap = entry |> Option.map (fun value -> value.weekdayService |> Array.map (fun active -> if active then '1' else '0') |> String) |> Option.defaultValue "exc"
+            let service = $"gtfs:service:{bitmap}:{unique.Count}"
+            unique.Add(schedule, service)
+            services.Add(trip, service)
+            entry |> Option.iter (fun value -> calendar.Add({ value with id = service }))
+            for change in changes do exceptions.Add({ change with id = service })
+    services, calendar.ToArray(), exceptions.ToArray()
 
 // Computes the expensive per-trip service bitmap exactly once. Bundle
 // conversion carries this result through international filtering instead of
@@ -1130,35 +1164,63 @@ let prepareGtfsCalendarWithWorkersAndProgress
                 }: GtfsModel.CalendarException)
                 else None)
             |> Seq.toArray
-    let values = Array.zeroCreate jdfBatch.trips.Length
     let mutable calculatedTrips = 0L
     let calendarProgressLock = obj()
     let mutable lastCalendarProgress = 0L
-    let calculateAt index =
-        values.[index] <- calculate jdfBatch.trips.[index]
-        let count = Interlocked.Increment(&calculatedTrips)
-        if count % 5_000L = 0L || count = int64 jdfBatch.trips.Length then
+    let calculateGroup (group: (int * JdfModel.Trip) array) =
+        let value = calculate (snd group.[0])
+        let count = Interlocked.Add(&calculatedTrips, int64 group.Length)
+        if count - lastCalendarProgress >= 5_000L || count = int64 jdfBatch.trips.Length then
             lock calendarProgressLock (fun () ->
                 if count > lastCalendarProgress then
                     lastCalendarProgress <- count
                     progress count (Some (int64 jdfBatch.trips.Length)))
-    if maximumWorkers = 1 || jdfBatch.trips.Length <= 1 then
-        for index = 0 to jdfBatch.trips.Length-1 do calculateAt index
-    else
-            let options = ParallelOptions(MaxDegreeOfParallelism = maximumWorkers)
-            Parallel.For(0, jdfBatch.trips.Length, options, calculateAt)
-            |> ignore
+        value
+    let scheduleInput (trip: JdfModel.Trip) =
+        let notes =
+            notesByTrip |> Map.tryFind (trip.routeId, trip.routeDistinction, trip.id)
+            |> Option.defaultValue [||]
+            |> Array.choose (fun note -> note.noteType |> Option.map (fun kind -> kind, note.dateFrom, note.dateTo))
+            |> Array.sort
+        // These are exactly the inputs consumed by tripDateBitmap. Source IDs,
+        // labels and free-text notices do not change service dates.
+        trip.routeId, trip.routeDistinction, trip.attributes, notes
     let tripsToDelete = ResizeArray<string>()
-    let calendar = ResizeArray<GtfsModel.CalendarEntry>()
-    let exceptions = ResizeArray<GtfsModel.CalendarException>()
-    for deleted, entries, tripExceptions in values do
-        tripsToDelete.AddRange(deleted)
-        calendar.AddRange(entries)
-        exceptions.AddRange(tripExceptions)
+    let unique = Dictionary<GtfsModel.CalendarEntry option * GtfsModel.CalendarException array,
+                            GtfsModel.CalendarEntry option * GtfsModel.CalendarException array>(HashIdentity.Structural)
+    let schedules = ResizeArray<string * (GtfsModel.CalendarEntry option * GtfsModel.CalendarException array)>()
+    for chunk in jdfBatch.trips |> Seq.chunkBySize 4096 do
+        let values = Array.zeroCreate chunk.Length
+        let groups =
+            chunk |> Array.mapi (fun index trip -> index, trip)
+            |> Array.groupBy (snd >> scheduleInput)
+            |> Array.map snd
+        let calculateAt index =
+            let group = groups.[index]
+            let result = calculateGroup group
+            for offset, _ in group do values.[offset] <- result
+        if maximumWorkers = 1 then
+            for index = 0 to groups.Length - 1 do calculateAt index
+        else
+            Parallel.For(0, groups.Length, ParallelOptions(MaxDegreeOfParallelism = maximumWorkers), calculateAt) |> ignore
+        for index = 0 to values.Length - 1 do
+            let deleted, entries, tripExceptions = values.[index]
+            if deleted.Length > 0 then
+                let trip = chunk.[index]
+                tripsToDelete.Add(jdfTripId trip.routeId trip.routeDistinction trip.id)
+            if deleted.Length = 0 then
+                let entry = entries |> Array.tryHead |> Option.map (fun value -> { value with id = "" })
+                let changes = tripExceptions |> Array.map (fun value -> { value with id = "" }) |> Array.sort
+                let candidate = entry, changes
+                let shared =
+                    match unique.TryGetValue(candidate) with
+                    | true, existing -> existing
+                    | _ -> unique.Add(candidate, candidate); candidate
+                let trip = chunk.[index]
+                schedules.Add(jdfTripId trip.routeId trip.routeDistinction trip.id, shared)
     {
         tripsToDelete = set tripsToDelete
-        calendar = calendar.ToArray()
-        calendarExceptions = exceptions.ToArray()
+        schedules = Map schedules
     }
 
 let prepareGtfsCalendarWithWorkers maximumWorkers (jdfBatch: JdfModel.JdfBatch) =
@@ -1170,7 +1232,8 @@ let prepareGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
 // Retained for source compatibility with standalone callers.
 let getGtfsCalendar (jdfBatch: JdfModel.JdfBatch) =
     let prepared = prepareGtfsCalendar jdfBatch
-    prepared.tripsToDelete, prepared.calendar, prepared.calendarExceptions
+    let calendar, exceptions = materializeTripCalendars jdfBatch prepared
+    prepared.tripsToDelete, calendar, exceptions
 
 let filterCalendarPreparation (batch: JdfModel.JdfBatch)
                               (prepared: CalendarPreparation) =
@@ -1180,9 +1243,7 @@ let filterCalendarPreparation (batch: JdfModel.JdfBatch)
         |> HashSet
     {
         tripsToDelete = prepared.tripsToDelete |> Set.filter retained.Contains
-        calendar = prepared.calendar |> Array.filter (fun value -> retained.Contains(value.id))
-        calendarExceptions =
-            prepared.calendarExceptions |> Array.filter (fun value -> retained.Contains(value.id))
+        schedules = prepared.schedules |> Map.filter (fun key _ -> retained.Contains key)
     }
 
 let private callIsEmitted (call: JdfModel.TripStop) =
@@ -1285,7 +1346,7 @@ let private applyInternationalRoutePolicyInternal
         |> Seq.map (fun (routeKey, trips) -> routeKey, trips |> Seq.map snd |> Seq.toArray)
         |> Map
     let callsByTrip = Dictionary<struct (string * int * int64), ResizeArray<JdfModel.TripStop>>()
-    for callIndex = 0 to batch.tripStops.Length-1 do
+    for callIndex = 0 to batch.tripStops.Count-1 do
         let call = batch.tripStops.[callIndex]
         if isPotentialRoute call.routeId call.routeDistinction
            && activeTripContains call.routeId call.routeDistinction call.tripId
@@ -1298,8 +1359,8 @@ let private applyInternationalRoutePolicyInternal
                 values.Add(call)
                 callsByTrip.[key] <- values
         if (callIndex + 1) % 1_000_000 = 0 then
-            progress "international-calls" (int64 (callIndex + 1)) (Some (int64 batch.tripStops.Length))
-    progress "international-calls" (int64 batch.tripStops.Length) (Some (int64 batch.tripStops.Length))
+            progress "international-calls" (int64 (callIndex + 1)) (Some (int64 batch.tripStops.Count))
+    progress "international-calls" (int64 batch.tripStops.Count) (Some (int64 batch.tripStops.Count))
     let callsForTrip (routeId, distinction, tripId) =
         match callsByTrip.TryGetValue(struct (routeId, distinction, tripId)) with
         | true, values -> values.ToArray()
@@ -1504,7 +1565,7 @@ let private applyInternationalRoutePolicyInternal
             routeStops = routeStops
             trips = keptTrips
             tripGroups = batch.tripGroups |> Array.filter (fun group -> usedTripGroups.Contains group.id)
-            tripStops = batch.tripStops |> Array.filter (fun value -> tripKept value.routeId value.routeDistinction value.tripId)
+            tripStops = batch.tripStops |> JdfCallStore.filter (fun value -> tripKept value.routeId value.routeDistinction value.tripId)
             routeInfo = batch.routeInfo |> Array.filter (fun value -> routeKept value.routeId value.routeDistinction)
             serviceNotes = batch.serviceNotes |> Array.filter (fun value -> tripKept value.routeId value.routeDistinction value.tripId)
             transfers = batch.transfers |> Array.filter (fun value -> tripKept value.routeId value.routeDistinction value.tripId)
@@ -1570,9 +1631,9 @@ let logInternationalRouteDecisions (policy: InternationalRoutePolicy)
             "International route policy {Policy}: retained {RetainedRoutes} and dropped {DroppedRoutes} cross-border route distinctions",
             internationalRoutePolicyName policy, retained, dropped)
 
-let getGtfsTrips (jdfBatch: JdfModel.JdfBatch) =
+let private getGtfsTripsWithEndpoints (endpoints: IDictionary<struct(string * int * int64), int64> option) (jdfBatch: JdfModel.JdfBatch) =
     let lastStopPerTrip = Dictionary<struct (string * int * int64), struct (int64 * int64)>()
-    for call in jdfBatch.tripStops do
+    for call in (if endpoints.IsSome then Seq.empty else jdfBatch.tripStops :> seq<_>) do
         let key = struct (call.routeId, call.routeDistinction, call.tripId)
         let order = call.routeStopId * (if Jdf.tripIsReverse call.tripId then -1L else 1L)
         match lastStopPerTrip.TryGetValue(key) with
@@ -1591,8 +1652,11 @@ let getGtfsTrips (jdfBatch: JdfModel.JdfBatch) =
             serviceId = id
             id = id
             headsign =
-                let struct (_, stopId) =
-                    lastStopPerTrip.[struct (jdfTrip.routeId, jdfTrip.routeDistinction, jdfTrip.id)]
+                let key = struct (jdfTrip.routeId, jdfTrip.routeDistinction, jdfTrip.id)
+                let stopId =
+                    match endpoints with
+                    | Some values -> values.[key]
+                    | None -> let struct(_, stop) = lastStopPerTrip.[key] in stop
                 stopById.[stopId]
                 |> getStopName
                 |> Some
@@ -1604,12 +1668,17 @@ let getGtfsTrips (jdfBatch: JdfModel.JdfBatch) =
             blockId = None
             shapeId = None
             wheelchairAccessible =
-                Some (if wheelchairAccessible then "1" else "0")
+                // JDF is a closed-world source for trip accessibility.  An
+                // absent @/{ designation means the trip is not accessible,
+                // rather than the GTFS "unknown" value.
+                Some (if wheelchairAccessible then "1" else "2")
             bikesAllowed =
                 Some (if attrs |> Set.contains JdfModel.BicycleTransport
                       then GtfsModel.OneOrMore
                       else GtfsModel.NoBicycles)
         }: GtfsModel.Trip))
+
+let getGtfsTrips batch = getGtfsTripsWithEndpoints None batch
 
 [<Flags>]
 type private StopTimeAttributeFlags =
@@ -1623,11 +1692,13 @@ type private StopTimeAttributeFlags =
 type StreamingStopTimeRow = {
     stopTime: GtfsModel.StopTime
     sourceRouteStopId: int64
+    routeId: string
 }
 
 let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
                                         (postPlan: PostEstimationPlan)
-                                        (jdfBatch: JdfModel.JdfBatch) =
+                                        (jdfBatch: JdfModel.JdfBatch)
+                                        (recordEndpoint: struct(string * int * int64) -> int64 -> unit) =
     let periods = Dictionary<int64, Period>()
     let periodOptions = Dictionary<int64, Period option>()
     let periodForSeconds seconds =
@@ -1782,20 +1853,8 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
         if adjacentTripGroups then
             let calls = jdfBatch.tripStops
             let spans = ResizeArray<struct (string * int * int64 * int * int * string)>()
-            let mutable startIndex = 0
-            while startIndex < calls.Length do
-                let first = calls.[startIndex]
-                let mutable endIndex = startIndex + 1
-                while endIndex < calls.Length
-                      && calls.[endIndex].routeId = first.routeId
-                      && calls.[endIndex].routeDistinction = first.routeDistinction
-                      && calls.[endIndex].tripId = first.tripId do
-                    endIndex <- endIndex + 1
-                spans.Add(struct (
-                    first.routeId, first.routeDistinction, first.tripId,
-                    startIndex, endIndex-startIndex,
-                    jdfTripId first.routeId first.routeDistinction first.tripId))
-                startIndex <- endIndex
+            for struct(route, distinction, trip, start, count) in JdfCallStore.tripSpans calls do
+                spans.Add(struct(route, distinction, trip, start, count, jdfTripId route distinction trip))
             spans.Sort(Comparer<struct (string * int * int64 * int * int * string)>.Create(
                 fun struct (leftRoute,leftDistinction,leftTrip,_,_,leftId)
                     struct (rightRoute,rightDistinction,rightTrip,_,_,rightId) ->
@@ -1806,7 +1865,7 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
             spans
             |> Seq.map (fun struct (routeId,distinction,tripId,start,count,_) ->
                 let tripCalls = Array.zeroCreate<JdfModel.TripStop> count
-                Array.Copy(calls,start,tripCalls,0,count)
+                for index = 0 to count - 1 do tripCalls.[index] <- calls.[start + index]
                 (routeId,distinction,tripId),tripCalls)
         else
             jdfBatch.tripStops
@@ -1828,6 +1887,10 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
             jdfTripStops
             |> Array.sortBy (fun call ->
                 call.routeStopId * (if isReverseTrip then -1L else 1L))
+        let mutable endpointIndex = orderedCalls.Length - 1
+        while endpointIndex > 0 && orderedCalls.[endpointIndex - 1].routeStopId = orderedCalls.[endpointIndex].routeStopId do
+            endpointIndex <- endpointIndex - 1
+        recordEndpoint (struct(routeId, routeDistinction, tripId)) orderedCalls.[endpointIndex].stopId
         let inferredSelections =
             inferredSelectionsForTrip
                 routeId routeDistinction
@@ -1919,13 +1982,14 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
                     timepoint = exactTimepoint
                     stopZoneIds = None
                 }
-                Some { stopTime = stopTime; sourceRouteStopId = jdfTripStop.routeStopId }
+                Some { stopTime = stopTime; sourceRouteStopId = jdfTripStop.routeStopId
+                       routeId = jdfRouteId routeId routeDistinction }
         )
         |> Seq.choose id
     )
 
 let private getGtfsStopTimesInternal adjacentTripGroups stopIdCis postPlan jdfBatch =
-    getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis postPlan jdfBatch
+    getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis postPlan jdfBatch (fun _ _ -> ())
     |> Seq.map (fun value -> value.stopTime)
 
 // Standalone conversion preserves support for unusual JDF files whose trip
@@ -2104,7 +2168,7 @@ let private feedInfo (jdfVersion: JdfModel.JdfVersion)
 let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
                              (postPlan: PostEstimationPlan)
                              tripsToDelete calendar calendarExceptions publicLineNumbers
-                             (referencedStopIds: Set<string>) stopTimes =
+                             (referencedStopIds: Set<string>) stopTimes endpoints =
     let allStops = getGtfsStopsWithPlan stopIdsCis postPlan jdfBatch
     let requiredParentIds =
         allStops
@@ -2117,7 +2181,7 @@ let private assembleGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch)
         agencies = jdfBatch.agencies |> Array.map convertToGtfsAgency
         stops = stops
         routes = getGtfsRoutesWithPublicLines publicLineNumbers jdfBatch
-        trips = getGtfsTrips jdfBatch
+        trips = getGtfsTripsWithEndpoints endpoints jdfBatch
             |> Seq.filter (fun t ->
                 tripsToDelete |> Set.contains t.id |> not)
             |> Seq.toArray
@@ -2157,17 +2221,17 @@ let private getGtfsFeedInternal warnUnhandledNotes adjacentTripGroups stopIdsCis
         |> Seq.toArray
     let referencedStopIds = stopTimes |> Seq.map (fun stopTime -> stopTime.stopId) |> Set
     assembleGtfsFeed stopIdsCis jdfBatch postPlan tripsToDelete calendar calendarExceptions
-                     publicLineNumbers referencedStopIds stopTimes
+                     publicLineNumbers referencedStopIds stopTimes None
 
 type StreamingFeedPreparation = {
     adjacentTripGroups: bool
     stopIdsCis: bool
     batch: JdfModel.JdfBatch
     tripsToDelete: Set<string>
-    calendar: GtfsModel.CalendarEntry array
-    calendarExceptions: GtfsModel.CalendarException array
+    calendarPreparation: CalendarPreparation
     publicLineNumbers: Map<string * int, string option>
     postPlan: PostEstimationPlan
+    tripEndpoints: Dictionary<struct(string * int * int64), int64>
 }
 
 let private prepareGtfsFeedForStreamingInternal
@@ -2181,10 +2245,10 @@ let private prepareGtfsFeedForStreamingInternal
         stopIdsCis = stopIdsCis
         batch = batch
         tripsToDelete = calendarPreparation.tripsToDelete
-        calendar = calendarPreparation.calendar
-        calendarExceptions = calendarPreparation.calendarExceptions
+        calendarPreparation = calendarPreparation
         publicLineNumbers = getPublicLineNumbers batch
         postPlan = emptyPostEstimationPlan
+        tripEndpoints = Dictionary()
     }
 
 let prepareGtfsFeedForStreaming warnUnhandledNotes stopIdsCis batch =
@@ -2208,29 +2272,42 @@ let prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan
         stopIdsCis = stopIdsCis
         batch = batch
         tripsToDelete = calendar.tripsToDelete
-        calendar = calendar.calendar
-        calendarExceptions = calendar.calendarExceptions
+        calendarPreparation = calendar
         publicLineNumbers = getPublicLineNumbers batch
         postPlan = postPlan
+        tripEndpoints = Dictionary()
     }
 
 let getStreamingBundleStopTimes preparation =
-    getGtfsStopTimesInternal
+    getGtfsStopTimeRowsInternal
         preparation.adjacentTripGroups preparation.stopIdsCis preparation.postPlan preparation.batch
+        (fun key stop -> preparation.tripEndpoints.[key] <- stop)
+    |> Seq.map _.stopTime
     |> Seq.filter (fun stopTime ->
         not (preparation.tripsToDelete.Contains stopTime.tripId))
 
 let getStreamingBundleStopTimeRows preparation =
     getGtfsStopTimeRowsInternal
         preparation.adjacentTripGroups preparation.stopIdsCis preparation.postPlan preparation.batch
+        (fun key stop -> preparation.tripEndpoints.[key] <- stop)
     |> Seq.filter (fun value ->
         not (preparation.tripsToDelete.Contains value.stopTime.tripId))
 
 let finishStreamingBundleFeed preparation (referencedStopIds: Set<string>) =
+    let calendar, exceptions = materializeTripCalendars preparation.batch preparation.calendarPreparation
     assembleGtfsFeed
         preparation.stopIdsCis preparation.batch preparation.postPlan preparation.tripsToDelete
-        preparation.calendar preparation.calendarExceptions preparation.publicLineNumbers
-        referencedStopIds [||]
+        calendar exceptions preparation.publicLineNumbers referencedStopIds [||]
+        (if preparation.tripEndpoints.Count <> preparation.batch.trips.Length then None else Some preparation.tripEndpoints)
+
+/// Finalize for production sinks without expanding schedules once per trip.
+let finishStreamingFeedWithUniqueCalendars preparation (referencedStopIds: Set<string>) =
+    let services, calendar, exceptions = materializeUniqueCalendars preparation.calendarPreparation
+    let feed = assembleGtfsFeed
+                   preparation.stopIdsCis preparation.batch preparation.postPlan preparation.tripsToDelete
+                   calendar exceptions preparation.publicLineNumbers referencedStopIds [||]
+                   (if preparation.tripEndpoints.Count <> preparation.batch.trips.Length then None else Some preparation.tripEndpoints)
+    { feed with trips = feed.trips |> Array.map (fun trip -> { trip with serviceId = services.[trip.serviceId] }) }
 
 let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     getGtfsFeedInternal true false stopIdsCis jdfBatch

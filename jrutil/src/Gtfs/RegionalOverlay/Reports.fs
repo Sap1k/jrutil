@@ -66,7 +66,14 @@ let write ({
                 match projection.slicesByBaseTrip.TryGetValue(baseTrip.id) with
                 | true, slices ->
                     for slice in slices do
-                        for firstDate, lastDate in dateRanges slice.dates do
+                        // The slice's service calendar retains its exact active days.  A
+                        // binding only needs the enclosing validity interval; expanding
+                        // weekday gaps into separate rows multiplies national bindings
+                        // without adding any service-date information.
+                        let ranges = dateRanges slice.dates |> Seq.toArray
+                        if ranges.Length > 0 then
+                            let firstDate, _ = ranges.[0]
+                            let _, lastDate = ranges.[ranges.Length - 1]
                             yield [| baseTrip.id; slice.trip.id; dateString firstDate; dateString lastDate |]
                 | _ -> ()
         }
@@ -222,7 +229,8 @@ let write ({
                             for targetIndex in 0 .. selection.sourceOrdinalByTarget.Length - 1 do
                                 match selection.sourceOrdinalByTarget.[targetIndex] with
                                 | Some sourceIndex ->
-                                    match emit (sourceIndex + 1) selection.sourceStopIds.[sourceIndex] slice.trip.id (targetIndex + 1) selection.outputStopIds.[targetIndex] with
+                                    let sourceSequence = binding.sourceCalls.[sourceIndex].sequence
+                                    match emit sourceSequence selection.sourceStopIds.[sourceIndex] slice.trip.id (targetIndex + 1) selection.outputStopIds.[targetIndex] with
                                     | Some row -> yield row
                                     | None -> ()
                                 | None -> ()
@@ -232,7 +240,7 @@ let write ({
                 let sourceProjection = projection.projectionsBySource.[sourceTripId]
                 for sourceIndex in 0 .. sourceProjection.sourceCalls.Length - 1 do
                     let call = sourceProjection.sourceCalls.[sourceIndex]
-                    match emit (sourceIndex + 1) call.stopId addition.trip.id (sourceIndex + 1) projection.outputStopForSource.[call.stopId] with
+                    match emit call.sequence call.stopId addition.trip.id (sourceIndex + 1) projection.outputStopForSource.[call.stopId] with
                     | Some row -> yield row
                     | None -> ()
             | _ -> ()
@@ -255,13 +263,12 @@ let write ({
         for _, sharedDates in slicesForBinding matchBinding do
             for dateIndex in 0 .. sharedDates.Length - 1 do
                 if sharedDates.[dateIndex] then acceptDate matchBinding.sourceTripId dateIndex
-    for addition in projection.sourceTripAdditions do
-        for sourceId, originalTripId in addition.projection.sourceTripReferences do
-            source.tripProjections
-            |> Array.tryFind (fun value -> value.sourceId = sourceId && originalIdentity "trip_id" value.sourceRow = originalTripId)
-            |> Option.iter (fun sourceProjection ->
-                for dateIndex in 0 .. sourceProjection.dates.Length - 1 do
-                    if sourceProjection.dates.[dateIndex] then acceptDate sourceProjection.sourceTripId dateIndex)
+    for sourceProjection in source.tripProjections do
+        match projection.sourceTripAdditionsBySourceId.TryGetValue(sourceProjection.sourceTripId) with
+        | true, _ ->
+            for dateIndex in 0 .. sourceProjection.dates.Length - 1 do
+                if sourceProjection.dates.[dateIndex] then acceptDate sourceProjection.sourceTripId dateIndex
+        | _ -> ()
     let acceptedDates =
         acceptedDateBuilders
         |> Seq.map (fun pair ->

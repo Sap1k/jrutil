@@ -3,8 +3,12 @@
 import csv
 import math
 import sys
+import tempfile
+import zipfile
 from collections import defaultdict
 from pathlib import Path
+
+import pyarrow.parquet as parquet
 
 
 def rows(path):
@@ -30,8 +34,14 @@ def distance(left, right):
 def main():
     root = Path(sys.argv[1])
     audit_date = sys.argv[2].replace("-", "")
-    output = Path(sys.argv[3]) if len(sys.argv) > 3 else root / "reports" / f"duplicate_journeys_{audit_date}.csv"
-    gtfs = root / "gtfs-intermediate"
+    if len(sys.argv) < 4:
+        raise SystemExit("usage: audit_duplicate_journeys.py PACKAGE YYYYMMDD OUTPUT.csv")
+    output = Path(sys.argv[3])
+    temporary = tempfile.TemporaryDirectory(prefix="duplicate-journey-audit-")
+    gtfs = Path(temporary.name) / "gtfs"
+    gtfs.mkdir()
+    with zipfile.ZipFile(root / "gtfs.zip") as archive:
+        archive.extractall(gtfs)
 
     active_services = {
         row["service_id"]
@@ -71,19 +81,20 @@ def main():
             index[key].append(trip_id)
 
     jmk_sources_by_output = defaultdict(set)
-    for row in rows(root / "mappings" / "source_to_output_trips.csv"):
+    binding_rows = parquet.read_table(
+        root / "serving" / "source_trip_map.parquet",
+        columns=["source_id", "trip_namespace", "source_trip_id", "trip_id", "valid_from", "valid_to"],
+    ).to_pylist()
+    for row in binding_rows:
         if (row["source_id"] == "ids-jmk-gtfs"
-                and row["valid_from"] <= audit_date <= row["valid_to"]
-                and row["output_trip_id"] in calls):
-            jmk_sources_by_output[row["output_trip_id"]].add(row["source_trip_id"])
+                and row["valid_from"].strftime("%Y%m%d") <= audit_date <= row["valid_to"].strftime("%Y%m%d")
+                and row["trip_id"] in calls):
+            jmk_sources_by_output[row["trip_id"]].add(row["source_trip_id"])
     jmk_outputs = set(jmk_sources_by_output)
     operational_by_source = defaultdict(set)
-    for row in rows(root / "mappings" / "operational_to_source_trips.csv"):
-        if (row["source_id"] == "ids-jmk-gtfs"
-                and row["valid_from"] <= audit_date <= row["valid_to"]):
-            operational_by_source[row["source_trip_id"]].add(
-                (row["operational_line_id"], row["operational_trip_id"])
-            )
+    for row in binding_rows:
+        if row["source_id"] == "ids-jmk-gtfs" and row["trip_namespace"] == "operational_line_course":
+            operational_by_source[row["trip_id"]].add(row["source_trip_id"])
     findings = []
     source_confirmed_parallel = 0
     seen_pairs = set()
@@ -121,8 +132,8 @@ def main():
                     target_index += 1
             coverage = min(matched / len(source_calls), matched / len(target_calls))
             if matched >= 2 and coverage >= 0.75 and maximum_time_delta <= 120:
-                source_operational = set().union(*(operational_by_source[value] for value in jmk_sources_by_output[source_trip]))
-                target_operational = set().union(*(operational_by_source[value] for value in jmk_sources_by_output.get(target_trip, ())))
+                source_operational = operational_by_source[source_trip]
+                target_operational = operational_by_source[target_trip]
                 # Close headways and short-turn variants are valid distinct journeys.
                 # When IDS JMK itself gives both outputs disjoint operational
                 # line/course identities, the pair is confirmed by the source and

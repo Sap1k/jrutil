@@ -14,6 +14,10 @@ open JrUtil.Tests.Asserts
 [<TestClass>]
 type ExecutionTests() =
     [<TestMethod>]
+    member _.``Production process memory target remains below aggregate acceptance ceiling``() =
+        Assert.IsTrue(ProductionProcessBudgetBytes < 4_000_000_000L)
+
+    [<TestMethod>]
     member _.``Candidate collection does not require a routing PBF``() =
         assertEqual
             { collectEvidence = true; runRoutedInference = false }

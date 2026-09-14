@@ -145,19 +145,19 @@ type private TripStopSpool(path: string) =
         writeRecord writer row
 
     member _.BeginMappedBatch(
-        rows: TripStop array,
+        rows: IReadOnlyList<TripStop>,
         workers: int,
         mapRow: TripStop -> TripStop) =
         if finalized then invalidOp "Cannot append to a finalized trip-stop spool"
         Threading.Tasks.Task.Run<unit -> unit>(Func<unit -> unit>(fun () ->
-            let usefulPartitions = max 1 ((rows.Length + 2047) / 2048)
+            let usefulPartitions = max 1 ((rows.Count + 2047) / 2048)
             let partitionCount =
                 min workers (min Environment.ProcessorCount usefulPartitions)
-            let partitionSize = (rows.Length + partitionCount - 1) / partitionCount
+            let partitionSize = (rows.Count + partitionCount - 1) / partitionCount
             let partitions =
-                if rows.Length = 0 then [||]
-                else [| for start in 0 .. partitionSize .. rows.Length - 1 ->
-                          start, min rows.Length (start + partitionSize) |]
+                if rows.Count = 0 then [||]
+                else [| for start in 0 .. partitionSize .. rows.Count - 1 ->
+                          start, min rows.Count (start + partitionSize) |]
             let serializeBuffer (startIndex, endIndex) =
                 let bufferStream = new MemoryStream()
                 use partWriter = new StreamWriter(bufferStream, jdfEncoding, 64 * 1024, true)

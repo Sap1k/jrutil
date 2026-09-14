@@ -413,7 +413,7 @@ type JdfBatch = {
     routeStops: RouteStop array
     trips: Trip array
     tripGroups: TripGroup array
-    tripStops: TripStop array
+    tripStops: System.Collections.Generic.IReadOnlyList<TripStop>
     routeInfo: RouteInfo array
     attributeRefs: AttributeRef array
     serviceNotes: ServiceNote array

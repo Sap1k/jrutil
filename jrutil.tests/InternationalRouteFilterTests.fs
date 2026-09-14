@@ -33,7 +33,7 @@ type InternationalRouteFilterTests() =
             source.trips
             |> Array.find (fun value -> value.routeId = fst routeKey && value.id = 1L)
         let sourceCalls =
-            source.tripStops
+            source.tripStops |> Seq.toArray
             |> Array.filter (fun value ->
                 value.routeId = fst routeKey && value.tripId = 1L
                 && (value.routeStopId = 1L || value.routeStopId = 2L))
@@ -136,7 +136,7 @@ type InternationalRouteFilterTests() =
         let missingKm = {
             missingKm with
                 tripStops =
-                    missingKm.tripStops
+                    missingKm.tripStops |> Seq.toArray
                     |> Array.map (fun call -> if call.stopId = 300L then { call with kilometer = None } else call)
         }
         assertEqual "foreign_only_trip" ((classify foreignOnly [||]).decisions |> Array.exactlyOne).reason
@@ -159,17 +159,17 @@ type InternationalRouteFilterTests() =
                 routes = original.routes |> Array.map (fun value -> { value with id = routeId })
                 routeStops = original.routeStops |> Array.map (fun value -> { value with routeId = routeId })
                 trips = original.trips |> Array.map (fun value -> { value with routeId = routeId })
-                tripStops = original.tripStops |> Array.map (fun value -> { value with routeId = routeId })
+                tripStops = original.tripStops |> Seq.toArray |> Array.map (fun value -> { value with routeId = routeId })
                 serviceNotes = original.serviceNotes |> Array.map (fun value -> { value with routeId = routeId })
         }
         let foreignTrip = { source.trips.[0] with id = 2L }
         let foreignCalls =
-            source.tripStops
+            source.tripStops |> Seq.toArray
             |> Array.map (fun call -> { call with tripId = 2L; stopId = 300L })
         let mixed = {
             source with
                 trips = Array.append source.trips [| foreignTrip |]
-                tripStops = Array.append source.tripStops foreignCalls
+                tripStops = Array.append (source.tripStops |> Seq.toArray) foreignCalls
         }
 
         let result = classify mixed [||]
@@ -190,7 +190,7 @@ type InternationalRouteFilterTests() =
             source.trips
             |> Array.find (fun value -> value.routeId = fst routeKey && value.id = 3L)
         let filteredCalls =
-            source.tripStops
+            source.tripStops |> Seq.toArray
             |> Array.filter (fun value -> value.routeId = fst routeKey && value.tripId = 3L)
             |> Array.sortBy (fun value -> value.routeStopId)
         let foreignStop = {
@@ -208,7 +208,7 @@ type InternationalRouteFilterTests() =
                 stops = Array.append domestic.stops [| foreignStop |]
                 routeStops = Array.append domestic.routeStops [| foreignRouteStop |]
                 trips = Array.append domestic.trips [| filteredTrip |]
-                tripStops = Array.concat [domestic.tripStops; [| filteredCalls.[0]; filteredForeignCall |]]
+                tripStops = Array.concat [domestic.tripStops |> Seq.toArray; [| filteredCalls.[0]; filteredForeignCall |]]
                 serviceNotes =
                     source.serviceNotes
                     |> Array.filter (fun value ->
@@ -232,7 +232,7 @@ type InternationalRouteFilterTests() =
         let dropped = classify source [||]
         assertEqual 0 dropped.batch.routes.Length
         assertEqual 0 dropped.batch.trips.Length
-        assertEqual 0 dropped.batch.tripStops.Length
+        assertEqual 0 dropped.batch.tripStops.Count
         assertEqual 0 dropped.batch.routeStops.Length
         assertEqual 0 dropped.batch.routeIntegrations.Length
         assertEqual 0 dropped.batch.stops.Length
@@ -299,22 +299,22 @@ type InternationalRouteFilterTests() =
             JrUtil.JdfBundle.writeBundleWithPolicy
                 descriptorPath "test-commit" false RegionalAdjacent [||] zipPath output
 
-            assertEqual 1 (File.ReadAllLines(Path.Combine(output, "gtfs-intermediate", "routes.txt")).Length)
-            assertEqual 1 (File.ReadAllLines(Path.Combine(output, "gtfs-intermediate", "stops.txt")).Length)
+            let gtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView output (Path.Combine(root, "compiler-view"))
+            assertEqual 1 (File.ReadAllLines(Path.Combine(gtfs, "routes.txt")).Length)
+            assertEqual 1 (File.ReadAllLines(Path.Combine(gtfs, "stops.txt")).Length)
             use diagnostics = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(output, "diagnostics.json")))
             let filtered =
-                diagnostics.RootElement.GetProperty("diagnostics").EnumerateArray()
-                |> Seq.filter (fun value -> value.GetProperty("code").GetString() = "filtered_international_route")
+                diagnostics.RootElement.GetProperty("examples_by_code").GetProperty("filtered_international_route").EnumerateArray()
                 |> Seq.exactlyOne
             assertEqual "jdf:route:586001:1" (filtered.GetProperty("source_object_id").GetString())
             use manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(output, "manifest.json")))
             let policy =
-                manifest.RootElement.GetProperty("conversion").GetProperty("international_route_filter")
+                manifest.RootElement.GetProperty("compiler").GetProperty("international_route_filter")
             assertEqual "regional-adjacent" (policy.GetProperty("policy").GetString())
             assertEqual 1 (policy.GetProperty("dropped_route_distinctions").GetInt32())
-            let routeMetadata =
-                manifest.RootElement.GetProperty("files").EnumerateArray()
-                |> Seq.find (fun value -> value.GetProperty("path").GetString() = "source_route_metadata.parquet")
-            assertEqual 0 (routeMetadata.GetProperty("rows").GetInt32())
+            let routeRelation =
+                manifest.RootElement.GetProperty("relations").EnumerateArray()
+                |> Seq.find (fun value -> value.GetProperty("name").GetString() = "route")
+            assertEqual 0 (routeRelation.GetProperty("row_count").GetInt32())
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)

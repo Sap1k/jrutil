@@ -89,7 +89,7 @@ let fileParserOrEmpty name =
     let inner = fileParserTry name
     fun path -> inner path |> Option.defaultValue [||]
 
-let jdf111BatchDirParser () =
+let private jdf111BatchDirParserWithCalls tripStopsParser =
     let versionParser = fileParser "VerzeJDF.txt"
     let stopsParser = fileParser "Zastavky.txt"
     let stopPostsParser = fileParserOrEmpty "Oznacniky.txt"
@@ -99,7 +99,6 @@ let jdf111BatchDirParser () =
     let routeStopsParser = fileParser "Zaslinky.txt"
     let tripsParser = fileParser "Spoje.txt"
     let tripGroupsParser = fileParserOrEmpty "SpojSkup.txt"
-    let tripStopsParser = fileParser "Zasspoje.txt"
     let routeInfoParser = fileParserOrEmpty "Udaje.txt"
     let attributeRefsParser = fileParser "Pevnykod.txt"
     let serviceNotesParser = fileParser "Caskody.txt"
@@ -138,8 +137,11 @@ let jdf111BatchDirParser () =
         validatePostCandidateEvidence batch.postCandidateEvidence
         batch
 
+let jdf111BatchDirParser () =
+    jdf111BatchDirParserWithCalls (fun path -> fileParser "Zasspoje.txt" path :> System.Collections.Generic.IReadOnlyList<TripStop>)
+
 // This repetition is annoying. Refactoring suggestions welcome.
-let jdf110BatchDirParser () =
+let private jdf110BatchDirParserWithCalls tripStopsParser =
     let versionParser = fileParser "VerzeJDF.txt"
     let stopsParser = fileParser "Zastavky.txt"
     let stopPostsParser = fileParserOrEmpty "Oznacniky.txt"
@@ -149,7 +151,6 @@ let jdf110BatchDirParser () =
     let routeStopsParser = fileParser "Zaslinky.txt"
     let tripsParser = fileParser "Spoje.txt"
     let tripGroupsParser = fileParserOrEmpty "SpojSkup.txt"
-    let tripStopsParser = fileParser "Zasspoje.txt"
     let routeInfoParser = fileParserOrEmpty "Udaje.txt"
     let attributeRefsParser = fileParser "Pevnykod.txt"
     let serviceNotesParser = fileParser "Caskody.txt"
@@ -179,14 +180,15 @@ let jdf110BatchDirParser () =
         }
         batch
 
-let jdf109BatchDirParser () =
+let jdf110BatchDirParser () = jdf110BatchDirParserWithCalls (fileParser "Zasspoje.txt")
+
+let private jdf109BatchDirParserWithCalls tripStopsParser =
     let versionParser = fileParser "VerzeJDF.txt"
     let stopsParser = fileParser "Zastavky.txt"
     let agenciesParser = fileParser "Dopravci.txt"
     let routesParser = fileParser "Linky.txt"
     let routeStopsParser = fileParser "Zaslinky.txt"
     let tripsParser = fileParser "Spoje.txt"
-    let tripStopsParser = fileParser "Zasspoje.txt"
     let routeInfoParser = fileParserOrEmpty "Udaje.txt"
     let attributeRefsParser = fileParser "Pevnykod.txt"
     let serviceNotesParser = fileParser "Caskody.txt"
@@ -210,6 +212,32 @@ let jdf109BatchDirParser () =
             reservationOptions = reservationOptionsParser path
         }
         batch
+
+let jdf109BatchDirParser () = jdf109BatchDirParserWithCalls (fileParser "Zasspoje.txt")
+
+/// Every supported source version feeds the same typed sequential call store.
+let jdfCompilationParser (store: JdfCallStore.Store) progress path =
+    let readCalls (parser: Stream -> TripStop seq) =
+        match path with
+        | FsPath directory ->
+            let callPath = findPathCaseInsensitive directory "Zasspoje.txt" |> Option.get
+            use stream = File.OpenRead(callPath)
+            store.Write(parser stream, progress)
+        | ZipArchive archive ->
+            let entry = archive.Entries |> Seq.find (fun entry -> entry.Name.Equals("Zasspoje.txt", System.StringComparison.OrdinalIgnoreCase))
+            use stream = entry.Open()
+            store.Write(parser stream, progress)
+    match jdfBatchDirVersion path with
+    | "1.11" -> jdf111BatchDirParserWithCalls (fun _ -> readCalls getJdfParser<TripStop>) path
+    | "1.10" ->
+        let facts = jdf110BatchDirParserWithCalls (fun _ -> [||]) path |> jdf110To111Converter ()
+        let convert = jdf110TripStopTo111Converter ()
+        { facts with tripStops = readCalls (fun stream -> getJdfParser<Jdf110Model.TripStop> stream |> Seq.map convert) }
+    | "1.9" | "1.8" ->
+        let facts = jdf109BatchDirParserWithCalls (fun _ -> [||]) path |> jdf109To110Converter () |> jdf110To111Converter ()
+        let convert = jdf109TripStopTo110Converter () >> jdf110TripStopTo111Converter ()
+        { facts with tripStops = readCalls (fun stream -> getJdfParser<Jdf109Model.TripStop> stream |> Seq.map convert) }
+    | version -> invalidArg "path" $"Unknown JDF version: {version}"
 
 let jdfBatchDirParser () =
     let jdf111Parser = jdf111BatchDirParser()

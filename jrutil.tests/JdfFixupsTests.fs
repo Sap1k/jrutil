@@ -726,4 +726,4 @@ type JdfFixupsTests() =
         assertEqual 0 dropped.routes.Length
         assertEqual 0 dropped.stops.Length
         assertEqual 0 dropped.trips.Length
-        assertEqual 0 dropped.tripStops.Length
+        assertEqual 0 dropped.tripStops.Count

@@ -239,6 +239,61 @@ type JdfToGtfsTests() =
             JdfModel.validatePostCandidateEvidence [|{observation with supportWeight=0M}|]) |> ignore
 
     [<TestMethod>]
+    member _.``Shared inactive schedules delete every source trip``() =
+        let source = batch ()
+        let first = source.trips.[0]
+        let second = { first with id = 987654L }
+        let route = source.routes |> Array.find (fun route -> route.id = first.routeId && route.idDistinction = first.routeDistinction)
+        let note: JdfModel.ServiceNote = {
+            routeId = first.routeId; routeDistinction = first.routeDistinction; tripId = first.id
+            id = 1L; designation = "closed"; noteType = Some JdfModel.NoService
+            dateFrom = Some route.timetableValidFrom; dateTo = Some route.timetableValidTo; note = None }
+        let prepared =
+            { source with trips = [| first; second |]; serviceNotes = [| note; { note with tripId = second.id } |] }
+            |> JdfToGtfs.prepareGtfsCalendarWithWorkers 4
+        assertEqual
+            (set [JdfToGtfs.jdfTripId first.routeId first.routeDistinction first.id
+                  JdfToGtfs.jdfTripId second.routeId second.routeDistinction second.id])
+            prepared.tripsToDelete
+        Assert.IsTrue(prepared.schedules.IsEmpty)
+
+    [<TestMethod>]
+    member _.``Shared calendars preserve v1 service identities across workers and trip order``() =
+        let source = batch ()
+        // More than one preparation chunk, repeated schedules and reversed IDs.
+        let trips =
+            [| for index in 0 .. 4999 do
+                   yield { source.trips.[index % source.trips.Length] with id = int64 (5000 - index) } |]
+        let calls =
+            [| for index in 0 .. trips.Length - 1 do
+                   let original = source.trips.[index % source.trips.Length]
+                   for call in source.tripStops do
+                       if call.routeId = original.routeId && call.routeDistinction = original.routeDistinction
+                          && call.tripId = original.id then
+                           yield { call with tripId = trips.[index].id } |]
+        let notes =
+            [| for index in 0 .. trips.Length - 1 do
+                   let original = source.trips.[index % source.trips.Length]
+                   for note in source.serviceNotes do
+                       if note.routeId = original.routeId && note.routeDistinction = original.routeDistinction
+                          && note.tripId = original.id then
+                           yield { note with tripId = trips.[index].id } |]
+        let expanded = { source with trips = trips; tripStops = calls; serviceNotes = notes }
+        let legacy = JdfToGtfs.getGtfsFeed false expanded |> Gtfs.deduplicateCalendar
+        for workers in [1; 4] do
+            let calendar = JdfToGtfs.prepareGtfsCalendarWithWorkers workers expanded
+            let preparation =
+                JdfToGtfs.prepareGtfsFeedForStreaming true false expanded
+            let actual =
+                JdfToGtfs.finishStreamingFeedWithUniqueCalendars
+                    { preparation with calendarPreparation = calendar } Set.empty
+            assertEqual legacy.calendar actual.calendar
+            assertEqual legacy.calendarExceptions actual.calendarExceptions
+            assertEqual
+                (legacy.trips |> Array.map (fun trip -> trip.id, trip.serviceId))
+                (actual.trips |> Array.map (fun trip -> trip.id, trip.serviceId))
+
+    [<TestMethod>]
     member _.``Streaming and materialized JDF conversion outputs are byte-identical``() =
         let root =
             Path.Combine(Path.GetTempPath(), "jrutil-jdf-streaming-" + Guid.NewGuid().ToString("N"))
@@ -305,7 +360,7 @@ type JdfToGtfsTests() =
         let expected = JdfToGtfs.getGtfsStopTimes false source |> normalize
         let unsorted = {
             source with
-                tripStops = source.tripStops |> Array.sortBy (fun call -> call.routeStopId)
+                tripStops = source.tripStops |> Seq.toArray |> Array.sortBy (fun call -> call.routeStopId)
         }
         let actual = JdfToGtfs.getGtfsStopTimes false unsorted |> normalize
         assertEqual expected actual
@@ -590,7 +645,7 @@ type JdfToGtfsTests() =
                                 postEvidence 100L "east" 50.0M 14.00005M
                                 postEvidence 100L "west" 50.0M 13.99995M|] }
             let reversed={fixture with
-                            tripStops=Array.rev fixture.tripStops
+                            tripStops=Array.rev (fixture.tripStops |> Seq.toArray)
                             postCandidateEvidence=Array.rev fixture.postCandidateEvidence}
             let capture workers budget input =
                 JdfPostEvidence.captureToStore

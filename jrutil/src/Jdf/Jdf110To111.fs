@@ -12,6 +12,12 @@ open JrUtil
 open JrUtil.AutoCopy
 open JrUtil.Utils
 
+let jdf110TripStopTo111Converter () =
+    getAutoCopier<Jdf110Model.TripStop, JdfModel.TripStop> (nameGetters [
+        "minArrivalTime", (fun _ -> box None)
+        "maxDepartureTime", (fun _ -> box None)
+    ])
+
 let jdf110To111Converter () =
     let routeAC =
         getAutoCopier<Jdf110Model.Route, JdfModel.Route> (nameGetters [
@@ -22,11 +28,7 @@ let jdf110To111Converter () =
                  // This is just an arbitrary large date
                  | None -> LocalDate(3000, 1, 1) |> box))
         ])
-    let tripStopAC =
-        getAutoCopier<Jdf110Model.TripStop, JdfModel.TripStop> (nameGetters [
-            "minArrivalTime", constant None >> box
-            "maxDepartureTime", constant None >> box
-        ])
+    let tripStopAC = jdf110TripStopTo111Converter ()
     let transferAC =
         getAutoCopier<Jdf110Model.Transfer, JdfModel.Transfer> (nameGetters [
             "note", constant None >> box
