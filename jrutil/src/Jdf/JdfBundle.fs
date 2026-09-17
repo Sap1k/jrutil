@@ -683,7 +683,9 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
                         | JdfModel.OnlyWithReservation -> "reservation_required"
                         | JdfModel.BicycleTransport -> "bicycle_transport"
                         | _ -> "jdf_trip_attribute"
-                    { trip = gtfsTripId; code = code; kind = kind
+                    { scope = "trip"; route = ""; trip = gtfsTripId
+                      callSequence = Nullable(); service = ""; code = code; kind = kind
+                      note = ""
                       sourceObject = $"{gtfsTripId}:attribute:{Uri.EscapeDataString(code)}" }))
 
     let routeStopZones () =
