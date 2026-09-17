@@ -63,12 +63,21 @@ type CatalogCode = {
     abbreviation: string
 }
 
+type CatalogNote = {
+    code: string
+    name: string
+    text: string option
+    validFrom: LocalDate option
+    validTo: LocalDate option
+}
+
 type CatalogSnapshot = {
     lines: CatalogLine array
     companies: CatalogCompany array
     ids: CatalogIds array
     trainTypes: CatalogCode array
     commercialTrainTypes: CatalogCode array
+    centralNotes: CatalogNote array
 }
 
 type PointNameIndex = Map<string * string, string>
@@ -155,6 +164,31 @@ type ConversionResult = {
     idsDiagnostics: string array
     mergeDiagnostics: string array
     coordinateDiagnostics: CoordinateDiagnostics
+    notes: CzPttNote array
+    features: CzPttFeature array
+}
+
+and CzPttNote = {
+    id: string
+    paId: string
+    kind: string
+    code: string option
+    label: string option
+    rawValue: string
+    validFrom: LocalDate option
+    validTo: LocalDate option
+    tripIds: string array
+    resolved: bool
+}
+
+and CzPttFeature = {
+    id: string
+    tripId: string
+    callSequence: int option
+    sourceCode: string
+    kind: string
+    noteId: string option
+    sourceObjectId: string
 }
 
 type private NormalizedCall = {
@@ -186,6 +220,7 @@ let emptyCatalog = {
     ids = [||]
     trainTypes = [||]
     commercialTrainTypes = [||]
+    centralNotes = [||]
 }
 
 type private Journey = {
@@ -274,6 +309,17 @@ let loadCatalogSnapshot (path: string) =
                     abbreviation =
                         tryString value "abbreviation"
                         |> Option.defaultValue code
+                }))
+        centralNotes =
+            array "central_notes"
+            |> Array.choose (fun value ->
+                tryString value "code"
+                |> Option.map (fun code -> {
+                    code = code
+                    name = tryString value "name" |> Option.defaultValue code
+                    text = tryString value "text"
+                    validFrom = tryDate value "valid_from"
+                    validTo = tryDate value "valid_to"
                 }))
     }
 
@@ -365,7 +411,7 @@ let private hasActivity (activity: TrainActivity)
                         (location: CzPttXml.CzpttLocation) =
     locationActivities location |> Seq.contains activity
 
-let private catalogAbbreviation entries code =
+let private catalogAbbreviation (entries: CatalogCode array) code =
     entries
     |> Array.tryFind (fun entry -> entry.code = code)
     |> Option.map (fun entry -> entry.abbreviation)
@@ -449,6 +495,144 @@ let private normalize (catalog: CatalogSnapshot)
             category = currentCategory
             alternativeTransport = isAlternativeTransport location
         })
+
+type private CentralNoteSpec = {
+    index: int
+    code: string
+    rawValue: string
+    firstIndex: int option
+    lastIndex: int option
+    calendarId: string option
+    coversAllDates: bool
+}
+
+let private compactLocationCode (value: string) =
+    let compact = value.Trim().ToUpperInvariant()
+    if compact.Length > 2 && Char.IsLetter(compact.[0]) && Char.IsLetter(compact.[1])
+    then compact.Substring(2)
+    else compact
+
+let private noteOccurrence (value: string) =
+    if String.IsNullOrWhiteSpace(value) then Some 0
+    else
+        match Int32.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture) with
+        | true, ordinal when ordinal >= 0 -> Some ordinal
+        | _ -> None
+
+let private resolveNoteEndpoint code occurrence (calls: NormalizedCall array) =
+    let matches =
+        calls
+        |> Array.filter (fun call ->
+            compactLocationCode call.location.Location.LocationPrimaryCode =
+                compactLocationCode code)
+    occurrence |> Option.bind (fun ordinal ->
+        matches |> Array.tryItem ordinal |> Option.map (fun call -> call.sourceIndex))
+
+let private tryCompactDate (value: string) =
+    LocalDatePattern.CreateWithInvariantCulture("yyyyMMdd").Parse(value)
+    |> fun parsed -> if parsed.Success then Some parsed.Value else None
+
+let private activeJourneyDates (message: CzPttXml.CzpttcisMessage) =
+    let calendar = message.CzpttInformation.PlannedCalendar
+    let startDate = LocalDate.FromDateTime(calendar.ValidityPeriod.StartDateTime)
+    calendar.BitmapDays
+    |> Seq.mapi (fun index active -> startDate.PlusDays(index), active)
+    |> Seq.choose (fun (date, active) -> if active = '1' then Some date else None)
+    |> Set
+
+let private noteCalendarDates (message: CzPttXml.CzpttcisMessage) =
+    parameterValues "CZCalendarPTTNote" message.NetworkSpecificParameter
+    |> Seq.choose (fun (raw: string) ->
+        let fields = raw.Split('|')
+        if fields.Length < 4 then None
+        else
+            match tryCompactDate fields.[1] with
+            | None -> None
+            | Some startDate ->
+                let dates =
+                    fields.[3]
+                    |> Seq.mapi (fun index active -> startDate.PlusDays(index), active)
+                    |> Seq.choose (fun (date, active) -> if active = '1' then Some date else None)
+                    |> Set
+                let nextId =
+                    fields
+                    |> Array.tryItem 4
+                    |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                Some (fields.[0], dates, nextId))
+    |> Seq.groupBy (fun (id, _, _) -> id)
+    |> Seq.map (fun (id, rows) -> id, rows |> Seq.toArray)
+    |> Map
+
+let private resolvedCalendarDates message calendarId =
+    let calendars = noteCalendarDates message
+    let rec collect visited id =
+        if Set.contains id visited then None
+        else
+            match Map.tryFind id calendars with
+            | None -> None
+            | Some rows ->
+                let own = rows |> Seq.collect (fun (_, dates, _) -> dates) |> Set
+                let next =
+                    rows
+                    |> Seq.choose (fun (_, _, nextId) -> nextId)
+                    |> Seq.distinct
+                    |> Seq.toArray
+                if next.Length > 1 then None
+                elif next.Length = 0 then Some own
+                else
+                    collect (Set.add id visited) next.[0]
+                    |> Option.map (Set.union own)
+    collect Set.empty calendarId
+
+let private centralNoteSpecs message calls =
+    let journeyDates = activeJourneyDates message
+    parameterValues "CZCentralPTTNote" message.NetworkSpecificParameter
+    |> Seq.mapi (fun index raw ->
+        let fields = raw.Split('|')
+        let code = fields |> Array.tryItem 0 |> Option.defaultValue ""
+        let firstIndex, lastIndex =
+            if fields.Length < 5 then None, None
+            else
+                resolveNoteEndpoint fields.[1] (noteOccurrence fields.[2]) calls,
+                resolveNoteEndpoint fields.[3] (noteOccurrence fields.[4]) calls
+        let calendarId =
+            fields
+            |> Array.tryItem 6
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        let coversAllDates =
+            match calendarId with
+            | None -> true
+            | Some id ->
+                resolvedCalendarDates message id
+                |> Option.exists (fun dates -> Set.isSubset journeyDates dates)
+        { index = index; code = code; rawValue = raw
+          firstIndex = firstIndex; lastIndex = lastIndex
+          calendarId = calendarId; coversAllDates = coversAllDates })
+    |> Seq.toArray
+
+let private noteCoversJourney (journey: Journey) note =
+    match note.firstIndex, note.lastIndex with
+    | Some firstIndex, Some lastIndex when firstIndex <= lastIndex ->
+        firstIndex <= journey.calls.[0].sourceIndex
+        && lastIndex >= journey.calls.[journey.calls.Length - 1].sourceIndex
+    | _ -> false
+
+let private projectedTripFeatures message calls journey =
+    if journey.alternativeTransport then None, None, false
+    else
+        let complete code =
+            centralNoteSpecs message calls
+            |> Array.exists (fun note ->
+                note.code = code && note.coversAllDates && noteCoversJourney journey note)
+        let wheelchair = complete "17" || complete "34"
+        let positiveBike = [| "22"; "26"; "27"; "28"; "29" |] |> Array.exists complete
+        let prohibitedBike = complete "36"
+        let bikes =
+            match positiveBike, prohibitedBike with
+            | true, false -> Some OneOrMore
+            | false, true -> Some NoBicycles
+            | _ -> None
+        (if wheelchair then Some "1" else None), bikes, (positiveBike && prohibitedBike)
 
 let private chronologyError (message: CzPttXml.CzpttcisMessage)
                             (calls: NormalizedCall array) =
@@ -1023,9 +1207,11 @@ let private route blockMode catalog date message journey =
         sortOrder = None
     }
 
-let private trip pointNames blockMode catalog date message endpoints
+let private trip pointNames blockMode catalog date message sourceCalls endpoints
                  separateModeBlocks journey =
     let finalCall = snd endpoints
+    let wheelchairAccessible, bikesAllowed, _ =
+        projectedTripFeatures message sourceCalls journey
     {
         routeId = routeId blockMode catalog date message journey
         serviceId = serviceId message
@@ -1040,8 +1226,8 @@ let private trip pointNames blockMode catalog date message endpoints
             | Blocks -> Some (blockId message)
             | NoBlocks -> None
         shapeId = None
-        wheelchairAccessible = None
-        bikesAllowed = None
+        wheelchairAccessible = wheelchairAccessible
+        bikesAllowed = bikesAllowed
     }
 
 let private transfers message (journeys: Journey array) =
@@ -1421,6 +1607,8 @@ let private feedInfo (messages: CzPttXml.CzpttcisMessage array) =
 
 let convertWithPointNamesAndOptions catalog options pointNames
                           (messages: CzPttXml.CzpttcisMessage seq) =
+    let noteContexts =
+        ResizeArray<CzPttXml.CzpttcisMessage * NormalizedCall array>()
     let accepted =
         ResizeArray<
             CzPttXml.CzpttcisMessage * NormalizedCall array *
@@ -1430,6 +1618,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
     let boundaryAdjustments = ResizeArray<BoundaryAdjustment>()
     for message in messages |> Seq.sortBy paId do
         let calls = normalize catalog message
+        noteContexts.Add(message, calls)
         if not (calls |> Array.exists (fun call -> call.passenger)) then
             rejected.Add {
                 paId = paId message
@@ -1513,7 +1702,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
             |> Seq.map (fun journey ->
                 message, journey,
                 trip
-                    pointNames options.blockMode catalog date message endpoints
+                    pointNames options.blockMode catalog date message calls endpoints
                     separateModeBlocks journey))
         |> Seq.toArray
     let trips = generatedTrips |> Array.map (fun (_, _, value) -> value)
@@ -1535,8 +1724,29 @@ let convertWithPointNamesAndOptions catalog options pointNames
         |> Seq.collect (fun (message, _, _, generatedJourneys) ->
             transfers message generatedJourneys)
         |> Seq.toArray
-    let allTransfers =
+    let preciseTransfers =
         Array.append internalTransfers (crossPaTransfers accepted)
+    // MOTIS applies its configured default transfer time unless transfers.txt
+    // contains a stop-pair minimum. It also ignores trip specificity for ordinary
+    // transfers. Emit NAD boundaries directly as zero-second stop-pair minimums;
+    // the synthetic BUS boarding point makes that broader scope NAD-only.
+    let allTransfers =
+        preciseTransfers
+        |> Array.map (fun transfer ->
+            match transfer.transferType, transfer.fromStopId, transfer.toStopId with
+            | 1, Some fromStop, Some toStop ->
+                {
+                    fromStopId = Some fromStop
+                    toStopId = Some toStop
+                    fromRouteId = None
+                    toRouteId = None
+                    fromTripId = None
+                    toTripId = None
+                    transferType = 2
+                    minTransferTime = Some 0
+                    maxWaitingTime = None
+                }
+            | _ -> transfer)
         |> Array.distinct
         |> Array.sortBy (fun value ->
             value.fromTripId, value.toTripId, value.fromStopId, value.toStopId)
@@ -1588,6 +1798,189 @@ let convertWithPointNamesAndOptions catalog options pointNames
             key, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
         |> Map
     let idsDiagnostics = ResizeArray<string>()
+    let generatedJourneysByPa =
+        accepted
+        |> Seq.map (fun (message, _, _, journeys) -> paId message, journeys)
+        |> Map
+    let noteId pa kind index =
+        $"czptt:note:{idComponent pa}:{kind}:{index + 1}"
+    let noteBounds message calendarId =
+        match calendarId |> Option.bind (resolvedCalendarDates message) with
+        | Some dates when not dates.IsEmpty -> Some (Set.minElement dates), Some (Set.maxElement dates)
+        | _ -> None, None
+    let catalogNoteLabel code =
+        catalog.centralNotes
+        |> Array.tryFind (fun note -> note.code = code)
+        |> Option.map (fun note -> note.name)
+    let intersectingTrips message firstIndex lastIndex generatedJourneys =
+        match firstIndex, lastIndex with
+        | Some first, Some last when first <= last ->
+            generatedJourneys
+            |> Array.filter (fun journey ->
+                journey.calls
+                |> Array.exists (fun call ->
+                    call.sourceIndex >= first && call.sourceIndex <= last))
+            |> Array.map (tripId message)
+        | _ -> [||]
+    let centralNotes =
+        noteContexts
+        |> Seq.collect (fun (message, calls) ->
+            let generatedJourneys =
+                Map.tryFind (paId message) generatedJourneysByPa
+                |> Option.defaultValue [||]
+            centralNoteSpecs message calls
+            |> Seq.map (fun note ->
+                let id = noteId (paId message) "central" note.index
+                let resolved =
+                    match note.firstIndex, note.lastIndex with
+                    | Some first, Some last -> first <= last
+                    | _ -> false
+                if not resolved then
+                    idsDiagnostics.Add(
+                        $"{paId message}: unresolved CZCentralPTTNote interval {note.rawValue}")
+                if note.calendarId.IsSome && not note.coversAllDates
+                   && (note.calendarId |> Option.bind (resolvedCalendarDates message)).IsNone then
+                    idsDiagnostics.Add(
+                        $"{paId message}: unresolved CZCentralPTTNote calendar {note.rawValue}")
+                let validFrom, validTo = noteBounds message note.calendarId
+                { id = id; paId = paId message; kind = "czptt_central_note"
+                  code = Some note.code; label = catalogNoteLabel note.code
+                  rawValue = note.rawValue; validFrom = validFrom; validTo = validTo
+                  tripIds = intersectingTrips message note.firstIndex note.lastIndex generatedJourneys
+                  resolved = resolved }))
+        |> Seq.toArray
+    let nonCentralNotes =
+        noteContexts
+        |> Seq.collect (fun (message, calls) ->
+            let generatedJourneys =
+                Map.tryFind (paId message) generatedJourneysByPa
+                |> Option.defaultValue [||]
+            parameterValues "CZNonCentralPTTNote" message.NetworkSpecificParameter
+            |> Seq.mapi (fun index raw ->
+                let fields = raw.Split('|')
+                let firstIndex, lastIndex =
+                    if fields.Length < 4 then None, None
+                    else
+                        resolveNoteEndpoint fields.[0] (noteOccurrence fields.[1]) calls,
+                        resolveNoteEndpoint fields.[2] (noteOccurrence fields.[3]) calls
+                let calendarId =
+                    fields
+                    |> Array.tryItem 9
+                    |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                let resolved =
+                    match firstIndex, lastIndex with
+                    | Some first, Some last -> first <= last
+                    | _ -> false
+                if not resolved then
+                    idsDiagnostics.Add(
+                        $"{paId message}: unresolved CZNonCentralPTTNote interval {raw}")
+                if calendarId.IsSome
+                   && (calendarId |> Option.bind (resolvedCalendarDates message)).IsNone then
+                    idsDiagnostics.Add(
+                        $"{paId message}: unresolved CZNonCentralPTTNote calendar {raw}")
+                let validFrom, validTo = noteBounds message calendarId
+                { id = noteId (paId message) "noncentral" index
+                  paId = paId message; kind = "czptt_noncentral_note"; code = None
+                  label = fields |> Array.tryItem 4 |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                  rawValue = raw; validFrom = validFrom; validTo = validTo
+                  tripIds = intersectingTrips message firstIndex lastIndex generatedJourneys
+                  resolved = resolved }))
+        |> Seq.toArray
+    let calendarNotes =
+        noteContexts
+        |> Seq.collect (fun (message, _) ->
+            parameterValues "CZCalendarPTTNote" message.NetworkSpecificParameter
+            |> Seq.mapi (fun index raw ->
+                let fields = raw.Split('|')
+                let validFrom = fields |> Array.tryItem 1 |> Option.bind tryCompactDate
+                let validTo = fields |> Array.tryItem 2 |> Option.bind tryCompactDate
+                let resolved = fields.Length >= 4 && validFrom.IsSome && validTo.IsSome
+                if not resolved then
+                    idsDiagnostics.Add(
+                        $"{paId message}: malformed CZCalendarPTTNote {raw}")
+                { id = noteId (paId message) "calendar" index
+                  paId = paId message; kind = "czptt_note_calendar"
+                  code = fields |> Array.tryItem 0; label = None; rawValue = raw
+                  validFrom = validFrom; validTo = validTo; tripIds = [||]
+                  resolved = resolved }))
+        |> Seq.toArray
+    let allNotes = Array.concat [| centralNotes; nonCentralNotes; calendarNotes |]
+    let featureKinds code =
+        match code with
+        | "17" -> [| "wheelchair_accessible_vehicle"; "wheelchair_booking_recommended" |]
+        | "34" -> [| "wheelchair_accessible_vehicle"; "wheelchair_booking_required" |]
+        | "22" -> [| "bicycle_transport"; "bicycle_carry_on" |]
+        | "26" -> [| "bicycle_transport"; "bicycle_storage"; "bicycle_reservation_available" |]
+        | "27" -> [| "bicycle_transport"; "bicycle_storage"; "bicycle_reservation_required" |]
+        | "28" -> [| "bicycle_transport"; "bicycle_carry_on"; "bicycle_reservation_available" |]
+        | "29" -> [| "bicycle_transport"; "bicycle_carry_on"; "bicycle_reservation_required" |]
+        | "36" -> [| "bicycle_transport_prohibited" |]
+        | _ -> [||]
+    let noteFeatures =
+        accepted
+        |> Seq.collect (fun (message, calls, _, generatedJourneys) ->
+            centralNoteSpecs message calls
+            |> Seq.collect (fun note ->
+                let kinds = featureKinds note.code
+                if kinds.Length = 0 then Seq.empty
+                else
+                    match note.firstIndex, note.lastIndex with
+                    | Some first, Some last when first <= last ->
+                        generatedJourneys
+                        |> Seq.collect (fun journey ->
+                            if journey.alternativeTransport then Seq.empty
+                            else
+                                let coveredCalls =
+                                    journey.calls
+                                    |> Array.mapi (fun index call -> index + 1, call)
+                                    |> Array.filter (fun (_, call) ->
+                                        call.sourceIndex >= first && call.sourceIndex <= last)
+                                if coveredCalls.Length = 0 then Seq.empty
+                                else
+                                    let wholeTrip =
+                                        first <= journey.calls.[0].sourceIndex
+                                        && last >= journey.calls.[journey.calls.Length - 1].sourceIndex
+                                    kinds
+                                    |> Seq.collect (fun kind ->
+                                        let sequences =
+                                            if wholeTrip then [| None |]
+                                            else coveredCalls |> Array.map (fun (sequence, _) -> Some sequence)
+                                        sequences
+                                        |> Seq.map (fun sequence ->
+                                            let sourceObject = noteId (paId message) "central" note.index
+                                            let scopeKey = sequence |> Option.map string |> Option.defaultValue "trip"
+                                            let generatedTrip = tripId message journey
+                                            { id = $"{sourceObject}:feature:{kind}:trip:{idComponent generatedTrip}:{scopeKey}"
+                                              tripId = generatedTrip; callSequence = sequence
+                                              sourceCode = note.code; kind = kind; noteId = Some sourceObject
+                                              sourceObjectId = sourceObject })))
+                    | _ -> Seq.empty))
+        |> Seq.toArray
+    let requestFeatures =
+        accepted
+        |> Seq.collect (fun (message, _, _, generatedJourneys) ->
+            generatedJourneys
+            |> Seq.collect (fun journey ->
+                journey.calls
+                |> Seq.mapi (fun index call -> index + 1, call)
+                |> Seq.filter (fun (_, call) -> hasActivity RequestStop call.location)
+                |> Seq.map (fun (sequence, call) ->
+                    let sourceObject = $"{paId message}:sequence:{call.sourceIndex + 1}:activity:0030"
+                    let generatedTrip = tripId message journey
+                    { id = $"{sourceObject}:feature:on_request:trip:{idComponent generatedTrip}"
+                      tripId = generatedTrip; callSequence = Some sequence
+                      sourceCode = "0030"; kind = "on_request"; noteId = None
+                      sourceObjectId = sourceObject })))
+        |> Seq.toArray
+    let allFeatures = Array.append noteFeatures requestFeatures
+    accepted
+    |> Seq.iter (fun (message, calls, _, generatedJourneys) ->
+        generatedJourneys
+        |> Seq.iter (fun journey ->
+            let _, _, conflict = projectedTripFeatures message calls journey
+            if conflict then
+                idsDiagnostics.Add(
+                    $"{paId message}: conflicting whole-trip bicycle notes for {tripId message journey}")))
     let tripStopZones =
         accepted
         |> Seq.collect (fun (message, calls, _, _) ->
@@ -1780,6 +2173,8 @@ let convertWithPointNamesAndOptions catalog options pointNames
             ambiguousOsmCandidates = [||]
             corridorRejectedOsmCandidates = [||]
         }
+        notes = allNotes
+        features = allFeatures
     }
 
 let convertWithOptions catalog options messages =

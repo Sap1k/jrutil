@@ -181,6 +181,31 @@ type CzPttToGtfsTests() =
     }
 
     [<TestMethod>]
+    member _.``Catalog note list is additive and old snapshots remain readable``() =
+        let root = Path.Combine(Path.GetTempPath(), $"jrutil-catalog-{Guid.NewGuid():N}")
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let oldPath = Path.Combine(root, "old.json")
+            File.WriteAllText(
+                oldPath,
+                "{\"schema_version\":1,\"companies\":[],\"ids\":[],\"lines\":[]}")
+            Assert.AreEqual(0, (CzPttToGtfs.loadCatalogSnapshot oldPath).centralNotes.Length)
+
+            let currentPath = Path.Combine(root, "current.json")
+            File.WriteAllText(
+                currentPath,
+                "{\"schema_version\":1,\"companies\":[],\"ids\":[],\"lines\":[]," +
+                "\"central_notes\":[{\"code\":\"36\",\"name\":\"Bicycles prohibited\"," +
+                "\"text\":\"No bicycle carriage\",\"valid_from\":\"2025-12-14\"," +
+                "\"valid_to\":\"2026-12-12\"}]}")
+            let notes = (CzPttToGtfs.loadCatalogSnapshot currentPath).centralNotes
+            Assert.AreEqual(1, notes.Length)
+            Assert.AreEqual("36", notes.[0].code)
+            Assert.AreEqual(Some "No bicycle carriage", notes.[0].text)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Repeated root and location network parameters survive parsing``() =
         let value =
             message
@@ -463,7 +488,7 @@ type CzPttToGtfsTests() =
             message [
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None
                     [ "CZPassengerServiceNumber", "101" ]
-                location "57050" "Poříčany" "08:10:00" ["0001"]
+                location "57050" "Poříčany" "08:10:00" ["0001"; "0030"]
                     (Some ("2", None))
                     [ "CZPassengerServiceNumber", "101"
                       "CZAlternativeTransport", "1" ]
@@ -477,13 +502,30 @@ type CzPttToGtfsTests() =
                       "CZAlternativeTransport", "0" ]
                 location "54357" "Břeclav" "09:00:00" ["0001"] None
                     [ "CZPassengerServiceNumber", "101" ]
-            ] []
+            ] [
+                "CZCentralPTTNote", "17|CZ57076||CZ54357||0|"
+                "CZCentralPTTNote", "36|CZ57076||CZ54357||0|"
+            ]
         let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(3, result.feed.trips.Length)
         let nadRoute = result.feed.routes |> Array.find (fun route -> route.routeType = "714")
         Assert.AreEqual(Some "S1 (NAD)", nadRoute.shortName)
         let nadTrip = result.feed.trips |> Array.find (fun trip -> trip.routeId = nadRoute.id)
         Assert.AreEqual(Some "Vlak 01234", nadTrip.shortName)
+        Assert.AreEqual(None, nadTrip.wheelchairAccessible)
+        Assert.AreEqual(None, nadTrip.bikesAllowed)
+        Assert.IsFalse(
+            result.features
+            |> Array.exists (fun feature ->
+                feature.tripId = nadTrip.id && feature.noteId.IsSome))
+        Assert.IsTrue(
+            result.features
+            |> Array.exists (fun feature ->
+                feature.tripId = nadTrip.id && feature.kind = "on_request"))
+        Assert.IsTrue(
+            result.notes
+            |> Array.filter (fun note -> note.kind = "czptt_central_note")
+            |> Array.forall (fun note -> note.rawValue <> ""))
         let nadStopTimes =
             result.feed.stopTimes
             |> Array.filter (fun stopTime -> stopTime.tripId = nadTrip.id)
@@ -505,23 +547,40 @@ type CzPttToGtfsTests() =
                 stop.description =
                     Some "Pro přesné informace k nástupišti náhradní dopravy sledujte informace dopravce."))
         Assert.AreEqual(2, result.feed.transfers.Value.Length)
-        let transfers = result.feed.transfers.Value
-        Assert.AreEqual(
-            Some "czptt:stop:CZ:57050:platform:2",
-            transfers.[0].fromStopId)
-        Assert.AreEqual(
-            Some "czptt:stop:CZ:57050:platform:BUS",
-            transfers.[0].toStopId)
-        Assert.AreEqual(
-            Some "czptt:stop:CZ:57016:platform:BUS",
-            transfers.[1].fromStopId)
-        Assert.AreEqual(
-            Some "czptt:stop:CZ:57016:platform:3",
-            transfers.[1].toStopId)
+        let transfers =
+            result.feed.transfers.Value
+            |> Array.filter (fun transfer -> transfer.transferType = 2)
+        Assert.AreEqual(2, transfers.Length)
         Assert.IsTrue(
             transfers
             |> Array.forall (fun transfer ->
-                transfer.transferType = 1
+                transfer.fromTripId.IsNone
+                && transfer.toTripId.IsNone
+                && transfer.minTransferTime = Some 0))
+        let intoNad =
+            transfers
+            |> Array.find (fun transfer ->
+                transfer.toStopId = Some "czptt:stop:CZ:57050:platform:BUS")
+        let outOfNad =
+            transfers
+            |> Array.find (fun transfer ->
+                transfer.fromStopId = Some "czptt:stop:CZ:57016:platform:BUS")
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57050:platform:2",
+            intoNad.fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57050:platform:BUS",
+            intoNad.toStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57016:platform:BUS",
+            outOfNad.fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57016:platform:3",
+            outOfNad.toStopId)
+        Assert.IsTrue(
+            transfers
+            |> Array.forall (fun transfer ->
+                transfer.transferType = 2
                 && transfer.minTransferTime = Some 0))
         Assert.AreEqual(
             3,
@@ -594,9 +653,9 @@ type CzPttToGtfsTests() =
         Assert.IsTrue(
             result.feed.routes
             |> Array.exists (fun route -> route.shortName = Some "S12 (NAD)"))
-        Assert.IsTrue(
-            result.feed.transfers.Value
-            |> Array.forall (fun transfer -> transfer.transferType = 1))
+        CollectionAssert.AreEquivalent(
+            [| 2; 2 |],
+            result.feed.transfers.Value |> Array.map (fun transfer -> transfer.transferType))
 
     [<TestMethod>]
     member _.``Separate NAD trip matches a continuing train by passenger line``() =
@@ -629,9 +688,12 @@ type CzPttToGtfsTests() =
         let trainTrip =
             feed.trips
             |> Array.find (fun trip -> trip.shortName = Some "Vlak 06562")
-        let transfer = feed.transfers.Value |> Array.exactlyOne
-        Assert.AreEqual(Some trainTrip.id, transfer.fromTripId)
-        Assert.AreEqual(Some nadTrip.id, transfer.toTripId)
+        Assert.AreEqual(1, feed.transfers.Value.Length)
+        let transfer =
+            feed.transfers.Value
+            |> Array.find (fun transfer -> transfer.transferType = 2)
+        Assert.AreEqual(None, transfer.fromTripId)
+        Assert.AreEqual(None, transfer.toTripId)
         Assert.AreEqual(
             Some "czptt:stop:CZ:53001:unspecified", transfer.fromStopId)
         Assert.AreEqual(
@@ -647,7 +709,7 @@ type CzPttToGtfsTests() =
             |> Array.exists (fun stopTime ->
                 stopTime.tripId = nadTrip.id
                 && Some stopTime.stopId = transfer.toStopId))
-        Assert.AreEqual(1, transfer.transferType)
+        Assert.AreEqual(2, transfer.transferType)
 
     [<TestMethod>]
     member _.``Separate NAD trip matches by the 300000 train-number prefix``() =
@@ -684,12 +746,11 @@ type CzPttToGtfsTests() =
             (CzPttToGtfs.convert
                 catalog CzPttToGtfs.Gtfs [ train; closerLineTrain; nad ]).feed
         Assert.AreEqual(1, feed.transfers.Value.Length)
-        Assert.AreEqual(1, feed.transfers.Value.[0].transferType)
-        let numberedTrainTrip =
-            feed.trips |> Array.find (fun trip -> trip.shortName = Some "Vlak 6802")
-        Assert.AreEqual(
-            Some numberedTrainTrip.id,
-            feed.transfers.Value.[0].fromTripId)
+        let exactTransfer =
+            feed.transfers.Value
+            |> Array.find (fun transfer -> transfer.transferType = 2)
+        Assert.AreEqual(None, exactTransfer.fromTripId)
+        Assert.AreEqual(None, exactTransfer.toTripId)
         Assert.IsTrue(
             feed.routes
             |> Array.exists (fun route ->
@@ -697,11 +758,11 @@ type CzPttToGtfsTests() =
                 && route.shortName = Some "S1 (NAD)"))
         Assert.AreEqual(
             Some "czptt:stop:CZ:53001:unspecified",
-            feed.transfers.Value.[0].fromStopId)
+            exactTransfer.fromStopId)
         Assert.AreEqual(
             Some "czptt:stop:CZ:53001:platform:BUS",
-            feed.transfers.Value.[0].toStopId)
-        Assert.AreEqual(Some 0, feed.transfers.Value.[0].minTransferTime)
+            exactTransfer.toStopId)
+        Assert.AreEqual(Some 0, exactTransfer.minTransferTime)
 
     [<TestMethod>]
     member _.``Disjoint calendar variants each connect to the same NAD trip``() =
@@ -729,10 +790,12 @@ type CzPttToGtfsTests() =
                 [ train "000000006802" "10"
                   train "000000106802" "01"
                   nad ]).feed
-        Assert.AreEqual(2, feed.transfers.Value.Length)
-        Assert.IsTrue(
+        Assert.AreEqual(1, feed.transfers.Value.Length)
+        Assert.AreEqual(
+            1,
             feed.transfers.Value
-            |> Array.forall (fun transfer -> transfer.transferType = 1))
+            |> Array.filter (fun transfer -> transfer.transferType = 2)
+            |> Array.length)
 
     [<TestMethod>]
     member _.``Separate NAD trip connects onward to a train by passenger line``() =
@@ -764,9 +827,12 @@ type CzPttToGtfsTests() =
         let trainTrip =
             feed.trips
             |> Array.find (fun trip -> trip.shortName = Some "Vlak 06563")
-        let transfer = feed.transfers.Value |> Array.exactlyOne
-        Assert.AreEqual(Some nadTrip.id, transfer.fromTripId)
-        Assert.AreEqual(Some trainTrip.id, transfer.toTripId)
+        Assert.AreEqual(1, feed.transfers.Value.Length)
+        let transfer =
+            feed.transfers.Value
+            |> Array.find (fun transfer -> transfer.transferType = 2)
+        Assert.AreEqual(None, transfer.fromTripId)
+        Assert.AreEqual(None, transfer.toTripId)
         Assert.AreEqual(
             Some "czptt:stop:CZ:53001:platform:BUS", transfer.fromStopId)
         Assert.AreEqual(
@@ -1352,21 +1418,130 @@ type CzPttToGtfsTests() =
     member _.``Passenger activity variants and times over 24 hours are preserved``() =
         let value =
             message [
-                location "57076" "Praha hl.n." "08:00:00" ["0001"; "0028"] None []
+                location "57076" "Praha hl.n." "08:00:00" ["0001"; "0028"; "0030"] None []
                 location "57050" "Poříčany" "08:10:00" ["0001"; "0030"] None []
-                location "57016" "Kolín" "08:20:00" ["0001"; "0029"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"; "0029"; "0030"] None []
             ] []
         value.CzpttInformation.CzpttLocation.[2].TimingAtLocation.Timing
         |> Array.iter (fun timing -> timing.Offset <- "1")
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let feed = result.feed
         Assert.AreEqual(Some GtfsModel.NoService, feed.stopTimes.[0].dropoffType)
+        Assert.AreEqual(Some GtfsModel.CoordinationWithDriver, feed.stopTimes.[0].pickupType)
         Assert.AreEqual(
             Some GtfsModel.CoordinationWithDriver,
             feed.stopTimes.[1].pickupType)
+        Assert.AreEqual(
+            Some GtfsModel.CoordinationWithDriver,
+            feed.stopTimes.[1].dropoffType)
         Assert.AreEqual(Some GtfsModel.NoService, feed.stopTimes.[2].pickupType)
+        Assert.AreEqual(Some GtfsModel.CoordinationWithDriver, feed.stopTimes.[2].dropoffType)
         Assert.AreEqual(
             32.0 * 3600.0 + 20.0 * 60.0,
             feed.stopTimes.[2].arrivalTime.Value.ToDuration().TotalSeconds)
+        Assert.AreEqual(3, result.features |> Array.filter (fun feature -> feature.kind = "on_request") |> Array.length)
+        let request =
+            result.features
+            |> Array.find (fun feature -> feature.kind = "on_request" && feature.callSequence = Some 2)
+        Assert.AreEqual("0030", request.sourceCode)
+        Assert.AreEqual(Some 2, request.callSequence)
+
+    [<TestMethod>]
+    member _.``Central bike notes retain distinctions and project only complete claims``() =
+        let expectedKinds = [|
+            "22", [| "bicycle_transport"; "bicycle_carry_on" |]
+            "26", [| "bicycle_transport"; "bicycle_storage"; "bicycle_reservation_available" |]
+            "27", [| "bicycle_transport"; "bicycle_storage"; "bicycle_reservation_required" |]
+            "28", [| "bicycle_transport"; "bicycle_carry_on"; "bicycle_reservation_available" |]
+            "29", [| "bicycle_transport"; "bicycle_carry_on"; "bicycle_reservation_required" |]
+        |]
+        for code, kinds in expectedKinds do
+            let value =
+                message [
+                    location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                    location "57016" "Kolín" "08:20:00" ["0001"] None []
+                ] [ "CZCentralPTTNote", $"{code}|CZ57076||CZ57016||0|" ]
+            let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            Assert.AreEqual(Some GtfsModel.OneOrMore, result.feed.trips.[0].bikesAllowed, code)
+            CollectionAssert.AreEquivalent(
+                kinds,
+                result.features |> Array.map (fun feature -> feature.kind),
+                code)
+            Assert.IsTrue(result.features |> Array.forall (fun feature -> feature.callSequence.IsNone))
+
+        let prohibited =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] [ "CZCentralPTTNote", "36|CZ57076||CZ57016||0|" ]
+            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(Some GtfsModel.NoBicycles, prohibited.feed.trips.[0].bikesAllowed)
+        CollectionAssert.AreEqual(
+            [| "bicycle_transport_prohibited" |],
+            prohibited.features |> Array.map (fun feature -> feature.kind))
+
+    [<TestMethod>]
+    member _.``Partial repeated-location and calendar bike notes remain unknown``() =
+        let repeated =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+                location "57076" "Praha hl.n." "08:40:00" ["0001"] None []
+                location "57017" "Kutná Hora" "09:00:00" ["0001"] None []
+            ] [ "CZCentralPTTNote", "36|CZ57076|1|CZ57017||0|" ]
+            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(None, repeated.feed.trips.[0].bikesAllowed)
+        CollectionAssert.AreEqual(
+            [| Some 3; Some 4 |],
+            repeated.features |> Array.map (fun feature -> feature.callSequence))
+
+        let calendarLimited =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] [
+                "CZCentralPTTNote", "22|CZ57076||CZ57016||0|1"
+                "CZCalendarPTTNote", "1|20251214|20251215|10|"
+            ]
+            |> setCalendarBitmap "11"
+            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(None, calendarLimited.feed.trips.[0].bikesAllowed)
+        Assert.IsTrue(calendarLimited.features |> Array.exists (fun feature -> feature.kind = "bicycle_transport"))
+
+    [<TestMethod>]
+    member _.``Wheelchair notes conflicts and malformed notes are conservative``() =
+        for code in [| "17"; "34" |] do
+            let result =
+                message [
+                    location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                    location "57016" "Kolín" "08:20:00" ["0001"] None []
+                ] [ "CZCentralPTTNote", $"{code}|CZ57076||CZ57016||0|" ]
+                |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            Assert.AreEqual(Some "1", result.feed.trips.[0].wheelchairAccessible, code)
+
+        let conflict =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] [
+                "CZCentralPTTNote", "22|CZ57076||CZ57016||0|"
+                "CZCentralPTTNote", "36|CZ57076||CZ57016||0|"
+            ]
+            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(None, conflict.feed.trips.[0].bikesAllowed)
+        Assert.IsTrue(conflict.idsDiagnostics |> Array.exists (fun value -> value.Contains("conflicting")))
+
+        let malformed =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] [ "CZCentralPTTNote", "36|missing" ]
+            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(None, malformed.feed.trips.[0].bikesAllowed)
+        Assert.AreEqual(1, malformed.notes.Length)
+        Assert.IsFalse(malformed.notes.[0].resolved)
+        Assert.AreEqual("36|missing", malformed.notes.[0].rawValue)
+        Assert.IsTrue(malformed.idsDiagnostics |> Array.exists (fun value -> value.Contains("unresolved CZCentralPTTNote")))
 
     [<TestMethod>]
     member _.``Negative source-day offsets shift only GTFS times``() =
@@ -1553,8 +1728,11 @@ type CzPttToGtfsTests() =
         let value =
             message [
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
-                location "57016" "Kolín" "08:20:00" ["0001"] None []
-            ] []
+                location "57016" "Kolín" "08:20:00" ["0001"; "0030"] None []
+            ] [
+                "CZCentralPTTNote", "22|CZ57076||CZ57016||0|"
+                "CZNonCentralPTTNote", "CZ57076||CZ57016||Tarifní text|2|3|1|0|"
+            ]
         let serializer =
             System.Xml.Serialization.XmlSerializer(typeof<CzPttXml.CzpttcisMessage>)
         let root =
@@ -1598,6 +1776,8 @@ type CzPttToGtfsTests() =
                 "operational_points.parquet"
                 "operational_calls.parquet"
                 "source_call_metadata.parquet"
+                "source_note_metadata.parquet"
+                "source_feature_metadata.parquet"
                 "source_ids_coverage_metadata.parquet"
                 "source_ids_coverage_trip_metadata.parquet"
             |] do
@@ -1617,6 +1797,12 @@ type CzPttToGtfsTests() =
                     "subsidiary_code"; "subsidiary_name"; "active_line_code" |]
                 "source_call_metadata.parquet", [|
                     "gtfs_trip_id"; "stop_sequence"; "source_pa_id"; "source_sequence" |]
+                "source_note_metadata.parquet", [|
+                    "source_note_id"; "source_pa_id"; "note_kind"; "source_code"
+                    "gtfs_trip_id"; "label"; "raw_value"; "valid_from"; "valid_to"; "resolved" |]
+                "source_feature_metadata.parquet", [|
+                    "source_feature_id"; "gtfs_trip_id"; "call_sequence"; "source_code"
+                    "feature_kind"; "note_id"; "source_object_id" |]
                 "source_ids_coverage_metadata.parquet", [|
                     "source_coverage_id"; "source_pa_id"; "source_sequence"
                     "record_type"; "source_code"; "ids_system_id"; "coverage_role"
@@ -1652,7 +1838,7 @@ type CzPttToGtfsTests() =
             let manifestFiles =
                 manifest.RootElement.GetProperty("files").EnumerateArray()
                 |> Seq.toArray
-            Assert.AreEqual(5, manifestFiles.Length)
+            Assert.AreEqual(7, manifestFiles.Length)
             Assert.IsTrue(
                 manifestFiles
                 |> Array.forall (fun item ->
@@ -1678,6 +1864,9 @@ type CzPttToGtfsTests() =
             Assert.AreEqual(2, (rows "operational_location" [|"source_location_id"|]).Length)
             Assert.AreEqual(1, (rows "operational_journey" [|"source_journey_id"|]).Length)
             Assert.AreEqual(2, (rows "operational_call" [|"source_journey_id"; "sequence"|]).Length)
+            Assert.AreEqual(2, (rows "service_note" [|"note_id"|]).Length)
+            Assert.AreEqual(2, (rows "service_note_assignment" [|"assignment_id"|]).Length)
+            Assert.AreEqual(3, (rows "service_feature_assignment" [|"feature_id"|]).Length)
             let namespaces = rows "source_trip_map" [|"trip_namespace"|] |> Array.map (fun row -> row.[0])
             CollectionAssert.Contains(namespaces, "czptt_pa_id")
             CollectionAssert.Contains(namespaces, "czptt_tr_id")

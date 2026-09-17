@@ -1666,11 +1666,48 @@ module PackageWriter =
                             "system_id", nullableString fact.[3]; "coverage_role", nullableString fact.[4] ])
                         | _ -> Seq.empty
                     | _ -> Seq.empty)
+        let noteRows =
+            read "source_note_metadata.parquet"
+                [| "source_note_id"; "source_pa_id"; "note_kind"; "source_code"; "gtfs_trip_id"; "label"; "raw_value"; "valid_from"; "valid_to"; "resolved" |]
+            |> Seq.toArray
+        let notes =
+            noteRows
+            |> Seq.distinctBy (fun row -> row.[0])
+            |> Seq.map (fun row -> objectRow [
+                "note_id", box row.[0]; "kind", box row.[2]
+                "label", nullableString row.[5]; "text", box row.[6]
+                "valid_from", nullableParsed date row.[7]; "valid_to", nullableParsed date row.[8]
+                "service_note_type", nullableString row.[3]
+                "source_id", box sourceId; "source_snapshot_sha256", box digest
+                "source_object_id", box row.[0] ])
+        let noteAssignments =
+            noteRows
+            |> Seq.map (fun row ->
+                let trip = row.[4]
+                let scope = if String.IsNullOrWhiteSpace(trip) then "source" else "trip"
+                objectRow [
+                    "assignment_id", box (Identity.bindingId "note-assignment" [ "note", row.[0]; "scope", scope; "trip", trip ])
+                    "note_id", box row.[0]; "scope", box scope; "route_id", null
+                    "trip_id", nullableString trip; "service_id", null ])
+        let features =
+            read "source_feature_metadata.parquet"
+                [| "source_feature_id"; "gtfs_trip_id"; "call_sequence"; "source_code"; "feature_kind"; "note_id"; "source_object_id" |]
+            |> Seq.map (fun row -> objectRow [
+                "feature_id", box row.[0]
+                "scope", box (if String.IsNullOrWhiteSpace(row.[2]) then "trip" else "call")
+                "kind", box row.[4]; "route_id", null; "trip_id", box row.[1]
+                "call_sequence", nullableParsed integer row.[2]; "service_id", null
+                "source_code", box row.[3]; "note_id", nullableString row.[5]
+                "source_id", box sourceId; "source_snapshot_sha256", box digest
+                "source_object_id", box row.[6] ])
         Map [
             "operational_location", locations
             "operational_journey", journeys
             "operational_call", operationalCalls
             "source_trip_coverage", coverage
+            "service_note", notes
+            "service_note_assignment", noteAssignments
+            "service_feature_assignment", features
         ], sourceCalls
 
     let private extensionRows legacy =

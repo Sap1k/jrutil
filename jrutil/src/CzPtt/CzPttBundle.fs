@@ -1286,6 +1286,70 @@ let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
         |] callProjectionRows)
     progress "write-call-projection" "completed"
 
+    progress "write-note-metadata" "started"
+    let noteRows =
+        result.notes
+        |> Seq.collect (fun note ->
+            let trips = if note.tripIds.Length = 0 then [| None |] else note.tripIds |> Array.map Some
+            trips |> Seq.map (fun trip ->
+                row [
+                    "source_note_id", box note.id
+                    "source_pa_id", box note.paId
+                    "note_kind", box note.kind
+                    "source_code", nullableObj note.code
+                    "gtfs_trip_id", nullableObj trip
+                    "label", nullableObj note.label
+                    "raw_value", box note.rawValue
+                    "valid_from", nullableObj (note.validFrom |> Option.map string)
+                    "valid_to", nullableObj (note.validTo |> Option.map string)
+                    "resolved", box note.resolved
+                ]))
+        |> Seq.sortBy (fun value ->
+            string value.["source_note_id"],
+            (if isNull value.["gtfs_trip_id"] then "" else string value.["gtfs_trip_id"]))
+    writeParquet
+        (Path.Combine(outputDirectory, "source_note_metadata.parquet"))
+        (table [|
+            field<string> "source_note_id" false
+            field<string> "source_pa_id" false
+            field<string> "note_kind" false
+            field<string> "source_code" true
+            field<string> "gtfs_trip_id" true
+            field<string> "label" true
+            field<string> "raw_value" false
+            field<string> "valid_from" true
+            field<string> "valid_to" true
+            field<bool> "resolved" false
+        |] noteRows)
+    progress "write-note-metadata" "completed"
+
+    progress "write-feature-metadata" "started"
+    let featureRows =
+        result.features
+        |> Seq.sortBy (fun feature -> feature.id)
+        |> Seq.map (fun feature ->
+            row [
+                "source_feature_id", box feature.id
+                "gtfs_trip_id", box feature.tripId
+                "call_sequence", nullableObj feature.callSequence
+                "source_code", box feature.sourceCode
+                "feature_kind", box feature.kind
+                "note_id", nullableObj feature.noteId
+                "source_object_id", box feature.sourceObjectId
+            ])
+    writeParquet
+        (Path.Combine(outputDirectory, "source_feature_metadata.parquet"))
+        (table [|
+            field<string> "source_feature_id" false
+            field<string> "gtfs_trip_id" false
+            field<int> "call_sequence" true
+            field<string> "source_code" false
+            field<string> "feature_kind" false
+            field<string> "note_id" true
+            field<string> "source_object_id" false
+        |] featureRows)
+    progress "write-feature-metadata" "completed"
+
     progress "write-ids-sidecar" "started"
     let idsRows =
         messages
