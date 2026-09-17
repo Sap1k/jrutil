@@ -167,6 +167,7 @@ type private NormalizedCall = {
     responsibleRu: string
     routeType: string
     category: string
+    alternativeTransport: bool
 }
 
 type private Segment = {
@@ -176,6 +177,7 @@ type private Segment = {
     responsibleRu: string
     routeType: string
     category: string
+    alternativeTransport: bool
 }
 
 let emptyCatalog = {
@@ -188,10 +190,12 @@ let emptyCatalog = {
 
 type private Journey = {
     index: int
+    modeBlockIndex: int
     calls: NormalizedCall array
     parts: Segment array
     responsibleRus: string array
     routeType: string
+    alternativeTransport: bool
 }
 
 let emptyPointNames: PointNameIndex = Map.empty
@@ -413,6 +417,11 @@ let private normalize (catalog: CatalogSnapshot)
         parameterValues "CZPassengerServiceNumber" message.NetworkSpecificParameter
         |> Seq.tryLast
         |> cleanLine
+    let isAlternativeTransport (location: CzPttXml.CzpttLocation) =
+        match lastParameter
+                "CZAlternativeTransport" location.NetworkSpecificParameter with
+        | Some "1" -> true
+        | _ -> false
     let mutable currentRu = (trIdentifier message).Company
     let mutable currentCategory = "Vlak"
     locations
@@ -438,6 +447,7 @@ let private normalize (catalog: CatalogSnapshot)
             responsibleRu = currentRu
             routeType = routeTypeForCategory currentCategory
             category = currentCategory
+            alternativeTransport = isAlternativeTransport location
         })
 
 let private chronologyError (message: CzPttXml.CzpttcisMessage)
@@ -626,7 +636,8 @@ let private selectedCalls (mode: OperationalPointMode)
                 && prior.lineCode = call.lineCode
                 && prior.responsibleRu = call.responsibleRu
                 && prior.routeType = call.routeType
-                && prior.category = call.category ->
+                && prior.category = call.category
+                && prior.alternativeTransport = call.alternativeTransport ->
                 collapsed.[collapsed.Count - 1] <- {
                     prior with
                         passenger = prior.passenger || call.passenger
@@ -640,7 +651,8 @@ let private segments (calls: NormalizedCall array) =
     if calls.Length = 0 then [||]
     else
         let key (call: NormalizedCall) =
-            call.lineCode, call.responsibleRu, call.routeType, call.category
+            call.lineCode, call.responsibleRu, call.routeType, call.category,
+            call.alternativeTransport
         let mutable start = 0
         let mutable segmentKey = key calls.[0]
         let result = ResizeArray<Segment>()
@@ -649,27 +661,29 @@ let private segments (calls: NormalizedCall array) =
             if currentKey <> segmentKey && index < calls.Length - 1 then
                 let boundary = index
                 let segmentCalls = calls.[start..boundary]
-                let line, ru, routeType, category = segmentKey
+                let line, ru, railRouteType, category, alternative = segmentKey
                 if segmentCalls.Length > 1 then
                     result.Add {
                         index = result.Count
                         calls = segmentCalls
                         lineCode = line
                         responsibleRu = ru
-                        routeType = routeType
+                        routeType = if alternative then "714" else railRouteType
                         category = category
+                        alternativeTransport = alternative
                     }
                 start <- boundary
                 segmentKey <- currentKey
         let finalCalls = calls.[start..]
-        let line, ru, routeType, category = segmentKey
+        let line, ru, railRouteType, category, alternative = segmentKey
         result.Add {
             index = result.Count
             calls = finalCalls
             lineCode = line
             responsibleRu = ru
-            routeType = routeType
+            routeType = if alternative then "714" else railRouteType
             category = category
+            alternativeTransport = alternative
         }
         result.ToArray()
 
@@ -685,31 +699,57 @@ let private journeys blockMode (calls: NormalizedCall array)
                      (journeySegments: Segment array) =
     match blockMode with
     | Blocks ->
+        let mutable modeBlockIndex = 0
         journeySegments
-        |> Array.map (fun segment -> {
+        |> Array.mapi (fun index segment ->
+            if index > 0
+               && journeySegments.[index - 1].alternativeTransport
+                    <> segment.alternativeTransport then
+                modeBlockIndex <- modeBlockIndex + 1
+            {
             index = segment.index
+            modeBlockIndex = modeBlockIndex
             calls = segment.calls
             parts = [| segment |]
             responsibleRus = [| segment.responsibleRu |]
             routeType = segment.routeType
+            alternativeTransport = segment.alternativeTransport
         })
     | NoBlocks when calls.Length > 0 ->
-        let representative =
-            calls
-            |> Array.mapi (fun index call ->
-                routeTypePriority call.routeType, index, call)
-            |> Array.minBy (fun (priority, index, _) -> priority, index)
-            |> fun (_, _, call) -> call
-        [| {
-            index = 0
-            calls = calls
-            parts = journeySegments
-            responsibleRus =
-                calls
-                |> Seq.map (fun call -> call.responsibleRu)
-                |> distinctInOrder
-            routeType = representative.routeType
-        } |]
+        let groups = ResizeArray<ResizeArray<Segment>>()
+        for segment in journeySegments do
+            if groups.Count = 0
+               || groups.[groups.Count - 1].[0].alternativeTransport
+                    <> segment.alternativeTransport then
+                groups.Add(ResizeArray())
+            groups.[groups.Count - 1].Add(segment)
+        groups
+        |> Seq.mapi (fun index group ->
+            let parts = group.ToArray()
+            let groupedCalls =
+                parts
+                |> Array.mapi (fun partIndex part ->
+                    if partIndex = 0 then part.calls else part.calls.[1..])
+                |> Array.concat
+            let representative =
+                parts
+                |> Array.mapi (fun partIndex part ->
+                    routeTypePriority part.routeType, partIndex, part)
+                |> Array.minBy (fun (priority, partIndex, _) -> priority, partIndex)
+                |> fun (_, _, part) -> part
+            {
+                index = index
+                modeBlockIndex = index
+                calls = groupedCalls
+                parts = parts
+                responsibleRus =
+                    groupedCalls
+                    |> Seq.map (fun call -> call.responsibleRu)
+                    |> distinctInOrder
+                routeType = representative.routeType
+                alternativeTransport = representative.alternativeTransport
+            })
+        |> Seq.toArray
     | NoBlocks -> [||]
 
 let private pointIdentity (call: NormalizedCall) =
@@ -732,6 +772,15 @@ let private stopId (call: NormalizedCall) =
     | Some subsidiary ->
         $"{parent}:platform:{idComponent subsidiary.LocationSubsidiaryCode.Value}"
 
+let private busStopId (call: NormalizedCall) =
+    $"{stationId call}:platform:BUS"
+
+let private journeyStopId (journey: Journey) (call: NormalizedCall) =
+    if journey.alternativeTransport then busStopId call else stopId call
+
+let private busStopDescription =
+    "Pro přesné informace k nástupišti náhradní dopravy sledujte informace dopravce."
+
 let private stopName (pointNames: PointNameIndex) (call: NormalizedCall) =
     pointNames
     |> Map.tryFind (pointIdentity call)
@@ -752,14 +801,14 @@ let private publicEndpoints (calls: NormalizedCall array) =
     let passengerCalls = calls |> Array.filter (fun call -> call.passenger)
     passengerCalls.[0], passengerCalls.[passengerCalls.Length - 1]
 
-let private stops pointNames (calls: NormalizedCall seq) =
-    calls
-    |> Seq.collect (fun call ->
-        let create id locationType parent platform = {
+let private stops pointNames (journeyCalls: (Journey * NormalizedCall) seq) =
+    journeyCalls
+    |> Seq.collect (fun (journey, call) ->
+        let create id locationType parent platform description = {
             id = id
             code = None
             name = stopName pointNames call
-            description = None
+            description = description
             lat = None
             lon = None
             zoneId = None
@@ -777,9 +826,16 @@ let private stops pointNames (calls: NormalizedCall seq) =
                 |> Option.filter (String.IsNullOrWhiteSpace >> not)
                 |> Option.defaultValue subsidiary.LocationSubsidiaryCode.Value)
         seq {
-            create (stationId call) Station None None
-            create (stopId call) Stop (Some (stationId call)) platform
+            create (stationId call) Station None None None
+            if journey.alternativeTransport then
+                create
+                    (busStopId call) Stop (Some (stationId call))
+                    (Some "BUS") (Some busStopDescription)
+            else
+                create
+                    (stopId call) Stop (Some (stationId call)) platform None
         })
+    |> Seq.sortByDescending (fun stop -> stop.description.IsSome)
     |> Seq.distinctBy (fun stop -> stop.id)
     |> Seq.sortBy (fun stop -> stop.id)
     |> Seq.toArray
@@ -810,10 +866,12 @@ let private labelsForJourney catalog date message (journey: Journey) =
     journey.parts
     |> Seq.map (fun part ->
         let mapped = part.lineCode |> Option.bind (lineForDate catalog date)
+        let withNadSuffix value =
+            if journey.alternativeTransport then value + " (NAD)" else value
         match part.lineCode, mapped with
         | Some code, Some line -> {
             identity = $"line:{code}"
-            display = line.mark
+            display = withNadSuffix line.mark
             mappedLine = Some line
           }
         | _ ->
@@ -825,7 +883,7 @@ let private labelsForJourney catalog date message (journey: Journey) =
                 |> Option.defaultValue part.category
             {
                 identity = $"train:{part.category}:{numberKey}"
-                display = display
+                display = withNadSuffix display
                 mappedLine = None
             })
     |> distinctInOrder
@@ -905,7 +963,7 @@ let private stopTimes message shift journey =
                 call.departure
                 |> Option.map (fun value ->
                     Period.FromSeconds(int64 (value + shift)))
-            stopId = stopId call
+            stopId = journeyStopId journey call
             stopSequence = call.sourceIndex + 1
             headsign = None
             pickupType =
@@ -965,7 +1023,8 @@ let private route blockMode catalog date message journey =
         sortOrder = None
     }
 
-let private trip pointNames blockMode catalog date message endpoints journey =
+let private trip pointNames blockMode catalog date message endpoints
+                 separateModeBlocks journey =
     let finalCall = snd endpoints
     {
         routeId = routeId blockMode catalog date message journey
@@ -976,6 +1035,8 @@ let private trip pointNames blockMode catalog date message endpoints journey =
         directionId = None
         blockId =
             match blockMode with
+            | Blocks when separateModeBlocks ->
+                Some ($"{blockId message}:mode:{journey.modeBlockIndex + 1}")
             | Blocks -> Some (blockId message)
             | NoBlocks -> None
         shapeId = None
@@ -986,17 +1047,255 @@ let private trip pointNames blockMode catalog date message endpoints journey =
 let private transfers message (journeys: Journey array) =
     journeys
     |> Array.pairwise
-    |> Array.map (fun (fromJourney, toJourney) -> {
-        fromStopId = None
-        toStopId = None
+    |> Array.map (fun (fromJourney, toJourney) ->
+        let modeChange =
+            fromJourney.alternativeTransport <> toJourney.alternativeTransport
+        let fromBoundaryStop, toBoundaryStop =
+            if modeChange then
+                fromJourney.calls
+                |> Array.tryLast
+                |> Option.map (journeyStopId fromJourney),
+                toJourney.calls
+                |> Array.tryHead
+                |> Option.map (journeyStopId toJourney)
+            else None, None
+        {
+        fromStopId = fromBoundaryStop
+        toStopId = toBoundaryStop
         fromRouteId = None
         toRouteId = None
         fromTripId = Some (tripId message fromJourney)
         toTripId = Some (tripId message toJourney)
-        transferType = 4
-        minTransferTime = None
+        transferType = if modeChange then 1 else 4
+        minTransferTime = if modeChange then Some 0 else None
         maxWaitingTime = None
     })
+
+type private OrdinaryConnectionCall = {
+    message: CzPttXml.CzpttcisMessage
+    journey: Journey
+    call: NormalizedCall
+}
+
+let private calendarsOverlap (left: CzPttXml.CzpttcisMessage)
+                             (right: CzPttXml.CzpttcisMessage) =
+    let calendar (message: CzPttXml.CzpttcisMessage) =
+        let value = message.CzpttInformation.PlannedCalendar
+        LocalDate.FromDateTime(value.ValidityPeriod.StartDateTime), value.BitmapDays
+    let leftStart, leftDays = calendar left
+    let rightStart, rightDays = calendar right
+    if String.IsNullOrEmpty(leftDays) || String.IsNullOrEmpty(rightDays) then false
+    else
+        let overlapStart = max leftStart rightStart
+        let overlapEnd =
+            min
+                (leftStart.PlusDays(leftDays.Length - 1))
+                (rightStart.PlusDays(rightDays.Length - 1))
+        if overlapEnd < overlapStart then false
+        else
+            let leftOffset =
+                Period.Between(leftStart, overlapStart, PeriodUnits.Days).Days
+            let rightOffset =
+                Period.Between(rightStart, overlapStart, PeriodUnits.Days).Days
+            let length =
+                Period.Between(overlapStart, overlapEnd, PeriodUnits.Days).Days + 1
+            seq { 0 .. length - 1 }
+            |> Seq.exists (fun offset ->
+                leftDays.[leftOffset + offset] = '1'
+                && rightDays.[rightOffset + offset] = '1')
+
+let private trainNumberValue message journey =
+    trainNumberForCalls message journey.calls
+    |> Option.bind (fun value ->
+        match Int64.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+        | true, number -> Some number
+        | _ -> None)
+
+let private crossPaTransfers
+        (accepted:
+            seq<CzPttXml.CzpttcisMessage * NormalizedCall array *
+                NormalizedCall array * Journey array>) =
+    let nadEndpointStations =
+        accepted
+        |> Seq.collect (fun (_, _, _, generatedJourneys) ->
+            generatedJourneys
+            |> Seq.mapi (fun index journey -> index, journey)
+            |> Seq.filter (fun (_, journey) -> journey.alternativeTransport)
+            |> Seq.collect (fun (index, journey) ->
+                let passengerCalls =
+                    journey.calls |> Array.filter (fun call -> call.passenger)
+                if passengerCalls.Length = 0 then Seq.empty
+                else
+                    seq {
+                        if index = 0 then yield stationId passengerCalls.[0]
+                        if index = generatedJourneys.Length - 1 then
+                            yield stationId passengerCalls.[passengerCalls.Length - 1]
+                    }))
+        |> Set
+    let byLine =
+        Collections.Generic.Dictionary<
+            string * string, ResizeArray<OrdinaryConnectionCall>>()
+    let byNumber =
+        Collections.Generic.Dictionary<
+            string * int64, ResizeArray<OrdinaryConnectionCall>>()
+    let addCandidate (index: Collections.Generic.Dictionary<'key, ResizeArray<_>>)
+                     key candidate =
+        match index.TryGetValue(key) with
+        | true, values -> values.Add(candidate)
+        | false, _ ->
+            let values = ResizeArray()
+            values.Add(candidate)
+            index.Add(key, values)
+    for message, _, _, generatedJourneys in accepted do
+        for journey in generatedJourneys do
+            if not journey.alternativeTransport then
+                let number = trainNumberValue message journey
+                for call in journey.calls do
+                    let station = stationId call
+                    if call.passenger && Set.contains station nadEndpointStations then
+                        let candidate = {
+                            message = message
+                            journey = journey
+                            call = call
+                        }
+                        call.lineCode
+                        |> Option.iter (fun line ->
+                            addCandidate byLine (station, line) candidate)
+                        number
+                        |> Option.iter (fun value ->
+                            addCandidate byNumber (station, value) candidate)
+
+    let matchingOrdinaryCalls nadMessage nadJourney (nadCall: NormalizedCall) =
+        let station = stationId nadCall
+        let values lookup =
+            match lookup with
+            | true, (items: ResizeArray<OrdinaryConnectionCall>) -> items.ToArray()
+            | false, _ -> [||]
+        let numberMatches =
+            trainNumberValue nadMessage nadJourney
+            |> Option.filter (fun number -> number >= 300000L)
+            |> Option.map (fun number ->
+                values (byNumber.TryGetValue((station, number - 300000L))))
+            |> Option.defaultValue [||]
+        let lineMatches =
+            nadCall.lineCode
+            |> Option.map (fun line -> values (byLine.TryGetValue((station, line))))
+            |> Option.defaultValue [||]
+        numberMatches, lineMatches
+
+    let nonOverlappingClosest candidates =
+        let closestByTrip =
+            candidates
+            |> Seq.groupBy (fun (gap, candidate) ->
+                tripId candidate.message candidate.journey)
+            |> Seq.map (fun (_, values) -> Seq.minBy fst values)
+            |> Seq.sortBy (fun (gap, candidate) ->
+                gap, tripId candidate.message candidate.journey)
+            |> Seq.toArray
+        closestByTrip
+        |> Array.filter (fun (gap, candidate) ->
+            closestByTrip
+            |> Array.exists (fun (otherGap, other) ->
+                tripId other.message other.journey
+                    <> tripId candidate.message candidate.journey
+                && otherGap <= gap
+                && calendarsOverlap candidate.message other.message)
+            |> not)
+        |> Array.map snd
+
+    let transfer fromMessage fromJourney fromCall
+                 toMessage toJourney toCall =
+        {
+            fromStopId = Some (journeyStopId fromJourney fromCall)
+            toStopId = Some (journeyStopId toJourney toCall)
+            fromRouteId = None
+            toRouteId = None
+            fromTripId = Some (tripId fromMessage fromJourney)
+            toTripId = Some (tripId toMessage toJourney)
+            transferType = 1
+            minTransferTime = Some 0
+            maxWaitingTime = None
+        }
+
+    accepted
+    |> Seq.collect (fun (nadMessage, _, _, generatedJourneys) ->
+        generatedJourneys
+        |> Seq.mapi (fun index journey -> index, journey)
+        |> Seq.filter (fun (_, journey) -> journey.alternativeTransport)
+        |> Seq.collect (fun (journeyIndex, nadJourney) ->
+            let passengerCalls =
+                nadJourney.calls |> Array.filter (fun call -> call.passenger)
+            if passengerCalls.Length = 0 then Seq.empty
+            else
+                let firstCall = passengerCalls.[0]
+                let lastCall = passengerCalls.[passengerCalls.Length - 1]
+                let matchOrdinary nadCall ordinaryTime gapFor allowed =
+                    let eligible candidates =
+                        candidates
+                        |> Seq.filter (fun ordinary ->
+                            paId ordinary.message <> paId nadMessage
+                            && allowed ordinary)
+                        |> Seq.choose (fun ordinary ->
+                            ordinaryTime ordinary.call
+                            |> Option.bind (fun time ->
+                                let gap = gapFor time
+                                if gap >= 0 && gap <= 600
+                                then Some (gap, ordinary) else None))
+                        |> Seq.filter (fun (_, ordinary) ->
+                            calendarsOverlap nadMessage ordinary.message)
+                        |> Seq.toArray
+                    let numberMatches, lineMatches =
+                        matchingOrdinaryCalls nadMessage nadJourney nadCall
+                    let eligibleNumbers = eligible numberMatches
+                    if eligibleNumbers.Length > 0 then
+                        nonOverlappingClosest eligibleNumbers
+                    else
+                        lineMatches |> eligible |> nonOverlappingClosest
+                let before =
+                    if journeyIndex > 0
+                       || hasActivity DisembarkOnly firstCall.location then [||]
+                    else
+                        firstCall.departure
+                        |> Option.orElse firstCall.arrival
+                        |> Option.map (fun departure ->
+                            matchOrdinary
+                                firstCall
+                                (fun call -> call.arrival |> Option.orElse call.departure)
+                                (fun arrival -> departure - arrival)
+                                (fun ordinary ->
+                                    ordinary.journey.calls.[0].sourceIndex
+                                        < ordinary.call.sourceIndex
+                                    && not (
+                                        hasActivity EmbarkOnly ordinary.call.location))
+                            |> Array.map (fun ordinary ->
+                                transfer
+                                    ordinary.message ordinary.journey ordinary.call
+                                    nadMessage nadJourney firstCall))
+                        |> Option.defaultValue [||]
+                let after =
+                    if journeyIndex < generatedJourneys.Length - 1
+                       || hasActivity EmbarkOnly lastCall.location then [||]
+                    else
+                        lastCall.arrival
+                        |> Option.orElse lastCall.departure
+                        |> Option.map (fun arrival ->
+                            matchOrdinary
+                                lastCall
+                                (fun call -> call.departure |> Option.orElse call.arrival)
+                                (fun departure -> departure - arrival)
+                                (fun ordinary ->
+                                    ordinary.call.sourceIndex
+                                        < ordinary.journey.calls.[ordinary.journey.calls.Length - 1].sourceIndex
+                                    && not (
+                                        hasActivity DisembarkOnly ordinary.call.location))
+                            |> Array.map (fun ordinary ->
+                                transfer
+                                    nadMessage nadJourney lastCall
+                                    ordinary.message ordinary.journey ordinary.call))
+                        |> Option.defaultValue [||]
+                Seq.append before after))
+    |> Seq.distinct
+    |> Seq.toArray
 
 let private agency catalog code =
     let company = catalog.companies |> Array.tryFind (fun company -> company.code = code)
@@ -1160,6 +1459,15 @@ let convertWithPointNamesAndOptions catalog options pointNames
                     let journeySegments = selected |> segments
                     let generatedJourneys =
                         journeys options.blockMode selected journeySegments
+                        |> Array.choose (fun journey ->
+                            if journey.alternativeTransport then
+                                let passengerCalls =
+                                    journey.calls
+                                    |> Array.filter (fun call -> call.passenger)
+                                if passengerCalls.Length >= 2 then
+                                    Some { journey with calls = passengerCalls }
+                                else None
+                            else Some journey)
                     if options.operationalPointMode = Sidecar then
                         let exactChanges =
                             calls
@@ -1196,14 +1504,25 @@ let convertWithPointNamesAndOptions catalog options pointNames
                 LocalDate.FromDateTime(
                     message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
             let endpoints = publicEndpoints calls
+            let separateModeBlocks =
+                generatedJourneys
+                |> Array.pairwise
+                |> Array.exists (fun (left, right) ->
+                    left.alternativeTransport <> right.alternativeTransport)
             generatedJourneys
             |> Seq.map (fun journey ->
                 message, journey,
-                trip pointNames options.blockMode catalog date message endpoints journey))
+                trip
+                    pointNames options.blockMode catalog date message endpoints
+                    separateModeBlocks journey))
         |> Seq.toArray
     let trips = generatedTrips |> Array.map (fun (_, _, value) -> value)
-    let allSelectedCalls =
-        accepted |> Seq.collect (fun (_, _, selected, _) -> selected)
+    let allJourneyCalls =
+        accepted
+        |> Seq.collect (fun (_, _, _, generatedJourneys) ->
+            generatedJourneys
+            |> Seq.collect (fun journey ->
+                journey.calls |> Seq.map (fun call -> journey, call)))
         |> Seq.toArray
     let allStopTimes =
         accepted
@@ -1211,11 +1530,16 @@ let convertWithPointNamesAndOptions catalog options pointNames
             let shift = gtfsTimeShift calls
             generatedJourneys |> Seq.collect (stopTimes message shift))
         |> Seq.toArray
-    let allTransfers =
+    let internalTransfers =
         accepted
         |> Seq.collect (fun (message, _, _, generatedJourneys) ->
             transfers message generatedJourneys)
         |> Seq.toArray
+    let allTransfers =
+        Array.append internalTransfers (crossPaTransfers accepted)
+        |> Array.distinct
+        |> Array.sortBy (fun value ->
+            value.fromTripId, value.toTripId, value.fromStopId, value.toStopId)
     let allCalendarExceptions =
         acceptedMessages |> Array.collect calendarExceptions
     let agencyCodes =
@@ -1384,7 +1708,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
                 }))
         |> Seq.toArray
     let feedStops =
-        stops pointNames allSelectedCalls
+        stops pointNames allJourneyCalls
         |> Array.map (fun value ->
             { value with zoneId = Map.tryFind value.id unambiguousStopZones })
     let compositeAgencyCodes =

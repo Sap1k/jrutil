@@ -497,7 +497,7 @@ let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
             catalog options sr70.names messages
     progress "convert-gtfs" "completed"
     progress "index-stop-times" "started"
-    let pointIdentityByStopId =
+    let basePointIdentityByStopId =
         rawResult.operationalCalls
         |> Seq.filter (fun call -> call.generatedTripIds.Length > 0)
         |> Seq.collect (fun call ->
@@ -506,6 +506,18 @@ let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
                 call.generatedStopId, (call.countryCode, call.primaryCode)
             })
         |> Seq.distinct
+        |> Map
+    let pointIdentityByStopId =
+        rawResult.feed.stops
+        |> Seq.choose (fun stop ->
+            if stop.id.EndsWith(":platform:BUS", StringComparison.Ordinal) then
+                stop.parentStation
+                |> Option.bind (fun station ->
+                    basePointIdentityByStopId
+                    |> Map.tryFind station
+                    |> Option.map (fun identity -> stop.id, identity))
+            else None)
+        |> Seq.append (Map.toSeq basePointIdentityByStopId)
         |> Map
     let usedPointIdentities =
         pointIdentityByStopId |> Map.values |> Seq.distinct |> Seq.sort |> Seq.toArray

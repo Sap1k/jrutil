@@ -308,11 +308,26 @@ the corresponding data.
 
 CZPTT conversion defaults to `--block-mode=blocks`: line, train-category and
 operator changes produce linked GTFS trips with a shared `block_id`. Use
-`--block-mode=none` to emit one GTFS trip per PA instead. In that mode route
-labels combine first-seen unique line marks and train-designation fallbacks,
-for example `U32/S32` or `U2/Os 7002`, and multi-operator routes reference a
-composite agency such as `ČD / DB`. Both `czptt-to-gtfs` and
-`czptt-to-bundle` accept the option.
+`--block-mode=none` to combine the ordinary subdivisions within each transport
+mode run. In that mode route labels combine first-seen unique line marks and
+train-designation fallbacks, for example `U32/S32` or `U2/Os 7002`, and
+multi-operator routes reference a composite agency such as `ČD / DB`. Both
+`czptt-to-gtfs` and `czptt-to-bundle` accept the option.
+
+`CZAlternativeTransport=1` marks the segment departing that location as rail
+replacement transport. Such segments are emitted with extended GTFS route
+type `714` and ` (NAD)` appended to the route short name. A mapped passenger
+line therefore becomes, for example, `U1 (NAD)`; a line-less fallback retains
+the train designation, for example `Os 363784 (NAD)`. NAD trips contain only
+passenger calls and serve a synthetic `BUS` platform instead of railway track
+numbers; its stop description directs passengers to the operator's boarding
+information. A mixed PA is split at each rail/NAD boundary even with
+`--block-mode=none`; the resulting trips use separate block IDs and a
+trip-specific timed transfer (`transfer_type=1`) between the exact stops served
+by both trips, with `min_transfer_time=0`. Separate NAD PAs are connected to a train within ten minutes by
+the `+300000` operational-number convention first, falling back to the
+passenger line only when no numbered candidate applies. Tied candidates with
+overlapping calendars remain unmatched.
 
 Passenger line/category changes recorded at internal infrastructure points
 are applied at the following passenger call. If an operator handover occurs
