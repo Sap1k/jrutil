@@ -114,6 +114,15 @@ type CzPttToGtfsTests() =
         |> Array.iter (fun identifier -> identifier.Core <- core)
         value
 
+    let setOperationalTrainNumber number (value: CzPttXml.CzpttcisMessage) =
+        value.CzpttInformation.CzpttLocation
+        |> Array.iter (fun location -> location.OperationalTrainNumber <- number)
+        value
+
+    let setCalendarBitmap bitmap (value: CzPttXml.CzpttcisMessage) =
+        value.CzpttInformation.PlannedCalendar.BitmapDays <- bitmap
+        value
+
     let catalog = {
         CzPttToGtfs.emptyCatalog with
             lines = [|
@@ -155,14 +164,16 @@ type CzPttToGtfsTests() =
                 }
             |]
             commercialTrainTypes =
-                [|
-                    "EC"; "IC"; "LE"; "RJ"; "rj"; "SC"; "AEx"
-                    "EN"; "NJ"; "ES"
-                    "Ex"; "Rx"; "R"
-                    "Os"; "Sp"; "TLX"; "TL"; "LET"
-                |]
-                |> Array.map (fun abbreviation ->
-                    { code = abbreviation; abbreviation = abbreviation })
+                Array.append
+                    [| { code = "84"; abbreviation = "Os" } |]
+                    ([|
+                        "EC"; "IC"; "LE"; "RJ"; "rj"; "SC"; "AEx"
+                        "EN"; "NJ"; "ES"
+                        "Ex"; "Rx"; "R"
+                        "Os"; "Sp"; "TLX"; "TL"; "LET"
+                    |]
+                    |> Array.map (fun abbreviation ->
+                        { code = abbreviation; abbreviation = abbreviation }))
             trainTypes =
                 [| "Os"; "Sp"; "R"; "Ex" |]
                 |> Array.map (fun abbreviation ->
@@ -445,6 +456,332 @@ type CzPttToGtfsTests() =
             |> Array.forall (fun trip -> trip.headsign = Some "Nymburk"))
         Assert.AreEqual(feed.trips.[0].blockId, feed.trips.[1].blockId)
         Assert.AreEqual(1, feed.transfers.Value.Length)
+
+    [<TestMethod>]
+    member _.``Alternative transport segments use bus routes and timed transfers``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"]
+                    (Some ("2", None))
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+                location "93001" "NAD operational" "08:15:00" []
+                    (Some ("99", None))
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+                location "57016" "Kolín" "08:20:00" ["0001"]
+                    (Some ("3", None))
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "0" ]
+                location "54357" "Břeclav" "09:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(3, result.feed.trips.Length)
+        let nadRoute = result.feed.routes |> Array.find (fun route -> route.routeType = "714")
+        Assert.AreEqual(Some "S1 (NAD)", nadRoute.shortName)
+        let nadTrip = result.feed.trips |> Array.find (fun trip -> trip.routeId = nadRoute.id)
+        Assert.AreEqual(Some "Vlak 01234", nadTrip.shortName)
+        let nadStopTimes =
+            result.feed.stopTimes
+            |> Array.filter (fun stopTime -> stopTime.tripId = nadTrip.id)
+        Assert.AreEqual(2, nadStopTimes.Length)
+        Assert.IsTrue(
+            nadStopTimes
+            |> Array.forall (fun stopTime ->
+                stopTime.stopId.EndsWith(":platform:BUS")))
+        Assert.IsFalse(
+            nadStopTimes
+            |> Array.exists (fun stopTime -> stopTime.stopId.Contains("93001")))
+        let busStops =
+            result.feed.stops
+            |> Array.filter (fun stop -> stop.platformCode = Some "BUS")
+        Assert.AreEqual(2, busStops.Length)
+        Assert.IsTrue(
+            busStops
+            |> Array.forall (fun stop ->
+                stop.description =
+                    Some "Pro přesné informace k nástupišti náhradní dopravy sledujte informace dopravce."))
+        Assert.AreEqual(2, result.feed.transfers.Value.Length)
+        let transfers = result.feed.transfers.Value
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57050:platform:2",
+            transfers.[0].fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57050:platform:BUS",
+            transfers.[0].toStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57016:platform:BUS",
+            transfers.[1].fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:57016:platform:3",
+            transfers.[1].toStopId)
+        Assert.IsTrue(
+            transfers
+            |> Array.forall (fun transfer ->
+                transfer.transferType = 1
+                && transfer.minTransferTime = Some 0))
+        Assert.AreEqual(
+            3,
+            Set.count (result.feed.trips |> Array.choose (fun trip -> trip.blockId) |> Set))
+
+    [<TestMethod>]
+    member _.``Line-less NAD keeps the train designation as its route label``() =
+        let value =
+            message [
+                location "53001" "Kadaň-Prunéřov" "08:00:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "53003" "Kadaň předm." "08:10:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+            ] []
+            |> setCommercialType "84"
+            |> setOperationalTrainNumber "363784"
+        let feed =
+            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        Assert.AreEqual("714", feed.routes.[0].routeType)
+        Assert.AreEqual(Some "Os 363784 (NAD)", feed.routes.[0].shortName)
+
+    [<TestMethod>]
+    member _.``NAD runs without two passenger calls are omitted``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "93001" "First operational point" "08:05:00" [] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "93002" "Second operational point" "08:10:00" [] None
+                    [ "CZAlternativeTransport", "0" ]
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] []
+        let feed =
+            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        Assert.AreEqual(2, feed.trips.Length)
+        Assert.IsFalse(feed.routes |> Array.exists (fun route -> route.routeType = "714"))
+        Assert.IsFalse(
+            feed.stopTimes
+            |> Array.exists (fun stopTime ->
+                stopTime.stopId.EndsWith(":platform:BUS")))
+        Assert.AreEqual(1, feed.transfers.Value.Length)
+        Assert.AreEqual(4, feed.transfers.Value.[0].transferType)
+
+    [<TestMethod>]
+    member _.``No blocks still separates rail replacement mode runs``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "112"
+                      "CZAlternativeTransport", "1" ]
+                location "57016" "Kolín" "08:20:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "0" ]
+                location "54357" "Břeclav" "09:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+        let result =
+            CzPttToGtfs.convertWithOptions catalog {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.NoBlocks
+            } [ value ]
+        Assert.AreEqual(3, result.feed.trips.Length)
+        CollectionAssert.AreEquivalent(
+            [| "100"; "714" |],
+            result.feed.routes |> Array.map (fun route -> route.routeType) |> Array.distinct)
+        Assert.IsTrue(
+            result.feed.trips |> Array.forall (fun trip -> trip.blockId.IsNone))
+        Assert.IsTrue(
+            result.feed.routes
+            |> Array.exists (fun route -> route.shortName = Some "S12 (NAD)"))
+        Assert.IsTrue(
+            result.feed.transfers.Value
+            |> Array.forall (fun transfer -> transfer.transferType = 1))
+
+    [<TestMethod>]
+    member _.``Separate NAD trip matches a continuing train by passenger line``() =
+        let train =
+            message [
+                location "57076" "Praha hl.n." "20:30:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "53001" "Kadaň-Prunéřov" "20:42:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "53002" "Klášterec n.O." "20:52:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+            |> setCore "000000006562"
+            |> setOperationalTrainNumber "06562"
+        let nad =
+            message [
+                location "53001" "Kadaň-Prunéřov" "20:47:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+                location "53003" "Kadaň předm." "20:58:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+            ] []
+            |> setCore "000000016162"
+            |> setOperationalTrainNumber "16162"
+        let feed =
+            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ nad; train ]).feed
+        let nadRoute = feed.routes |> Array.find (fun route -> route.routeType = "714")
+        let nadTrip = feed.trips |> Array.find (fun trip -> trip.routeId = nadRoute.id)
+        let trainTrip =
+            feed.trips
+            |> Array.find (fun trip -> trip.shortName = Some "Vlak 06562")
+        let transfer = feed.transfers.Value |> Array.exactlyOne
+        Assert.AreEqual(Some trainTrip.id, transfer.fromTripId)
+        Assert.AreEqual(Some nadTrip.id, transfer.toTripId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:53001:unspecified", transfer.fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:53001:platform:BUS", transfer.toStopId)
+        Assert.AreEqual(Some 0, transfer.minTransferTime)
+        Assert.IsTrue(
+            feed.stopTimes
+            |> Array.exists (fun stopTime ->
+                stopTime.tripId = trainTrip.id
+                && Some stopTime.stopId = transfer.fromStopId))
+        Assert.IsTrue(
+            feed.stopTimes
+            |> Array.exists (fun stopTime ->
+                stopTime.tripId = nadTrip.id
+                && Some stopTime.stopId = transfer.toStopId))
+        Assert.AreEqual(1, transfer.transferType)
+
+    [<TestMethod>]
+    member _.``Separate NAD trip matches by the 300000 train-number prefix``() =
+        let train =
+            message [
+                location "57076" "Praha hl.n." "07:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "53001" "Kadaň-Prunéřov" "07:41:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+            |> setCore "000000006802"
+            |> setOperationalTrainNumber "6802"
+        let closerLineTrain =
+            message [
+                location "57076" "Praha hl.n." "07:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "53001" "Kadaň-Prunéřov" "07:44:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+            |> setCore "000000009999"
+            |> setOperationalTrainNumber "9999"
+        let nad =
+            message [
+                location "53001" "Kadaň-Prunéřov" "07:46:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+                location "53003" "Kadaň předm." "07:58:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+            ] []
+            |> setCore "000000306802"
+            |> setOperationalTrainNumber "306802"
+        let feed =
+            (CzPttToGtfs.convert
+                catalog CzPttToGtfs.Gtfs [ train; closerLineTrain; nad ]).feed
+        Assert.AreEqual(1, feed.transfers.Value.Length)
+        Assert.AreEqual(1, feed.transfers.Value.[0].transferType)
+        let numberedTrainTrip =
+            feed.trips |> Array.find (fun trip -> trip.shortName = Some "Vlak 6802")
+        Assert.AreEqual(
+            Some numberedTrainTrip.id,
+            feed.transfers.Value.[0].fromTripId)
+        Assert.IsTrue(
+            feed.routes
+            |> Array.exists (fun route ->
+                route.routeType = "714"
+                && route.shortName = Some "S1 (NAD)"))
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:53001:unspecified",
+            feed.transfers.Value.[0].fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:53001:platform:BUS",
+            feed.transfers.Value.[0].toStopId)
+        Assert.AreEqual(Some 0, feed.transfers.Value.[0].minTransferTime)
+
+    [<TestMethod>]
+    member _.``Disjoint calendar variants each connect to the same NAD trip``() =
+        let train core bitmap =
+            message [
+                location "57076" "Praha hl.n." "07:00:00" ["0001"] None []
+                location "53001" "Kadaň-Prunéřov" "07:41:00" ["0001"] None []
+            ] []
+            |> setCore core
+            |> setOperationalTrainNumber "6802"
+            |> setCalendarBitmap bitmap
+        let nad =
+            message [
+                location "53001" "Kadaň-Prunéřov" "07:46:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "53003" "Kadaň předm." "07:58:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+            ] []
+            |> setCore "000000306802"
+            |> setOperationalTrainNumber "306802"
+            |> setCalendarBitmap "11"
+        let feed =
+            (CzPttToGtfs.convert
+                catalog CzPttToGtfs.Gtfs
+                [ train "000000006802" "10"
+                  train "000000106802" "01"
+                  nad ]).feed
+        Assert.AreEqual(2, feed.transfers.Value.Length)
+        Assert.IsTrue(
+            feed.transfers.Value
+            |> Array.forall (fun transfer -> transfer.transferType = 1))
+
+    [<TestMethod>]
+    member _.``Separate NAD trip connects onward to a train by passenger line``() =
+        let nad =
+            message [
+                location "53003" "Kadaň předm." "08:00:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+                location "53001" "Kadaň-Prunéřov" "08:10:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101"
+                      "CZAlternativeTransport", "1" ]
+            ] []
+            |> setCore "000000016163"
+            |> setOperationalTrainNumber "16163"
+        let train =
+            message [
+                location "53001" "Kadaň-Prunéřov" "08:15:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+                location "53002" "Klášterec n.O." "08:22:00" ["0001"] None
+                    [ "CZPassengerServiceNumber", "101" ]
+            ] []
+            |> setCore "000000006563"
+            |> setOperationalTrainNumber "06563"
+        let feed =
+            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ nad; train ]).feed
+        let nadTrip =
+            feed.trips
+            |> Array.find (fun trip -> trip.shortName = Some "Vlak 16163")
+        let trainTrip =
+            feed.trips
+            |> Array.find (fun trip -> trip.shortName = Some "Vlak 06563")
+        let transfer = feed.transfers.Value |> Array.exactlyOne
+        Assert.AreEqual(Some nadTrip.id, transfer.fromTripId)
+        Assert.AreEqual(Some trainTrip.id, transfer.toTripId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:53001:platform:BUS", transfer.fromStopId)
+        Assert.AreEqual(
+            Some "czptt:stop:CZ:53001:unspecified", transfer.toStopId)
+        Assert.AreEqual(Some 0, transfer.minTransferTime)
+        Assert.IsTrue(
+            feed.stopTimes
+            |> Array.exists (fun stopTime ->
+                stopTime.tripId = nadTrip.id
+                && Some stopTime.stopId = transfer.fromStopId))
+        Assert.IsTrue(
+            feed.stopTimes
+            |> Array.exists (fun stopTime ->
+                stopTime.tripId = trainTrip.id
+                && Some stopTime.stopId = transfer.toStopId))
 
     [<TestMethod>]
     member _.``No blocks combines unique labels into one trip``() =
