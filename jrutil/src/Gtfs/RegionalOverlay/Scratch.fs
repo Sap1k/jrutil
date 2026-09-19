@@ -3,6 +3,8 @@ module internal JrUtil.RegionalOverlay.Scratch
 
 open System
 open System.IO
+open System.Diagnostics
+open System.Runtime
 open System.Text
 open System.Collections.Generic
 
@@ -52,6 +54,12 @@ type RowLog(storage: Storage) =
 /// Stable external sorting, with a 64 MiB row budget and at most 16 open merge inputs.
 /// The estimate includes row/string overhead; one oversized input row is allowed.
 let sortRows (storage: Storage) (compareRows: string array -> string array -> int) bufferBytes input =
+    let reclaimTransientMemory () =
+        let current = Process.GetCurrentProcess()
+        current.Refresh()
+        if current.PrivateMemorySize64 >= 3_250_000_000L then
+            GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
     let spill (values: ResizeArray<int64 * string array>) =
         let ordered = values.ToArray()
         Array.sortInPlaceWith (fun (ai, a) (bi, b) ->
@@ -92,6 +100,9 @@ let sortRows (storage: Storage) (compareRows: string array -> string array -> in
             runs.Add(spill buffer)
             buffer.Clear()
             size <- 0L
+            // The just-written run no longer needs its row/string arrays.
+            // Return them before admitting the next national-sized chunk.
+            reclaimTransientMemory ()
     if buffer.Count > 0 then runs.Add(spill buffer)
     let mutable paths = runs.ToArray()
     while paths.Length > 1 do paths <- paths |> Array.chunkBySize 16 |> Array.map merge
