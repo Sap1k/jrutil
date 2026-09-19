@@ -8,6 +8,7 @@ open System.Diagnostics
 open System.Globalization
 open System.IO
 open System.IO.Compression
+open System.Runtime
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
@@ -52,6 +53,17 @@ module PackageWriter =
         let result = Dictionary<string, obj>(StringComparer.Ordinal)
         for name, value in values do result.Add(name, value)
         result :> IDictionary<string, obj>
+
+    /// Package finalization follows compilation in the same short-lived CLI
+    /// process.  Large compiler graphs and Parquet row-group buffers can
+    /// otherwise remain committed while the next nationwide relation is
+    /// sorted, even though they are no longer reachable.  This is a phase
+    /// boundary reclamation, not a heap limit: live data is never rejected.
+    let private reclaimManagedPhaseMemory () =
+        GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+        GC.WaitForPendingFinalizers()
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
 
     let private nullableString value =
         if String.IsNullOrWhiteSpace(value) then null else box value
@@ -176,6 +188,19 @@ module PackageWriter =
             (16L * 1024L * 1024L) 65536 CancellationToken.None progress size compareRows (=) encode decode columns typed
 
     let private writeSelectedFieldProvenance progress (path: string) (relation: Schema.Relation) rows =
+        let mutable reclaimOperation = ""
+        let mutable nextReclaim = 200000L
+        let report operation count =
+            progress operation count
+            if operation <> reclaimOperation then
+                reclaimOperation <- operation
+                nextReclaim <- 200000L
+            if count >= nextReclaim then
+                while nextReclaim <= count do nextReclaim <- nextReclaim + 200000L
+                let current = Process.GetCurrentProcess()
+                current.Refresh()
+                if current.PrivateMemorySize64 >= 3_000_000_000L then
+                    reclaimManagedPhaseMemory ()
         let indexes = relation.fields |> Array.mapi (fun index field -> field.name, index) |> dict
         let objectTypeIndex, objectKeyIndex = indexes.["object_type"], indexes.["object_key"]
         let keyIndexes = relation.sortKey |> Array.map (fun name -> indexes.[name])
@@ -225,7 +250,8 @@ module PackageWriter =
                     previousGroups.[objectType] <- group
                     encode writer row
                     count <- count + 1L
-                    if count % 100000L = 0L then progress "partition-input" count
+                    if count % 100000L = 0L then
+                        report "partition-input" count
             finally
                 for writer in writers.Values do writer.Dispose()
             let ordered = seq {
@@ -248,11 +274,15 @@ module PackageWriter =
                             yield! values
                     else
                         yield! BinarySort.sort root (128L * 1024L * 1024L) 524288 CancellationToken.None
-                            (fun operation count -> progress (objectType + "-" + operation) count)
+                            (fun operation count -> report (objectType + "-" + operation) count)
                             size compareRows encode decode fileRows
+                    let current = Process.GetCurrentProcess()
+                    current.Refresh()
+                    if current.PrivateMemorySize64 >= 3_250_000_000L then
+                        reclaimManagedPhaseMemory ()
             }
             RelationWriter.writeOrdered path relation (16L * 1024L * 1024L) 65536 CancellationToken.None
-                progress size compareRows (=) columns ordered
+                report size compareRows (=) columns ordered
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -2032,6 +2062,9 @@ module PackageWriter =
         let advance count = lock progressLock (fun () -> completed <- count)
         use heartbeat = new Timer((fun _ -> emit ()), null, 1000, 1000)
         try
+            // The overlay/compiler phase has completed, so release its dead
+            // object graph before production-package projection starts.
+            reclaimManagedPhaseMemory ()
             let gtfs = Path.Combine(legacy, "gtfs-intermediate")
             if not (Directory.Exists(gtfs)) then invalidArg "legacy" "Compiler staging has no gtfs-intermediate directory"
             let serving = Path.Combine(output, "serving")
@@ -2047,8 +2080,7 @@ module PackageWriter =
             let gtfsZipJob = startJob "zip-gtfs" (fun () -> writeGtfsZip gtfs output)
             let extensionsJob = startJob "write-public-extensions" (fun () -> writeExtensions compiled legacy output)
             let counts = Dictionary<string,int>()
-            let mutable sourceCallJob: Task<int> option = None
-            let bindings, initialRelations =
+            let bindingsState, suppliedState =
                 phase "prepare-serving-core"
                 let tripCallSummaries = Dictionary<string, TripCallSummary>(StringComparer.Ordinal)
                 let nonContiguousTripSequences = Dictionary<string, HashSet<int>>(StringComparer.Ordinal)
@@ -2081,32 +2113,38 @@ module PackageWriter =
                     | Some native -> BindingWriter.readNativeFacts native.tripFacts native.summaries, Seq.empty, Seq.empty
                     | None -> bindingRows None legacy gtfs legacyManifest.RootElement tripCallSummaries nonContiguousTripSequences targetCallSchedules
                 let bindings = bindingsSequence |> Seq.toArray
+                let czptt, czpttCalls =
+                    if File.Exists(Path.Combine(legacy, "operational_calls.parquet")) then
+                        czpttRelations legacy bindings legacyManifest.RootElement
+                    else Map.empty, Seq.empty
+                if nativeSummaries.IsNone then
+                    // Do not overlap the dominant nationwide source-call sort
+                    // with every other serving relation.  On the national
+                    // overlay this used to keep tens of millions of call rows
+                    // active while feature/provenance relations were sorted.
+                    phase "typed-source_call_map"
+                    let target = Path.Combine(serving, "source_call_map.parquet")
+                    let report operation count =
+                        lock progressLock (fun () -> currentPhase <- "source-calls-" + operation; completed <- count)
+                    let rows = Seq.append calls (SourceCallWriter.fromModelRows czpttCalls)
+                    counts.["source_call_map"] <- SourceCallWriter.writeMappedTyped target rows CancellationToken.None report
+                    targetCallSchedules.Clear()
+                    // Drop the source-call projection closures and their
+                    // lookup tables before constructing identity/semantic
+                    // relations from the same nationwide bindings.
+                    reclaimManagedPhaseMemory ()
                 let zones, callZones = extensionRows legacy
                 let projectedBase = projectedBaseRelations legacy gtfs
                 phase "prepare-serving-identities"
+                reclaimManagedPhaseMemory ()
                 let identities = identityRelations legacy gtfs bindings legacyManifest.RootElement
+                reclaimManagedPhaseMemory ()
                 phase "prepare-native-semantics"
                 let semantics =
                     if File.Exists(Path.Combine(legacy, "source_route_stop_zone_metadata.parquet"))
                        || File.Exists(Path.Combine(legacy, "source_notice_metadata.parquet")) then
                         semanticRelations nativeSummaries legacy gtfs legacyManifest.RootElement
                     else Map.empty
-                let czptt, czpttCalls =
-                    if File.Exists(Path.Combine(legacy, "operational_calls.parquet")) then
-                        czpttRelations legacy bindings legacyManifest.RootElement
-                    else Map.empty, Seq.empty
-                if nativeSummaries.IsNone then
-                    let target = Path.Combine(serving, "source_call_map.parquet")
-                    counts.["source_call_map"] <- 0
-                    let rows = Seq.append calls (SourceCallWriter.fromModelRows czpttCalls)
-                    sourceCallJob <- Some (Task.Run(fun () ->
-                        let started = Stopwatch.StartNew()
-                        let count = SourceCallWriter.writeMappedTyped target rows CancellationToken.None (fun _ _ -> ())
-                        targetCallSchedules.Clear()
-                        Serilog.Log.Information(
-                            "Production package job complete: {Job}; rows={Rows}; elapsed_ms={ElapsedMs}",
-                            "typed-source_call_map", count, int64 started.Elapsed.TotalMilliseconds)
-                        count))
                 let appendRows name rows state =
                     let existing = state |> Map.tryFind name |> Option.defaultValue Seq.empty
                     state |> Map.add name (Seq.append existing rows)
@@ -2133,26 +2171,17 @@ module PackageWriter =
                     projectedBase
                     |> Map.fold (fun state name baseRows ->
                         let current = state |> Map.tryFind name |> Option.defaultValue Seq.empty
-                        state |> Map.add name (preferBase name baseRows current)) generated
+                        // Every selected-field column participates in its sort
+                        // key, so the ordered writer can remove exact duplicate
+                        // rows without retaining a nationwide in-memory key set.
+                        // Other projected relations have narrower primary keys
+                        // and still need base-first precedence here.
+                        let combined =
+                            if name = "selected_field_provenance" then Seq.append baseRows current
+                            else preferBase name baseRows current
+                        state |> Map.add name combined) generated
                 Task.WaitAll([| gtfsZipJob; extensionsJob |])
-                bindings, supplied
-            let mutable supplied = initialRelations
-            let mutable selectedProvenanceJob: Task<int> option = None
-            if nativeSummaries.IsNone && not (compiled.ContainsKey("selected_field_provenance")) then
-                match supplied |> Map.tryFind "selected_field_provenance" with
-                | Some rows ->
-                    let relation = Schema.relations |> Array.find (fun value -> value.name = "selected_field_provenance")
-                    let target = Path.Combine(serving, relation.name + ".parquet")
-                    counts.[relation.name] <- 0
-                    supplied <- supplied |> Map.remove relation.name
-                    selectedProvenanceJob <- Some (Task.Run(fun () ->
-                        let started = Stopwatch.StartNew()
-                        let count = writeSelectedFieldProvenance (fun _ _ -> ()) target relation rows
-                        Serilog.Log.Information(
-                            "Production package job complete: {Job}; rows={Rows}; elapsed_ms={ElapsedMs}",
-                            "grouped-selected_field_provenance", count, int64 started.Elapsed.TotalMilliseconds)
-                        count))
-                | None -> ()
+                ref bindings, ref supplied
             use sortStorage = new JrUtil.RegionalOverlay.Scratch.Storage(output)
             for relation in Schema.relations do
                 let target = Path.Combine(serving, relation.name + ".parquet")
@@ -2168,56 +2197,57 @@ module PackageWriter =
                     | _ when relation.name = "source_trip_map" ->
                         let report operation count =
                             lock progressLock (fun () -> currentPhase <- "source-trips-" + operation; completed <- count)
-                        counts.[relation.name] <- BindingWriter.write target CancellationToken.None report bindings
+                        counts.[relation.name] <- BindingWriter.write target CancellationToken.None report bindingsState.Value
+                        if nativeSummaries.IsNone then bindingsState.Value <- Array.empty
                     | None when relation.name = "source_call_map" ->
                         phase "typed-source_call_map"
                         let report operation count =
                             lock progressLock (fun () -> currentPhase <- "source-calls-" + operation; completed <- count)
-                        let rows = supplied |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
+                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- SourceCallWriter.writeMapped target rows CancellationToken.None report
                     | Some native when relation.name = "source_call_map" ->
                         phase "sort-and-write-native-source-calls"
-                        let byTrip = bindings |> Seq.map (fun binding -> binding.trip_id, binding.binding_id) |> dict
+                        let byTrip = bindingsState.Value |> Seq.map (fun binding -> binding.trip_id, binding.binding_id) |> dict
                         let report operation count =
                             lock progressLock (fun () -> currentPhase <- "source-calls-" + operation; completed <- count)
                         counts.[relation.name] <- SourceCallWriter.write target native.sourceCalls byTrip CancellationToken.None report
+                        bindingsState.Value <- Array.empty
                     | None when relation.name = "shape" || relation.name = "shape_point" ->
                         phase ("write-ordered-" + relation.name)
-                        let rows = supplied |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
+                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- writeParquet advance target relation rows
                     | _ when relation.name = "selected_field_provenance" ->
                         phase "grouped-selected_field_provenance"
-                        let rows = supplied |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
+                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- writeSelectedFieldProvenance (fun _ count -> advance count) target relation rows
                     | _ when relation.name = "object_origin"
                              || relation.name = "binding_evidence"
                              || relation.name = "route_stop" ->
                         phase ("typed-" + relation.name)
-                        let rows = supplied |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
+                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- writeRequiredTextRelation (fun _ count -> advance count) target relation rows
                     | _ ->
                         phase ("sort-" + relation.name)
-                        let sourceRows = supplied |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
+                        let sourceRows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         let mutable read = 0L
                         let rows = externallySorted sortStorage relation (sourceRows |> Seq.map (fun row -> read <- read + 1L; advance read; row))
                         phase ("write-" + relation.name)
                         counts.[relation.name] <- writeParquet advance target relation rows
-                supplied <- supplied |> Map.remove relation.name
-            match sourceCallJob with
-            | Some job ->
-                phase "await-source_call_map"
-                counts.["source_call_map"] <- job.GetAwaiter().GetResult()
-            | None -> ()
-            match selectedProvenanceJob with
-            | Some job ->
-                phase "await-selected_field_provenance"
-                counts.["selected_field_provenance"] <- job.GetAwaiter().GetResult()
-            | None -> ()
+                suppliedState.Value <- suppliedState.Value |> Map.remove relation.name
+                // Relation writers allocate large, short-lived column and
+                // sort buffers.  Reclaim them before the next relation when
+                // the process footprint has grown beyond the soft package
+                // target; this does not constrain the heap or fail a build.
+                currentProcess.Refresh()
+                if currentProcess.PrivateMemorySize64 >= 3_000_000_000L then
+                    reclaimManagedPhaseMemory ()
             phase "write-diagnostics-summary"
             writeDiagnosticsSummary legacy output
             phase "hash-production-payloads"
             writeManifest (Path.Combine(legacy, "manifest.json")) output counts
             phase "validate-production-package"
+            suppliedState.Value <- Map.empty
+            reclaimManagedPhaseMemory ()
             Validation.validatePackage output |> ignore
             lock progressLock completePhase
         with error ->

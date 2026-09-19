@@ -4,9 +4,11 @@ namespace JrUtil.Serving
 
 open System
 open System.Collections.Generic
+open System.Diagnostics
 open System.Globalization
 open System.IO
 open System.IO.Compression
+open System.Runtime
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
@@ -21,6 +23,19 @@ module Validation =
         relationCount: int
     }
     with member value.isValid = value.errors.Length = 0
+
+    let private reclaimValidationMemory () =
+        let current = Process.GetCurrentProcess()
+        current.Refresh()
+        if current.PrivateMemorySize64 >= 3_000_000_000L then
+            // Parquet validation allocates bounded row-group arrays, but the
+            // runtime otherwise keeps their committed segments across every
+            // relation.  Release those dead phase buffers between files. This
+            // is reclamation only; it does not impose a GC heap hard limit.
+            GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+            GC.WaitForPendingFinalizers()
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
 
     let private sha256File (path: string) =
         use stream = File.OpenRead(path)
@@ -104,8 +119,12 @@ module Validation =
                 let mutable rows = 0L
                 let mutable lastKey: obj array = null
                 let mutable keyFailure = false
+                let mutable groupsSinceReclaim = 0
                 let keyFields = relation.sortKey |> Array.map (fun name -> actual |> Array.tryFind (fun field -> field.Name = name))
                 for index in 0 .. reader.RowGroupCount - 1 do
+                    if groupsSinceReclaim = 16 then
+                        groupsSinceReclaim <- 0
+                        reclaimValidationMemory ()
                     use group = reader.OpenRowGroupReader(index)
                     // Writers emit bounded groups. Reject oversized consumer input before
                     // allocating its column arrays; never materialize a whole relation.
@@ -129,6 +148,7 @@ module Validation =
                                     keyFailure <- true
                         if group.RowCount > 0L then lastKey <- columns |> Array.map (fun column -> column.[int group.RowCount - 1])
                     rows <- rows + group.RowCount
+                    groupsSinceReclaim <- groupsSinceReclaim + 1
                 if rows <> expectedRows then
                     errors.Add($"{relative directory path}: manifest row count {expectedRows}, physical row count {rows}")
             finally
@@ -217,6 +237,7 @@ module Validation =
                     match rowCounts.TryGetValue(relation.name) with
                     | true, count -> validateParquet errors root relation count
                     | _ -> errors.Add($"manifest.json: relation is not declared: {relation.name}")
+                    reclaimValidationMemory ()
             for name, columns, _ in Schema.extensions do
                 let path = Path.Combine(root, "extensions", name)
                 let normalizedHeader =

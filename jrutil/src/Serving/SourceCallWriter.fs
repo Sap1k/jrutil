@@ -3,6 +3,8 @@ namespace JrUtil.Serving
 
 open System
 open System.IO
+open System.Diagnostics
+open System.Runtime
 open System.Text
 open System.Globalization
 open System.Threading
@@ -136,6 +138,12 @@ module SourceCallWriter =
     /// Write already-typed mapped calls without allocating one dictionary and
     /// seven boxed values per call in the production overlay path.
     let writeMappedTyped (path: string) (typed: seq<MappedRow>) (token: CancellationToken) (progress: string -> int64 -> unit) =
+        let reclaimTransientMemory () =
+            let current = Process.GetCurrentProcess()
+            current.Refresh()
+            if current.PrivateMemorySize64 >= 3_000_000_000L then
+                GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
         let encode (output: BinaryWriter) row =
             output.Write(row.binding); output.Write(row.callNamespace); output.Write(row.sequence)
             output.Write(row.sourceSequence); output.Write(row.stop)
@@ -167,6 +175,9 @@ module SourceCallWriter =
         let root = Path.Combine(Path.GetDirectoryName(path), ".source-call-partitions-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
+            // Binding preparation builds several large lookup tables whose
+            // construction garbage is dead before call projection begins.
+            reclaimTransientMemory ()
             let paths = Array.init 256 (fun index -> Path.Combine(root, index.ToString("x2", CultureInfo.InvariantCulture) + ".bin"))
             let writers = paths |> Array.map (fun file -> new BinaryWriter(File.Create(file), Encoding.UTF8))
             let nibble value =
@@ -185,7 +196,9 @@ module SourceCallWriter =
                     let partition = high * 16 + low
                     encode writers.[partition] row
                     count <- count + 1L
-                    if count % 100000L = 0L then progress "partition-input" count
+                    if count % 100000L = 0L then
+                        progress "partition-input" count
+                        reclaimTransientMemory ()
             finally
                 for writer in writers do writer.Dispose()
             let ordered = seq {
@@ -197,6 +210,7 @@ module SourceCallWriter =
                     yield! BinarySort.sort root (64L * 1024L * 1024L) 262144 token
                         (fun operation count -> progress ($"partition-{partition:x2}-{operation}") count)
                         bytes compareRows encode decode partitionRows
+                    reclaimTransientMemory ()
             }
             RelationWriter.writeOrdered path schema (16L * 1024L * 1024L) 65536
                 token progress bytes compareRows (=) columns ordered

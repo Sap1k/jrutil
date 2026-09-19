@@ -6,6 +6,7 @@ open System
 open System.Collections.Generic
 open System.Globalization
 open System.IO
+open System.Runtime.CompilerServices
 open System.Text
 open System.Text.Json
 open NodaTime
@@ -29,7 +30,8 @@ type Input = {
 }
 
 /// Stream the resolved bundle, write reports and atomically activate the output.
-let write ({
+[<MethodImpl(MethodImplOptions.NoInlining)>]
+let private writeLegacy ({
     prepared = prepared
     projection = projection
     source = source
@@ -885,16 +887,29 @@ let write ({
         File.WriteAllText(Path.Combine(temporary, "manifest.json"), JsonSerializer.Serialize(manifest, jsonOptions), new UTF8Encoding(false))
 
         prepared.scratch.Flush()
-        let productionTemporary = temporary + ".production"
-        JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) temporary productionTemporary
+        temporary, prepared.outputBundle, diagnosticsOutput, diagnosticTraces, finalResult
+    with error ->
+        if Directory.Exists(temporary) then Directory.Delete(temporary, true)
+        reraise ()
+
+/// Finalize only after writeLegacy has returned.  The method boundary makes
+/// the compiler's national matching/projection graph unreachable before the
+/// production writer allocates its own nationwide buffers.
+let write input =
+    let temporary, outputBundle, diagnosticsOutput, diagnosticTraces, finalResult =
+        writeLegacy input
+    let productionTemporary = temporary + ".production"
+    try
+        JrUtil.Serving.PackageWriter.finalizeLegacyStaging
+            Map.empty None (fun _ _ -> ()) temporary productionTemporary
         diagnosticsOutput
         |> Option.iter (fun path ->
-            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact temporary path diagnosticTraces)
+            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact
+                temporary path diagnosticTraces)
         Directory.Delete(temporary, true)
-        Directory.Move(productionTemporary, prepared.outputBundle)
+        Directory.Move(productionTemporary, outputBundle)
         finalResult
     with error ->
         if Directory.Exists(temporary) then Directory.Delete(temporary, true)
-        let productionTemporary = temporary + ".production"
         if Directory.Exists(productionTemporary) then Directory.Delete(productionTemporary, true)
         reraise ()
