@@ -202,6 +202,7 @@ type private NormalizedCall = {
     routeType: string
     category: string
     alternativeTransport: bool
+    inferredTiming: bool
 }
 
 type private Segment = {
@@ -494,6 +495,7 @@ let private normalize (catalog: CatalogSnapshot)
             routeType = routeTypeForCategory currentCategory
             category = currentCategory
             alternativeTransport = isAlternativeTransport location
+            inferredTiming = false
         })
 
 type private CentralNoteSpec = {
@@ -940,6 +942,95 @@ let private pointIdentity (call: NormalizedCall) =
     call.location.Location.CountryCodeIso,
     call.location.Location.LocationPrimaryCode
 
+let private hasCompleteTiming (call: NormalizedCall) =
+    call.arrival.IsSome && call.departure.IsSome
+
+let private copyTiming (source: NormalizedCall) (target: NormalizedCall) =
+    {
+        target with
+            arrival = source.arrival |> Option.orElse source.departure
+            departure = source.departure |> Option.orElse source.arrival
+            inferredTiming = true
+    }
+
+let private interpolateTiming (sourceCalls: NormalizedCall array)
+                              (target: NormalizedCall) =
+    let previous =
+        sourceCalls
+        |> Array.tryFindBack (fun call ->
+            call.sourceIndex < target.sourceIndex
+            && (call.departure.IsSome || call.arrival.IsSome))
+    let following =
+        sourceCalls
+        |> Array.tryFind (fun call ->
+            call.sourceIndex > target.sourceIndex
+            && (call.arrival.IsSome || call.departure.IsSome))
+    match previous, following with
+    | Some left, Some right ->
+        let leftTime = left.departure |> Option.orElse left.arrival |> Option.get
+        let rightTime = right.arrival |> Option.orElse right.departure |> Option.get
+        let span = right.sourceIndex - left.sourceIndex
+        if span > 0 && rightTime >= leftTime then
+            let offset = target.sourceIndex - left.sourceIndex
+            let inferred =
+                int64 leftTime
+                + (int64 (rightTime - leftTime) * int64 offset / int64 span)
+                |> int
+            Some {
+                target with
+                    arrival = Some inferred
+                    departure = Some inferred
+                    inferredTiming = true
+            }
+        else None
+    | _ -> None
+
+let private reconcileJourneyEdgeTimes message
+                                          (sourceCalls: NormalizedCall array)
+                                          (journeys: Journey array) =
+    let reconciled =
+        journeys
+        |> Array.map (fun journey ->
+            { journey with calls = Array.copy journey.calls })
+    for index in 0 .. reconciled.Length - 2 do
+        let left = reconciled.[index]
+        let right = reconciled.[index + 1]
+        let leftIndex = left.calls.Length - 1
+        let leftCall = left.calls.[leftIndex]
+        let rightCall = right.calls.[0]
+        if pointIdentity leftCall = pointIdentity rightCall then
+            if hasCompleteTiming leftCall && not (hasCompleteTiming rightCall) then
+                right.calls.[0] <- copyTiming leftCall rightCall
+            elif hasCompleteTiming rightCall && not (hasCompleteTiming leftCall) then
+                left.calls.[leftIndex] <- copyTiming rightCall leftCall
+
+    let diagnostics = ResizeArray<string>()
+    let retained =
+        reconciled
+        |> Array.choose (fun journey ->
+            let calls = Array.copy journey.calls
+            let lastIndex = calls.Length - 1
+            for index in [| 0; lastIndex |] |> Array.distinct do
+                if not (hasCompleteTiming calls.[index]) then
+                    interpolateTiming sourceCalls calls.[index]
+                    |> Option.iter (fun inferred -> calls.[index] <- inferred)
+            if hasCompleteTiming calls.[0] && hasCompleteTiming calls.[lastIndex] then
+                Some { journey with calls = calls }
+            else
+                let edges =
+                    [|
+                        if not (hasCompleteTiming calls.[0]) then yield calls.[0].sourceIndex + 1
+                        if lastIndex > 0 && not (hasCompleteTiming calls.[lastIndex]) then
+                            yield calls.[lastIndex].sourceIndex + 1
+                    |]
+                    |> Array.map string
+                    |> String.concat ","
+                diagnostics.Add(
+                    $"{paId message}: omitted generated journey {journey.index + 1} " +
+                    $"because GTFS edge timing could not be inferred at source sequence {edges}")
+                None)
+    retained, diagnostics.ToArray()
+
 let private pointIdentityText (countryCode, primaryCode) =
     $"{idComponent countryCode}:{idComponent primaryCode}"
 
@@ -1158,7 +1249,8 @@ let private stopTimes message shift journey =
                 then Some NoService else Some regular
             shapeDistTraveled = None
             timepoint =
-                if call.arrival.IsSome || call.departure.IsSome
+                if call.inferredTiming then Some Approximate
+                elif call.arrival.IsSome || call.departure.IsSome
                 then Some Exact
                 else Some Approximate
             stopZoneIds = None
@@ -1231,31 +1323,51 @@ let private trip pointNames blockMode catalog date message sourceCalls endpoints
     }
 
 let private transfers message (journeys: Journey array) =
-    journeys
-    |> Array.pairwise
-    |> Array.map (fun (fromJourney, toJourney) ->
-        let modeChange =
-            fromJourney.alternativeTransport <> toJourney.alternativeTransport
-        let fromBoundaryStop, toBoundaryStop =
-            if modeChange then
-                fromJourney.calls
-                |> Array.tryLast
-                |> Option.map (journeyStopId fromJourney),
-                toJourney.calls
-                |> Array.tryHead
-                |> Option.map (journeyStopId toJourney)
-            else None, None
-        {
-        fromStopId = fromBoundaryStop
-        toStopId = toBoundaryStop
-        fromRouteId = None
-        toRouteId = None
-        fromTripId = Some (tripId message fromJourney)
-        toTripId = Some (tripId message toJourney)
-        transferType = if modeChange then 1 else 4
-        minTransferTime = if modeChange then Some 0 else None
-        maxWaitingTime = None
-    })
+    let diagnostics = ResizeArray<string>()
+    let values =
+        journeys
+        |> Array.pairwise
+        |> Array.choose (fun (fromJourney, toJourney) ->
+            let modeChange =
+                fromJourney.alternativeTransport <> toJourney.alternativeTransport
+            let fromBoundaryStop, toBoundaryStop =
+                if modeChange then
+                    fromJourney.calls
+                    |> Array.tryLast
+                    |> Option.map (journeyStopId fromJourney),
+                    toJourney.calls
+                    |> Array.tryHead
+                    |> Option.map (journeyStopId toJourney)
+                else None, None
+            let sameStation =
+                not modeChange
+                || pointIdentity fromJourney.calls.[fromJourney.calls.Length - 1]
+                    = pointIdentity toJourney.calls.[0]
+            if not sameStation then
+                let fromIdentity =
+                    fromJourney.calls.[fromJourney.calls.Length - 1]
+                    |> pointIdentity
+                    |> pointIdentityText
+                let toIdentity =
+                    toJourney.calls.[0] |> pointIdentity |> pointIdentityText
+                diagnostics.Add(
+                    $"{paId message}: omitted cross-station NAD transfer " +
+                    $"{tripId message fromJourney} ({fromIdentity}) -> " +
+                    $"{tripId message toJourney} ({toIdentity})")
+                None
+            else
+                Some {
+                    fromStopId = fromBoundaryStop
+                    toStopId = toBoundaryStop
+                    fromRouteId = None
+                    toRouteId = None
+                    fromTripId = Some (tripId message fromJourney)
+                    toTripId = Some (tripId message toJourney)
+                    transferType = if modeChange then 1 else 4
+                    minTransferTime = if modeChange then Some 0 else None
+                    maxWaitingTime = None
+                })
+    values, diagnostics.ToArray()
 
 type private OrdinaryConnectionCall = {
     message: CzPttXml.CzpttcisMessage
@@ -1483,6 +1595,14 @@ let private crossPaTransfers
     |> Seq.distinct
     |> Seq.toArray
 
+let private publicAgencyName (value: string) =
+    let trimmed = value.Trim()
+    let separator = trimmed.IndexOf(" - ", StringComparison.Ordinal)
+    if separator > 0 then
+        let baseName = trimmed.Substring(0, separator).TrimEnd()
+        if String.IsNullOrWhiteSpace(baseName) then trimmed else baseName
+    else trimmed
+
 let private agency catalog code =
     let company = catalog.companies |> Array.tryFind (fun company -> company.code = code)
     let agencyUrl =
@@ -1501,7 +1621,10 @@ let private agency catalog code =
         |> Option.defaultValue "https://portal.cisjr.cz/"
     {
         id = Some (agencyId code)
-        name = company |> Option.map (fun value -> value.name) |> Option.defaultValue $"Unknown {code}"
+        name =
+            company
+            |> Option.map (fun value -> publicAgencyName value.name)
+            |> Option.defaultValue $"Unknown {code}"
         url = Some agencyUrl
         timezone = "Europe/Prague"
         lang = Some "cs"
@@ -1516,7 +1639,7 @@ let private compositeAgency catalog (codes: string array) =
         |> Array.map (fun code ->
             catalog.companies
             |> Array.tryFind (fun company -> company.code = code)
-            |> Option.map (fun company -> company.name)
+            |> Option.map (fun company -> publicAgencyName company.name)
             |> Option.defaultValue $"Unknown {code}")
     {
         id = Some (agencyGroupId codes)
@@ -1646,7 +1769,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
                 else
                     boundaryAdjustments.AddRange(adjustments)
                     let journeySegments = selected |> segments
-                    let generatedJourneys =
+                    let rawGeneratedJourneys =
                         journeys options.blockMode selected journeySegments
                         |> Array.choose (fun journey ->
                             if journey.alternativeTransport then
@@ -1657,6 +1780,9 @@ let convertWithPointNamesAndOptions catalog options pointNames
                                     Some { journey with calls = passengerCalls }
                                 else None
                             else Some journey)
+                    let generatedJourneys, edgeDiagnostics =
+                        reconcileJourneyEdgeTimes message calls rawGeneratedJourneys
+                    approximations.AddRange(edgeDiagnostics)
                     if options.operationalPointMode = Sidecar then
                         let exactChanges =
                             calls
@@ -1719,11 +1845,16 @@ let convertWithPointNamesAndOptions catalog options pointNames
             let shift = gtfsTimeShift calls
             generatedJourneys |> Seq.collect (stopTimes message shift))
         |> Seq.toArray
-    let internalTransfers =
+    let internalTransferResults =
         accepted
-        |> Seq.collect (fun (message, _, _, generatedJourneys) ->
+        |> Seq.map (fun (message, _, _, generatedJourneys) ->
             transfers message generatedJourneys)
         |> Seq.toArray
+    let internalTransfers =
+        internalTransferResults |> Array.collect fst
+    internalTransferResults
+    |> Array.collect snd
+    |> approximations.AddRange
     let preciseTransfers =
         Array.append internalTransfers (crossPaTransfers accepted)
     // MOTIS applies its configured default transfer time unless transfers.txt

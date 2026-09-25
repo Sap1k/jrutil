@@ -587,6 +587,121 @@ type CzPttToGtfsTests() =
             Set.count (result.feed.trips |> Array.choose (fun trip -> trip.blockId) |> Set))
 
     [<TestMethod>]
+    member _.``Untimed split edges are interpolated only in GTFS``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"]
+                    (Some ("BUS", None)) [ "CZAlternativeTransport", "1" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"]
+                    (Some ("1", None)) [ "CZAlternativeTransport", "0" ]
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] []
+        value.CzpttInformation.CzpttLocation.[2].TimingAtLocation <- null
+
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let inferred =
+            result.feed.stopTimes
+            |> Array.filter (fun call -> call.stopSequence = 3)
+        Assert.AreEqual(2, inferred.Length)
+        Assert.IsTrue(
+            inferred
+            |> Array.forall (fun call ->
+                call.arrivalTime.IsSome
+                && call.departureTime.IsSome
+                && call.arrivalTime = call.departureTime
+                && call.timepoint = Some GtfsModel.Approximate
+                && call.arrivalTime.Value.ToDuration().TotalSeconds = 8.0 * 3600.0 + 15.0 * 60.0))
+        let raw = result.operationalCalls |> Array.find (fun call -> call.sourceSequence = 3)
+        Assert.AreEqual(None, raw.arrivalSeconds)
+        Assert.AreEqual(None, raw.departureSeconds)
+        result.feed.stopTimes
+        |> Array.groupBy (fun call -> call.tripId)
+        |> Array.iter (fun (_, calls) ->
+            let ordered = calls |> Array.sortBy (fun call -> call.stopSequence)
+            Assert.IsTrue(ordered.[0].arrivalTime.IsSome)
+            Assert.IsTrue(ordered.[0].departureTime.IsSome)
+            Assert.IsTrue(ordered.[ordered.Length - 1].arrivalTime.IsSome)
+            Assert.IsTrue(ordered.[ordered.Length - 1].departureTime.IsSome))
+
+    [<TestMethod>]
+    member _.``Untimed passenger boundary copies a timed same-station counterpart``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57050" "Poříčany operational" "08:05:00" [] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"]
+                    (Some ("1", None)) [ "CZAlternativeTransport", "1" ]
+                location "57016" "Kolín" "08:20:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+            ] []
+        value.CzpttInformation.CzpttLocation.[2].TimingAtLocation <- null
+
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let copied =
+            result.feed.stopTimes
+            |> Array.find (fun call ->
+                call.stopSequence = 3
+                && call.stopId = "czptt:stop:CZ:57050:platform:BUS")
+        Assert.AreEqual(
+            8.0 * 3600.0 + 5.0 * 60.0,
+            copied.arrivalTime.Value.ToDuration().TotalSeconds)
+        Assert.AreEqual(copied.arrivalTime, copied.departureTime)
+        Assert.AreEqual(Some GtfsModel.Approximate, copied.timepoint)
+        let raw = result.operationalCalls |> Array.find (fun call -> call.sourceSequence = 3)
+        Assert.AreEqual(None, raw.arrivalSeconds)
+        Assert.AreEqual(None, raw.departureSeconds)
+        Assert.AreEqual(1, result.feed.transfers.Value.Length)
+        let transfer = result.feed.transfers.Value.[0]
+        Assert.IsTrue(
+            transfer.fromStopId.Value.StartsWith("czptt:stop:CZ:57050:", StringComparison.Ordinal))
+        Assert.IsTrue(
+            transfer.toStopId.Value.StartsWith("czptt:stop:CZ:57050:", StringComparison.Ordinal))
+
+    [<TestMethod>]
+    member _.``Journey with an uninferable edge is omitted and diagnosed``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] []
+        value.CzpttInformation.CzpttLocation.[0].TimingAtLocation <- null
+
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(0, result.feed.trips.Length)
+        Assert.AreEqual(0, result.feed.stopTimes.Length)
+        Assert.AreEqual(2, result.operationalCalls.Length)
+        Assert.IsTrue(
+            result.sidecarBoundaryApproximations
+            |> Array.exists (fun diagnostic ->
+                diagnostic.Contains("GTFS edge timing could not be inferred")))
+
+    [<TestMethod>]
+    member _.``Cross-station NAD boundaries do not emit walking transfers``() =
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "93001" "Operational boundary" "08:05:00" [] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "57050" "Poříčany" "08:10:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+                location "57016" "Kolín" "08:20:00" ["0001"] None
+                    [ "CZAlternativeTransport", "1" ]
+            ] []
+
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(2, result.feed.trips.Length)
+        Assert.AreEqual(0, result.feed.transfers.Value.Length)
+        Assert.IsTrue(
+            result.sidecarBoundaryApproximations
+            |> Array.exists (fun diagnostic ->
+                diagnostic.Contains("omitted cross-station NAD transfer")
+                && diagnostic.Contains("CZ:93001")
+                && diagnostic.Contains("CZ:57050")))
+
+    [<TestMethod>]
     member _.``Line-less NAD keeps the train designation as its route label``() =
         let value =
             message [
@@ -911,6 +1026,43 @@ type CzPttToGtfsTests() =
         Assert.IsTrue(
             result.feed.czTripStopZones.Value
             |> Array.forall (fun zone -> zone.tripId = result.feed.trips.[0].id))
+
+    [<TestMethod>]
+    member _.``Agency display names omit spaced dash qualifiers``() =
+        let qualifiedCatalog = {
+            catalog with
+                companies = [|
+                    {
+                        code = "54"
+                        name = " České dráhy, a.s. - peáž DB Netz "
+                        url = None
+                    }
+                    {
+                        code = "80"
+                        name = "Česko-německá dráha - žadatel"
+                        url = None
+                    }
+                |]
+        }
+        let value =
+            message [
+                location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
+                location "57050" "Poříčany" "08:10:00" ["0001"] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] []
+        value.CzpttInformation.CzpttLocation.[1].ResponsibleRu <- "80"
+        value.CzpttInformation.CzpttLocation.[2].ResponsibleRu <- "54"
+
+        let result =
+            CzPttToGtfs.convertWithOptions qualifiedCatalog {
+                operationalPointMode = CzPttToGtfs.Gtfs
+                blockMode = CzPttToGtfs.NoBlocks
+            } [ value ]
+        let names = result.feed.agencies |> Array.map (fun agency -> agency.name) |> Set
+        Assert.IsTrue(Set.contains "České dráhy, a.s." names)
+        Assert.IsTrue(Set.contains "Česko-německá dráha" names)
+        Assert.IsTrue(Set.contains "České dráhy, a.s. / Česko-německá dráha" names)
+        Assert.IsFalse(names |> Seq.exists (fun name -> name.Contains(" - ")))
 
     [<TestMethod>]
     member _.``Internal line changes move to the next passenger call``() =
