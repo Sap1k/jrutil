@@ -815,6 +815,55 @@ let cloneRow (row: CsvRow) =
     for KeyValue(key, value) in row do result.[key] <- value
     result
 
+let TransferSelectorColumns = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" |]
+
+/// GTFS transfers carry no date validity, so source revisions that differ only
+/// by date (e.g. a guaranteed wait shortened from 600 s to 300 s on 1 October)
+/// can project onto one output selector tuple. Identical rows collapse. Rows
+/// with the same transfer type merge conservatively: the shortest maximum
+/// waiting time and the longest minimum transfer time, so no published wait is
+/// longer than every source promises. Rows whose transfer types disagree have
+/// no safe merge and are dropped. Returns the rows and (code, object, message)
+/// diagnostics in deterministic order.
+let reconcileTransferRows (rows: CsvRow seq) =
+    let selector (row: CsvRow) = TransferSelectorColumns |> Array.map (rowValue row) |> String.concat "\u001f"
+    let valueColumns = [| "transfer_type"; "min_transfer_time"; "max_waiting_time" |]
+    let diagnostics = ResizeArray<string * string * string>()
+    let reconciled =
+        rows
+        |> Seq.groupBy selector
+        |> Seq.sortBy fst
+        |> Seq.choose (fun (key, group) ->
+            let group = group |> Seq.toArray
+            let variants = group |> Array.distinctBy (fun row -> valueColumns |> Array.map (rowValue row))
+            let objectId = key.Replace("\u001f", "|")
+            if variants.Length = 1 then Some variants.[0]
+            elif variants |> Array.map (fun row -> rowValue row "transfer_type") |> Array.distinct |> Array.length > 1 then
+                diagnostics.Add("transfer_conflict_quarantined", objectId,
+                                "Source transfer revisions disagree on transfer_type for one output selector; transfer dropped")
+                None
+            else
+                let seconds column =
+                    variants |> Array.choose (fun row ->
+                        match Int32.TryParse(rowValue row column, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                        | true, value -> Some value
+                        | _ -> None)
+                let merged = cloneRow variants.[0]
+                merged.["min_transfer_time"] <-
+                    match seconds "min_transfer_time" with
+                    | [||] -> ""
+                    | values -> string (Array.max values)
+                merged.["max_waiting_time"] <-
+                    match seconds "max_waiting_time" with
+                    | [||] -> ""
+                    | values -> string (Array.min values)
+                let minimum, maximum = merged.["min_transfer_time"], merged.["max_waiting_time"]
+                diagnostics.Add("transfer_date_variants_merged", objectId,
+                                $"{variants.Length} source transfer revisions merged conservatively (min_transfer_time={minimum}, max_waiting_time={maximum})")
+                Some merged)
+        |> Seq.toArray
+    reconciled, diagnostics.ToArray()
+
 let serviceId dates = "overlay:service:" + (dateKey dates).Substring(0, 16)
 
 let sourcePostId sourceId sourceStopId =

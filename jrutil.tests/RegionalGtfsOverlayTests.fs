@@ -264,6 +264,52 @@ type RegionalGtfsOverlayTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``Projected transfer revisions merge conservatively or are quarantined``() =
+        let transfer fromTrip toTrip transferType minimum maximum =
+            let row = Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal)
+            for column, value in [ "from_stop_id", "A"; "to_stop_id", "B"; "from_route_id", ""; "to_route_id", ""
+                                   "from_trip_id", fromTrip; "to_trip_id", toTrip; "transfer_type", transferType
+                                   "min_transfer_time", minimum; "max_waiting_time", maximum ] do
+                row.[column] <- value
+            row
+        let rows = [|
+            // PID revisions 260901/261001 of one output trip: wait shortened from 600 s to 300 s.
+            transfer "t1" "t2" "1" "" "600"
+            transfer "t1" "t2" "1" "" "300"
+            transfer "t1" "t2" "1" "" "600"
+            // Exact duplicates collapse silently.
+            transfer "t3" "t4" "2" "120" ""
+            transfer "t3" "t4" "2" "120" ""
+            // Revisions of one minimum-time transfer keep the longest walk.
+            transfer "t5" "t6" "2" "120" ""
+            transfer "t5" "t6" "2" "180" ""
+            // Different transfer types have no safe merge.
+            transfer "t7" "t8" "1" "" "300"
+            transfer "t7" "t8" "3" "" "" |]
+        let reconciled, diagnostics = JrUtil.RegionalOverlay.Support.reconcileTransferRows rows
+        let byTrips =
+            reconciled
+            |> Array.map (fun row -> (row.["from_trip_id"], row.["to_trip_id"]), row)
+            |> Map.ofArray
+        Assert.AreEqual(3, reconciled.Length)
+        Assert.AreEqual("300", byTrips.[("t1", "t2")].["max_waiting_time"])
+        Assert.AreEqual("", byTrips.[("t1", "t2")].["min_transfer_time"])
+        Assert.AreEqual("120", byTrips.[("t3", "t4")].["min_transfer_time"])
+        Assert.AreEqual("180", byTrips.[("t5", "t6")].["min_transfer_time"])
+        Assert.IsFalse(byTrips.ContainsKey(("t7", "t8")))
+        let codes = diagnostics |> Array.map (fun (code, _, _) -> code)
+        CollectionAssert.AreEqual(
+            [| "transfer_date_variants_merged"; "transfer_date_variants_merged"; "transfer_conflict_quarantined" |], codes)
+        let keys = reconciled |> Array.map (fun row -> JrUtil.RegionalOverlay.Support.TransferSelectorColumns |> Array.map (fun column -> row.[column]))
+        Assert.AreEqual(keys.Length, keys |> Array.distinct |> Array.length)
+        // Input order does not change the result.
+        let reversed, reversedDiagnostics = JrUtil.RegionalOverlay.Support.reconcileTransferRows (Array.rev rows)
+        CollectionAssert.AreEqual(
+            reconciled |> Array.map (fun row -> String.Join("|", row.Values)),
+            reversed |> Array.map (fun row -> String.Join("|", row.Values)))
+        CollectionAssert.AreEqual(diagnostics, reversedDiagnostics)
+
+    [<TestMethod>]
     member _.``Overlay refuses checksum mismatch without activating output``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-failure-" + Guid.NewGuid().ToString("N"))
         try

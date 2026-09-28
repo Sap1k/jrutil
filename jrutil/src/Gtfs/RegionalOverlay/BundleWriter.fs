@@ -582,8 +582,10 @@ let private writeLegacy ({
                         (rowValue sourceTransfer "from_trip_id" + "->" + rowValue sourceTransfer "to_trip_id")
                         "Both non-rail source trips and their output slices must resolve"
         if transferRows.Count > 0 then
-            transferRows
-            |> Seq.distinctBy (fun row -> transferColumns |> Array.map (rowValue row) |> String.concat "\u001f")
+            let reconciledTransfers, transferDiagnostics = reconcileTransferRows transferRows
+            for code, objectId, message in transferDiagnostics do
+                addDiagnostic prepared.diagnostics code objectId message
+            reconciledTransfers
             |> Seq.sortBy (fun row -> rowValue row "from_trip_id", rowValue row "to_trip_id", rowValue row "from_stop_id", rowValue row "to_stop_id")
             |> writeRows (Path.Combine(gtfsOutput, "transfers.txt")) transferColumns
 
@@ -910,6 +912,9 @@ let write input =
         Directory.Move(productionTemporary, outputBundle)
         finalResult
     with error ->
-        if Directory.Exists(temporary) then Directory.Delete(temporary, true)
-        if Directory.Exists(productionTemporary) then Directory.Delete(productionTemporary, true)
+        // The compiled legacy staging (GTFS, mappings, reports) is the only
+        // evidence for a finalization failure, and PackageWriter has already
+        // announced it as retained. Keep both staging trees for diagnosis.
+        if Directory.Exists(temporary) then
+            Serilog.Log.Error("Regional overlay finalization failed; compiled staging retained at {StagingPath}", temporary)
         reraise ()
