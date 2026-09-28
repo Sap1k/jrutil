@@ -1688,6 +1688,7 @@ type private StopTimeAttributeFlags =
     | CommissionServiceFlag = 4
     | ExitOnlyFlag = 8
     | BoardingOnlyFlag = 16
+    | BorderStopOnlyFlag = 32
 
 type StreamingStopTimeRow = {
     stopTime: GtfsModel.StopTime
@@ -1767,6 +1768,8 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
             | JdfModel.CommisionServiceOnly -> StopTimeAttributeFlags.CommissionServiceFlag
             | JdfModel.ExitOnly -> StopTimeAttributeFlags.ExitOnlyFlag
             | JdfModel.BoardingOnly -> StopTimeAttributeFlags.BoardingOnlyFlag
+            // `$` marks a border/customs stop where passengers may neither board nor alight.
+            | JdfModel.BorderStopOnly -> StopTimeAttributeFlags.BorderStopOnlyFlag
             | _ -> StopTimeAttributeFlags.NoStopTimeFlags
         if flag <> StopTimeAttributeFlags.NoStopTimeFlags then
             attributeFlagsById.[attribute.attributeId] <- flag
@@ -1970,10 +1973,12 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
                     headsign = None
                     pickupType =
                         if hasFlag StopTimeAttributeFlags.ExitOnlyFlag
+                           || hasFlag StopTimeAttributeFlags.BorderStopOnlyFlag
                         then noService
                         else service
                     dropoffType =
                         if hasFlag StopTimeAttributeFlags.BoardingOnlyFlag
+                           || hasFlag StopTimeAttributeFlags.BorderStopOnlyFlag
                         then noService
                         else service
                     shapeDistTraveled = jdfTripStop.kilometer
