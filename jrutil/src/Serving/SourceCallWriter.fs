@@ -138,12 +138,11 @@ module SourceCallWriter =
     /// Write already-typed mapped calls without allocating one dictionary and
     /// seven boxed values per call in the production overlay path.
     let writeMappedTyped (path: string) (typed: seq<MappedRow>) (token: CancellationToken) (progress: string -> int64 -> unit) =
-        let reclaimTransientMemory () =
-            let current = Process.GetCurrentProcess()
-            current.Refresh()
-            if current.PrivateMemorySize64 >= 3_000_000_000L then
+        let reclaimGate =
+            MemoryReclaimGate(3_000_000_000L, MemoryReclaim.DefaultMinimumGrowthBytes, fun () ->
                 GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true))
+        let reclaimTransientMemory () = reclaimGate.Check() |> ignore
         let encode (output: BinaryWriter) row =
             output.Write(row.binding); output.Write(row.callNamespace); output.Write(row.sequence)
             output.Write(row.sourceSequence); output.Write(row.stop)

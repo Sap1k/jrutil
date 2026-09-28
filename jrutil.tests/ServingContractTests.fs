@@ -58,6 +58,24 @@ type ServingContractTests() =
         writer.Append(columns |> Array.mapi (fun index _ -> JrUtil.Serving.ColumnWriter.Text(rows |> Array.map (fun row -> row.[index]))))
 
     [<TestMethod>]
+    member _.``Memory reclaim gate does not repeat collections without further growth``() =
+        let gib = 1024L * 1024L * 1024L
+        // A compacting collection releases some memory but stays above the threshold.
+        let mutable current = 0L
+        let reclaim () = current <- current - gib / 4L
+        let gate = JrUtil.Serving.MemoryReclaimGate(3L * gib, gib / 2L, reclaim, fun () -> current)
+        let observe value =
+            current <- value
+            gate.Check()
+        Assert.IsFalse(observe (2L * gib))                  // below threshold
+        Assert.IsTrue(observe (4L * gib))                   // first crossing; baseline 3.75 GiB
+        Assert.IsFalse(observe (4L * gib))                  // no growth: the old check reclaimed here every time
+        Assert.IsFalse(observe (4L * gib + gib / 8L))       // growth under the minimum
+        Assert.IsTrue(observe (4L * gib + gib / 2L))        // 4.5 >= 3.75 + 0.5
+        Assert.IsFalse(observe (2L * gib))                  // back below threshold
+        Assert.AreEqual(2, gate.Reclaims)
+
+    [<TestMethod>]
     member _.``Composite public keys preserve identifier colons and escape delimiters``() =
         Assert.AreEqual(
             "jdf:route:000645:1/10%2Fwest",
