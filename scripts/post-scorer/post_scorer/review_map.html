@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="cs"><head><meta charset="utf-8"><title>__TITLE__</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+body{margin:0;font:13px system-ui,sans-serif;display:flex;height:100vh}
+#side{width:430px;overflow:auto;border-right:1px solid #ccc;padding:8px;box-sizing:border-box}
+#map{flex:1}
+input,select{width:100%;margin-bottom:6px;box-sizing:border-box}
+#stops div{cursor:pointer;padding:2px 4px}#stops div:hover,#stops .sel{background:#e6f0ff}
+table{border-collapse:collapse;width:100%;margin-top:6px}td,th{border-bottom:1px solid #eee;padding:2px 3px;text-align:left;vertical-align:top}
+tr.row{cursor:pointer}tr.done td:first-child{box-shadow:inset 3px 0 #2a8a3a}button.v{padding:0 4px;margin-left:2px}tr.row:hover,tr.hi{background:#fff4c2}
+.m{color:#1d5fd1;font-weight:600}.b{color:#c0392b;font-weight:600}.same{color:#2a8a3a}.dim{color:#888}
+.legend{font-size:12px;margin:4px 0}.legend span{display:inline-block;width:10px;height:10px;border-radius:50%;margin:0 3px 0 8px;vertical-align:middle}
+</style></head><body>
+<div id="side">
+<b>__TITLE__</b>
+<div class="legend"><span style="background:#139c8c"></span>bay<span style="background:#e08a2c"></span>other post
+<span style="border:3px solid #1d5fd1;width:6px;height:6px"></span>model<span style="border:3px dashed #c0392b;width:6px;height:6px"></span>current policy (Side: thin rings = rest of group)</div>
+<input id="q" placeholder="Filter stops (name)">
+<select id="f"><option value="all">All stops</option><option value="dis">Model ≠ policy only</option></select>
+<div id="stops" style="max-height:30vh;overflow:auto;border:1px solid #ddd"></div>
+<div id="corr" style="margin:6px 0">Corrections: <b id="ncorr">0</b>
+ <button id="save">Save corrections</button>
+ <label style="font-size:12px">Load <input type="file" id="load" accept=".json" style="width:auto"></label>
+ <div class="dim" style="font-size:12px">Select a row, then ✓ (model right), ∅ (no correct post), or click the right post on the map.</div></div>
+<div id="detail"></div>
+</div>
+<div id="map"></div>
+<script>
+const DATA=__DATA__;
+const map=L.map('map').setView([50.6,13.9],10);
+// tile.openstreetmap.org refuses file:// pages (no Referer); CARTO and Esri do not.
+const streets=L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:21,maxNativeZoom:20,attribution:'© OpenStreetMap contributors © CARTO'}).addTo(map);
+const imagery=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:21,maxNativeZoom:19,attribution:'Esri, Maxar, Earthstar Geographics'});
+L.control.layers({'Streets (CARTO)':streets,'Satellite (Esri)':imagery}).addTo(map);
+let layer=L.layerGroup().addTo(map),ring=L.layerGroup().addTo(map),current=null,selected=null;
+// Corrections are keyed by movement: stop, line, direction, previous and next stop.
+const corrections=new Map();
+const key=(s,m)=>[s.id,m.line,m.dir,m.fromId??"",m.toId??""].join("|");
+function record(s,m,verdict,index){
+  const c=index==null?null:s.candidates[index];
+  corrections.set(key(s,m),{stop_id:s.id,stop_name:s.name,line_id:m.line,direction:m.dir,
+    previous_stop_id:m.fromId??null,next_stop_id:m.toId??null,verdict,
+    latitude:c?c.lat:null,longitude:c?c.lon:null,candidate_index:index??null,
+    model_resolution:m.model_resolution,model_candidate:m.published?m.model:null,recorded_at:new Date().toISOString()});
+  document.getElementById("ncorr").textContent=corrections.size;show(s);
+}
+document.getElementById("save").onclick=()=>{
+  const blob=new Blob([JSON.stringify([...corrections.values()],null,1)],{type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="corrections.json";a.click();
+};
+document.getElementById("load").onchange=e=>{const file=e.target.files[0];if(!file)return;
+  file.text().then(text=>{for(const r of JSON.parse(text))corrections.set([r.stop_id,r.line_id,r.direction,r.previous_stop_id??"",r.next_stop_id??""].join("|"),r);
+    document.getElementById("ncorr").textContent=corrections.size;if(current)show(current);});};
+const dis=s=>s.movements.filter(m=>m.published&&m.model!==m.baseline).length;
+function list(){
+  const q=document.getElementById('q').value.toLowerCase(),f=document.getElementById('f').value;
+  const el=document.getElementById('stops');el.innerHTML='';
+  DATA.filter(s=>s.name.toLowerCase().includes(q)&&(f==='all'||dis(s)>0))
+      .sort((a,b)=>a.name.localeCompare(b.name,'cs'))
+      .forEach(s=>{const d=document.createElement('div');d.textContent=`${s.name} (${s.candidates.length} posts, ${dis(s)} diff)`;
+        if(current===s)d.className='sel';d.onclick=()=>show(s);el.appendChild(d);});
+}
+function label(s,i){if(i==null)return '<span class="dim">–</span>';const c=s.candidates[i];return `#${i} P${c.post}${c.ref?' ['+c.ref+']':''}${c.bay?' bay':''}`;}
+function show(s){
+  if(current!==s)selected=null;current=s;list();layer.clearLayers();ring.clearLayers();
+  const b=[];
+  s.candidates.forEach((c,i)=>{b.push([c.lat,c.lon]);
+    L.circleMarker([c.lat,c.lon],{radius:7,color:'#333',weight:1,fillOpacity:c.support>1?.9:.35,fillColor:c.bay?'#139c8c':'#e08a2c'})
+     .on('click',()=>{if(selected!=null)record(s,s.movements[selected],'post',i);})
+     .bindTooltip(`#${i} post P${c.post} (${c.support} sources) · ${c.ref?'ref '+c.ref+' · ':''}${c.source}${c.routes?' · lines '+c.routes:''}${c.station?' · in bus_station':''}`,{permanent:false})
+     .addTo(layer);
+    L.tooltip({permanent:true,direction:'right',offset:[6,0],className:''}).setLatLng([c.lat,c.lon]).setContent(String(i)+(c.ref?' ['+c.ref+']':'')+' · P'+c.post+'/'+c.support).addTo(layer);});
+  map.fitBounds(b,{maxZoom:19,padding:[40,40]});
+  const rows=s.movements.map((m,k)=>{
+    const same=m.model===m.baseline;
+    const done=corrections.get(key(s,m));
+    return `<tr class="row${done?' done':''}${selected===k?' hi':''}" data-k="${k}"><td>${m.line}/${m.dir}${m.role!=='through'?' '+m.role:''}${done?'<br><span class="same">'+(done.verdict==='none'?'∅':'#'+done.candidate_index)+'</span>':''}</td>
+      <td class="dim">${m.from??'∅'} → ${m.to??'∅'}</td>
+      <td class="m">${m.published?label(s,m.model):'<span class="dim">abstain</span>'}<br><span class="dim">${m.model_resolution==='Area'?'area ':''}p=${m.p}</span></td>
+      <td class="${same&&m.published?'same':'b'}">${m.baseline!=null?label(s,m.baseline):'–'}<br><span class="dim">${m.resolution||'–'}${m.resolution==='Side'?' · group of '+m.group.length:''}</span></td>
+      <td class="dim">${m.n}<br><button class="v" data-ok="${k}" title="model right"${m.published?'':' disabled'}>✓</button><button class="v" data-none="${k}" title="no correct post">∅</button></td></tr>`;}).join('');
+  document.getElementById('detail').innerHTML=`<h3 style="margin:8px 0 2px">${s.name}</h3>
+   <div class="dim">stop ${s.id} · ${s.candidates.length} candidate posts · ${s.candidates.filter(c=>c.bay).length} bays</div>
+   <table><tr><th>Line/dir</th><th>from → to</th><th class="m">Model</th><th class="b">Policy</th><th>ctx</th></tr>${rows}</table>`;
+  document.querySelectorAll('button[data-ok]').forEach(b=>b.onclick=e=>{e.stopPropagation();const m=s.movements[+b.dataset.ok];record(s,m,'post',m.model);});
+  document.querySelectorAll('button[data-none]').forEach(b=>b.onclick=e=>{e.stopPropagation();record(s,s.movements[+b.dataset.none],'none',null);});
+  document.querySelectorAll('tr.row').forEach(tr=>tr.onclick=()=>{selected=+tr.dataset.k;
+    document.querySelectorAll('tr.hi').forEach(x=>x.classList.remove('hi'));tr.classList.add('hi');
+    const m=s.movements[+tr.dataset.k];ring.clearLayers();
+    if(m.published&&m.model!=null){const c=s.candidates[m.model];L.circleMarker([c.lat,c.lon],{radius:13,color:'#1d5fd1',weight:4,fill:false}).addTo(ring);}
+    // Side: the published coordinate is the group's representative post; outline the rest of the group.
+    (m.group||[]).forEach(i=>{if(i!==m.baseline){const c=s.candidates[i];L.circleMarker([c.lat,c.lon],{radius:11,color:'#c0392b',weight:1.5,fill:false}).addTo(ring);}});
+    if(m.baseline!=null){const c=s.candidates[m.baseline];L.circleMarker([c.lat,c.lon],{radius:18,color:'#c0392b',weight:3,dashArray:'4 4',fill:false}).addTo(ring);}
+  });
+}
+document.getElementById('q').oninput=list;document.getElementById('f').onchange=list;
+list();const first=DATA.find(s=>/Litvínov.*nádr/i.test(s.name))||DATA[0];if(first)show(first);
+</script></body></html>

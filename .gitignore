@@ -18,3 +18,7 @@
 !/scripts/czptt_agency_map.fsx
 !/scripts/verify_regional_overlay.py
 !/scripts/overlay-profile/
+!/scripts/post-scorer/
+/scripts/post-scorer/.venv/
+/scripts/post-scorer/.pytest_cache/
+**/__pycache__/
