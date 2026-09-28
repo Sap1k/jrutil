@@ -636,61 +636,87 @@ let private projectedTripFeatures message calls journey =
             | _ -> None
         (if wheelchair then Some "1" else None), bikes, (positiveBike && prohibitedBike)
 
+let private inconsistentTime (call: NormalizedCall) =
+    parameterValues "CZInconsistentTime" call.location.NetworkSpecificParameter
+    |> Seq.exists ((=) "1")
+
+let private forceMonotonicFlaggedTimes message (calls: NormalizedCall array) =
+    let adjusted = Array.copy calls
+    let diagnostics = ResizeArray<string>()
+    for index in 0 .. calls.Length - 1 do
+        let call = adjusted.[index]
+        if inconsistentTime call then
+            let previous =
+                adjusted.[..index - 1]
+                |> Array.tryFindBack (fun value ->
+                    value.departure.IsSome || value.arrival.IsSome)
+            let following =
+                calls.[index + 1..]
+                |> Array.tryFind (fun value ->
+                    not (inconsistentTime value)
+                    && (value.arrival.IsSome || value.departure.IsSome))
+            match previous, following with
+            | Some left, Some right ->
+                let leftTime = left.departure |> Option.orElse left.arrival |> Option.get
+                let rightTime = right.arrival |> Option.orElse right.departure |> Option.get
+                if rightTime >= leftTime then
+                    let span = right.sourceIndex - left.sourceIndex
+                    let inferred =
+                        int64 leftTime
+                        + int64 (rightTime - leftTime)
+                            * int64 (call.sourceIndex - left.sourceIndex) / int64 span
+                        |> int
+                    let arrival =
+                        match call.arrival |> Option.orElse call.departure with
+                        | Some value when value >= leftTime && value <= rightTime -> value
+                        | _ -> inferred
+                    let departure =
+                        match call.departure |> Option.orElse call.arrival with
+                        | Some value when value >= arrival && value <= rightTime -> value
+                        | _ -> arrival
+                    if call.arrival <> Some arrival || call.departure <> Some departure then
+                        adjusted.[index] <- {
+                            call with
+                                arrival = Some arrival
+                                departure = Some departure
+                        }
+                        diagnostics.Add(
+                            $"{paId message}: corrected CZInconsistentTime at source " +
+                            $"sequence {call.sourceIndex + 1} from " +
+                            $"arrival={call.arrival}, departure={call.departure} to " +
+                            $"arrival={arrival}, departure={departure}")
+            | _ -> ()
+    adjusted, diagnostics.ToArray()
+
 let private chronologyError (message: CzPttXml.CzpttcisMessage)
                             (calls: NormalizedCall array) =
-    let rootInconsistent =
-        parameterValues "CZInconsistentTime" message.NetworkSpecificParameter
-        |> Seq.exists ((=) "1")
-    let inconsistent =
-        calls
-        |> Array.tryFind (fun call ->
-            parameterValues "CZInconsistentTime" call.location.NetworkSpecificParameter
-            |> Seq.exists ((=) "1"))
-    match rootInconsistent, inconsistent with
-    | true, _ ->
-        Some {
-            paId = paId message
-            reason = "CZInconsistentTime=1"
-            sequence = None
-            previousSeconds = None
-            currentSeconds = None
-        }
-    | false, Some call ->
-        Some {
-            paId = paId message
-            reason = "CZInconsistentTime=1"
-            sequence = Some (call.sourceIndex + 1)
-            previousSeconds = None
-            currentSeconds = call.arrival |> Option.orElse call.departure
-        }
-    | false, None ->
-        let mutable previous: int option = None
-        let mutable error: RejectedJourney option = None
-        for call in calls do
-            if error.IsNone then
-                match call.arrival, call.departure with
-                | Some arrival, Some departure when departure < arrival ->
+    let mutable previous: int option = None
+    let mutable error: RejectedJourney option = None
+    for call in calls do
+        if error.IsNone then
+            match call.arrival, call.departure with
+            | Some arrival, Some departure when departure < arrival ->
+                error <- Some {
+                    paId = paId message
+                    reason = "departure precedes arrival"
+                    sequence = Some (call.sourceIndex + 1)
+                    previousSeconds = Some arrival
+                    currentSeconds = Some departure
+                }
+            | _ ->
+                let first = call.arrival |> Option.orElse call.departure
+                let last = call.departure |> Option.orElse call.arrival
+                match previous, first with
+                | Some prior, Some current when current < prior ->
                     error <- Some {
                         paId = paId message
-                        reason = "departure precedes arrival"
+                        reason = "event precedes previous event"
                         sequence = Some (call.sourceIndex + 1)
-                        previousSeconds = Some arrival
-                        currentSeconds = Some departure
+                        previousSeconds = Some prior
+                        currentSeconds = Some current
                     }
-                | _ ->
-                    let first = call.arrival |> Option.orElse call.departure
-                    let last = call.departure |> Option.orElse call.arrival
-                    match previous, first with
-                    | Some prior, Some current when current < prior ->
-                        error <- Some {
-                            paId = paId message
-                            reason = "event precedes previous event"
-                            sequence = Some (call.sourceIndex + 1)
-                            previousSeconds = Some prior
-                            currentSeconds = Some current
-                        }
-                    | _ -> previous <- last |> Option.orElse previous
-        error
+                | _ -> previous <- last |> Option.orElse previous
+    error
 
 let hasPublicLocations (message: CzPttXml.CzpttcisMessage) =
     message.CzpttInformation.CzpttLocation |> Array.exists isPublicLocation
@@ -1740,7 +1766,9 @@ let convertWithPointNamesAndOptions catalog options pointNames
     let approximations = ResizeArray<string>()
     let boundaryAdjustments = ResizeArray<BoundaryAdjustment>()
     for message in messages |> Seq.sortBy paId do
-        let calls = normalize catalog message
+        let calls, timingDiagnostics =
+            normalize catalog message |> forceMonotonicFlaggedTimes message
+        approximations.AddRange(timingDiagnostics)
         noteContexts.Add(message, calls)
         if not (calls |> Array.exists (fun call -> call.passenger)) then
             rejected.Add {

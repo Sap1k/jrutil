@@ -1781,15 +1781,78 @@ type CzPttToGtfsTests() =
             result.rejectedJourneys.[0].reason)
 
     [<TestMethod>]
-    member _.``CZInconsistentTime root parameter rejects the complete PA``() =
+    member _.``CZInconsistentTime root parameter accepts monotonic source times``() =
         let value =
             message [
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] [ "CZInconsistentTime", "1" ]
         let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(1, result.feed.trips.Length)
+        Assert.AreEqual(0, result.rejectedJourneys.Length)
+
+    [<TestMethod>]
+    member _.``Flagged backward passenger times are bounded by surrounding calls``() =
+        let value =
+            message [
+                location "53254" "Libice nad Cidlinou" "08:00:00" ["0001"] None []
+                location "53234" "Poděbrady" "08:05:00" ["0001"] None
+                    ["CZInconsistentTime", "1"]
+                location "53244" "Velké Zboží" "08:04:00" ["0001"] None []
+            ] []
+        let flagged = value.CzpttInformation.CzpttLocation.[1]
+        flagged.TimingAtLocation.Timing.[1].Time <- "08:00:00.0000000+01:00"
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(1, result.feed.trips.Length)
+        Assert.AreEqual(0, result.rejectedJourneys.Length)
+        let corrected =
+            result.feed.stopTimes |> Array.find (fun call -> call.stopSequence = 2)
+        Assert.AreEqual(
+            8.0 * 3600.0 + 2.0 * 60.0,
+            corrected.arrivalTime.Value.ToDuration().TotalSeconds)
+        Assert.AreEqual(corrected.arrivalTime, corrected.departureTime)
+        Assert.AreEqual(Some GtfsModel.Exact, corrected.timepoint)
+        let operational =
+            result.operationalCalls |> Array.find (fun call -> call.sourceSequence = 2)
+        Assert.AreEqual(Some (8 * 3600 + 2 * 60), operational.arrivalSeconds)
+        Assert.AreEqual(Some (8 * 3600 + 2 * 60), operational.departureSeconds)
+        Assert.IsTrue(
+            result.sidecarBoundaryApproximations
+            |> Array.exists (fun value -> value.Contains("CZInconsistentTime")))
+
+    [<TestMethod>]
+    member _.``Flagged departure is raised to a valid arrival``() =
+        let value =
+            message [
+                location "58026" "Km 20,700" "08:00:00" ["0001"] None []
+                location "53050" "Chlumec nad Cidlinou" "08:03:00" ["0001"] None
+                    ["CZInconsistentTime", "1"]
+                location "53060" "Nové Město nad Cidlinou" "08:06:00" ["0001"] None []
+            ] []
+        value.CzpttInformation.CzpttLocation.[1].TimingAtLocation.Timing.[1].Time
+            <- "08:01:00.0000000+01:00"
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        Assert.AreEqual(1, result.feed.trips.Length)
+        let corrected =
+            result.feed.stopTimes |> Array.find (fun call -> call.stopSequence = 2)
+        Assert.AreEqual(
+            8.0 * 3600.0 + 3.0 * 60.0,
+            corrected.arrivalTime.Value.ToDuration().TotalSeconds)
+        Assert.AreEqual(corrected.arrivalTime, corrected.departureTime)
+        Assert.AreEqual(Some GtfsModel.Exact, corrected.timepoint)
+
+    [<TestMethod>]
+    member _.``Flagged call with backward surrounding anchors is rejected``() =
+        let value =
+            message [
+                location "53254" "Libice nad Cidlinou" "08:10:00" ["0001"] None []
+                location "53234" "Poděbrady" "08:08:00" ["0001"] None
+                    ["CZInconsistentTime", "1"]
+                location "53244" "Velké Zboží" "08:05:00" ["0001"] None []
+            ] []
+        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(0, result.feed.trips.Length)
-        Assert.AreEqual("CZInconsistentTime=1", result.rejectedJourneys.[0].reason)
+        Assert.AreEqual(1, result.rejectedJourneys.Length)
 
     [<TestMethod>]
     member _.``Explicit IDS fare band creates trip-stop zones``() =
