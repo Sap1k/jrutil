@@ -505,14 +505,53 @@ let spatialIsolationAdjustment (policy:PostInferencePolicyV2) distanceMetres =
         policy.spatialIsolation.maximumAdjustment
         * min 1.0 (distance/policy.spatialIsolation.minimumSeparationMetres)
 
+/// Whether an observed post mode (ROAD, BUS, TRAM, TROLLEYBUS, SHARED) can
+/// serve a JDF context mode (A bus, E tram, T trolleybus).
+let modeCompatible (mode:string) (value:string) =
+    value="SHARED" || value=mode
+    || (mode="A" && (value="BUS" || value="ROAD"))
+    || (mode="E" && value="TRAM")
+    || (mode="T" && (value="TROLLEYBUS" || value="BUS" || value="ROAD"))
+
+[<Literal>]
+let ModeInheritanceRadiusMetres = 15.0
+
+/// A candidate whose known modes all exclude the context mode (e.g. a
+/// tram-only stop position for a bus line) cannot be the context's post.
+/// Candidates without known modes are never rejected here.
+let modeIncompatible mode (knownModes:string array) =
+    knownModes.Length>0 && not(knownModes |> Array.exists(modeCompatible mode))
+
+/// Modes a hypothesis is known to serve: its own explicit modes, or, when a
+/// source gives none (typical for catalogue points), the union of the explicit
+/// modes of hypotheses of the same stop within `ModeInheritanceRadiusMetres`.
+/// A modeless point next to a bus post therefore stays compatible, and one
+/// that only sits next to tram stops is treated as a tram stop.
+let effectiveModes (candidates:(string*int64*float*float*string array) array) =
+    let metres (latitude1:float) longitude1 latitude2 longitude2 =
+        let latitude=(latitude1+latitude2)*0.5*Math.PI/180.0
+        let dx=(longitude1-longitude2)*111320.0*Math.Cos(latitude)
+        let dy=(latitude1-latitude2)*110540.0
+        Math.Sqrt(dx*dx+dy*dy)
+    let byStop = candidates |> Array.groupBy (fun (_,stopId,_,_,_) -> stopId)
+    [| for _,group in byStop do
+           for id,_,latitude,longitude,modes in group do
+               let known =
+                   if modes.Length>0 then modes
+                   else
+                       group
+                       |> Array.filter(fun (otherId,_,otherLatitude,otherLongitude,otherModes) ->
+                           otherId<>id && otherModes.Length>0
+                           && metres latitude longitude otherLatitude otherLongitude<=ModeInheritanceRadiusMetres)
+                       |> Array.collect(fun (_,_,_,_,otherModes) -> otherModes)
+                       |> Array.distinct |> Array.sort
+               yield id,known |]
+    |> Map.ofArray
+
 let modalitySupportAdjustments (policy:PostInferencePolicyV2)
                                mode supportWeight
                                (explicitModes:string array) (deniedModes:string array) =
-    let compatible value =
-        value="SHARED" || value=mode
-        || (mode="A" && (value="BUS" || value="ROAD"))
-        || (mode="E" && value="TRAM")
-        || (mode="T" && (value="TROLLEYBUS" || value="BUS" || value="ROAD"))
+    let compatible = modeCompatible mode
     let source =
         min policy.modality.maximumSourceSupportAdjustment
             (max 0.0 (supportWeight-1.0)*policy.modality.sourceSupportPerWeight)

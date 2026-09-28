@@ -125,6 +125,8 @@ type BundleExecutionOptions = {
     reviewStopsPath: string option
     capturePostInferenceEvidencePath: string option
     postInferenceEvidenceOnly: bool
+    captureRestriction: JdfPostEvidence.CaptureRestriction
+    exportPostContextCallsPath: string option
     postInferenceEvidencePath: string option
     postInferencePolicyPath: string option
     includePostInferenceScores: bool
@@ -139,6 +141,8 @@ let defaultBundleExecutionOptions = {
     reviewStopsPath = None
     capturePostInferenceEvidencePath = None
     postInferenceEvidenceOnly = false
+    captureRestriction = JdfPostEvidence.noCaptureRestriction
+    exportPostContextCallsPath = None
     postInferenceEvidencePath = None
     postInferencePolicyPath = None
     includePostInferenceScores = true
@@ -1151,6 +1155,68 @@ let private writeEvidenceMappedNullableValues<'T,'Row when 'T:(new:unit->'T)
                          Nullable<ReadOnlyMemory<int>>(),null,CancellationToken.None)
     |> fun operation -> operation.GetAwaiter().GetResult()
 
+/// Training/review sidecar: every usable road/tram call in the capture region
+/// with its evidence context ID and GTFS trip identity. `stop_occurrence`
+/// numbers repeated calls at one stop within a trip from zero, so external
+/// call mappings can be joined on (trip, stop, occurrence) without assuming
+/// JDF and GTFS call ordinals agree.
+let private writePostContextCalls descriptor captureToolVersion routingPbfSha256 packId
+                                  (restriction:JdfPostEvidence.CaptureRestriction)
+                                  (batch:JdfModel.JdfBatch) path =
+    let precise=
+        batch.stopLocations
+        |> Seq.filter(fun value -> value.precision=JdfModel.StopPrecise)
+        |> Seq.groupBy _.stopId
+        |> Seq.map(fun (stopId,values) ->
+            let value=values |> Seq.sortBy(fun item -> item.lat,item.lon) |> Seq.head
+            stopId,struct(float value.lon,float value.lat)) |> Map.ofSeq
+    let inRegion stopId =
+        match restriction.stopRegion with
+        | None -> true
+        | Some region ->
+            precise |> Map.tryFind stopId
+            |> Option.exists(JdfPostEvidence.captureStopRegionContains region)
+    let rows = seq {
+        let occurrences=Dictionary<int64,int>()
+        let mutable currentTrip=None
+        for call in JdfPostEvidence.contextCallsForBatch batch do
+            let trip=Some(call.routeId,call.routeDistinction,call.tripId)
+            if trip<>currentTrip then
+                currentTrip<-trip
+                occurrences.Clear()
+            let occurrence=
+                match occurrences.TryGetValue(call.key.stopId) with
+                | true,value -> value
+                | _ -> 0
+            occurrences.[call.key.stopId]<-occurrence+1
+            if inRegion call.key.stopId then yield call,occurrence }
+    let fields:DataField array = [|
+        DataField<string>("gtfs_trip_id",false); DataField<string>("route_id",false)
+        DataField<int>("route_distinction",false); DataField<int64>("trip_id",false)
+        DataField<int>("call_index",false); DataField<int64>("route_stop_id",false)
+        DataField<int64>("stop_id",false); DataField<int>("stop_occurrence",false)
+        DataField<string>("context_id",false); DataField<string>("same_stop_block_role",false)
+        DataField<string>("mode",false); DataField<int>("direction",false)
+        DataField<string>("authored_post_key",true) |]
+    writeTypedEvidenceParquet descriptor captureToolVersion routingPbfSha256 packId
+        "post_context_calls" path fields rows
+        (fun group fields chunk ->
+            let strings index mapping = writeEvidenceMappedStrings group fields index chunk mapping
+            strings 0 (fun ((call:JdfPostEvidence.PostContextCall),_) ->
+                JdfToGtfs.jdfTripId call.routeId call.routeDistinction call.tripId)
+            strings 1 (fun (call,_) -> call.routeId)
+            writeEvidenceMappedValues group fields 2 chunk (fun (call,_) -> call.routeDistinction)
+            writeEvidenceMappedValues group fields 3 chunk (fun (call,_) -> call.tripId)
+            writeEvidenceMappedValues group fields 4 chunk (fun (call,_) -> call.callIndex)
+            writeEvidenceMappedValues group fields 5 chunk (fun (call,_) -> call.call.routeStopId)
+            writeEvidenceMappedValues group fields 6 chunk (fun (call,_) -> call.key.stopId)
+            writeEvidenceMappedValues group fields 7 chunk (fun (_,occurrence) -> occurrence)
+            strings 8 (fun (call,_) -> call.contextId)
+            strings 9 (fun (call,_) -> call.key.sameStopBlockRole)
+            strings 10 (fun (call,_) -> call.key.mode)
+            writeEvidenceMappedValues group fields 11 chunk (fun (call,_) -> call.key.direction)
+            strings 12 (fun (call,_) -> call.key.authoredPostKey |> Option.toObj))
+
 let private parquetSchemaFingerprint path =
     use stream=File.OpenRead(path)
     let reader=ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
@@ -1571,6 +1637,148 @@ let replayPostInferenceEvidence evidencePath policyPath policyGridPath expectati
                           JdfPostEvidenceStore.noIdentityExpectation evidenceFull
     JdfPostInferenceEvaluator.writeReplayReport evidenceStore policyPath policyGridPath
         expectationsPath reviewStopsPath outputPath
+let private writeFeatureParquet (manifest:JdfPostInference.PostInferenceEvidenceManifest)
+                                policyId relationName path
+                                (fields:DataField array) (rows:seq<'T>)
+                                (writeGroup:ParquetRowGroupWriter -> DataField array -> 'T array -> unit) =
+    let schema=ParquetSchema(fields |> Array.map(fun value -> value :> Field))
+    let options=ParquetOptions(CompressionMethod=CompressionMethod.Snappy)
+    let metadata=Dictionary<string,string>()
+    metadata.Add("obehy.relation",relationName)
+    metadata.Add("obehy.pack_id",manifest.packId)
+    metadata.Add("obehy.capture_tool_version",manifest.captureToolVersion)
+    metadata.Add("obehy.evaluator_version",JdfPostInference.EvaluatorVersion)
+    metadata.Add("obehy.policy_id",policyId)
+    use stream=File.Open(path,FileMode.CreateNew,FileAccess.Write,FileShare.None)
+    let writer=ParquetWriter.CreateAsync(schema,stream,options,false,CancellationToken.None)
+               |> fun operation -> operation.GetAwaiter().GetResult()
+    writer.CustomMetadata<-metadata
+    try
+        for chunk in rows |> Seq.chunkBySize 65536 do
+            use rowGroup=writer.CreateRowGroup()
+            writeGroup rowGroup fields chunk
+    finally writer.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+/// Training/analysis export: the evaluator's per-(context, candidate, variant)
+/// diagnostic rows, consolidated hypotheses and one policy's decisions.
+/// Raw context, variant and observation facts are read from the pack itself.
+/// A v2 policy file (heuristic) or a v3 document with a learned scorer; the compiled
+/// default policy with the heuristic scorer when no path is given.
+let private policyAndScorer (policyPath:string option) =
+    match policyPath with
+    | Some path ->
+        let loaded=JdfPostInferencePolicy.loadPolicyWithScorer path
+        loaded.policy,loaded.scorer
+    | None -> JdfPostInferencePolicy.conservativeRoutedV4,JdfPostInferencePolicy.HeuristicScorer
+
+let exportPostInferenceFeatures evidencePath policyPath outputPath =
+    let evidenceFull=Path.GetFullPath(evidencePath)
+    let outputFull=Path.GetFullPath(outputPath)
+    if Directory.Exists(outputFull) || File.Exists(outputFull) then
+        invalidArg "outputPath" $"Feature export output already exists: {outputFull}"
+    use store=JdfPostEvidenceStore.openValidatedStore
+                  JdfPostEvidenceStore.noIdentityExpectation evidenceFull
+    let manifest=store.Manifest
+    let policy,scorer=policyAndScorer policyPath
+    use result=JdfPostInferenceEvaluator.evaluateWithScorer true store policy scorer
+    let temporary=outputFull + $".tmp-{Guid.NewGuid():N}"
+    Directory.CreateDirectory(temporary) |> ignore
+    try
+        let write name fields rows writeGroup =
+            writeFeatureParquet manifest policy.policyId name (Path.Combine(temporary,name))
+                fields rows writeGroup
+        let text name = field<string> name true
+        let number name = field<double> name true
+        let integer name = field<int> name false
+        let flag name = field<bool> name false
+        let scoreFields = [|
+            text "context_id";text "candidate_id";integer "variant_rank";flag "eligible"
+            number "alignment";number "side";number "proximity";number "routed_fit"
+            number "routed_excess_metres";text "corridor_id";text "ingress_thread_id"
+            text "egress_thread_id";text "corridor_face_id";text "routing_availability"
+            integer "alternative_corridor_count";number "alternative_cost_gap"
+            flag "tied_corridors_agree";number "corridor_distance";number "signed_lateral_offset"
+            number "corridor_heading";number "attachment_heading";number "snap_fraction"
+            text "topology_failure_reason";number "source_adjustment";number "modality_adjustment"
+            number "popularity_adjustment";number "total";text "rejection_reason" |]
+        write "diagnostic_scores.parquet" scoreFields (result.DiagnosticScores.ReadRows())
+            (fun group fields (rows:JdfPostInference.PostInferenceDiagnosticScore array) ->
+                let strings index mapping = writeEvidenceMappedStrings group fields index rows mapping
+                let optionalText index (mapping:JdfPostInference.PostInferenceDiagnosticScore -> string option) =
+                    strings index (mapping >> Option.toObj)
+                let values index mapping = writeEvidenceMappedNullableValues group fields index rows mapping
+                strings 0 _.contextId; strings 1 _.candidateId
+                writeEvidenceMappedValues group fields 2 rows _.variantRank
+                writeEvidenceMappedValues group fields 3 rows _.eligible
+                values 4 (fun value -> Some value.alignment); values 5 (fun value -> Some value.side)
+                values 6 (fun value -> Some value.proximity); values 7 (fun value -> Some value.routedExcess)
+                values 8 _.routedExcessMetres; optionalText 9 _.corridorId
+                optionalText 10 _.ingressThreadId; optionalText 11 _.egressThreadId
+                optionalText 12 _.corridorFaceId; strings 13 _.routingAvailability
+                writeEvidenceMappedValues group fields 14 rows _.alternativeCorridorCount
+                values 15 _.alternativeCostGap
+                writeEvidenceMappedValues group fields 16 rows _.tiedCorridorsAgree
+                values 17 _.corridorDistance; values 18 _.signedLateralOffset
+                values 19 _.corridorHeading; values 20 _.attachmentHeading
+                values 21 _.snapFraction; optionalText 22 _.topologyFailureReason
+                values 23 (fun value -> Some value.sourceAdjustment)
+                values 24 (fun value -> Some value.modalityAdjustment)
+                values 25 (fun value -> Some value.popularityAdjustment)
+                values 26 (fun value -> Some value.total); optionalText 27 _.rejectionReason)
+        let hypothesisFields = [|
+            text "hypothesis_id";field<int64> "stop_id" false
+            text "representative_route_point_id";text "member_route_point_ids"
+            text "member_observation_ids";number "latitude";number "longitude" |]
+        write "hypotheses.parquet" hypothesisFields result.Hypotheses
+            (fun group fields (rows:JdfPostInference.ConsolidatedPostHypothesis array) ->
+                let strings index mapping = writeEvidenceMappedStrings group fields index rows mapping
+                strings 0 _.hypothesisId
+                writeEvidenceMappedValues group fields 1 rows _.stopId
+                strings 2 _.representativeRoutePointId
+                strings 3 (fun value -> String.Join(";",value.memberRoutePointIds))
+                strings 4 (fun value -> String.Join(";",value.memberObservationIds))
+                writeEvidenceMappedNullableValues group fields 5 rows (fun value -> Some value.latitude)
+                writeEvidenceMappedNullableValues group fields 6 rows (fun value -> Some value.longitude))
+        let sideGroupFields = [|
+            text "side_group_id";field<int64> "stop_id" false;text "mode";text "corridor_face_id"
+            text "member_hypothesis_ids";text "representative_hypothesis_id";text "sector"
+            number "latitude";number "longitude";number "compactness_metres";integer "support" |]
+        write "side_groups.parquet" sideGroupFields result.SideGroups
+            (fun group fields (rows:JdfPostInference.GlobalPostSideGroup array) ->
+                let strings index mapping = writeEvidenceMappedStrings group fields index rows mapping
+                strings 0 _.sideGroupId
+                writeEvidenceMappedValues group fields 1 rows _.stopId
+                strings 2 _.mode; strings 3 _.corridorFaceId
+                strings 4 (fun value -> String.Join(";",value.memberHypothesisIds))
+                strings 5 _.representativeHypothesisId; strings 6 _.sector
+                writeEvidenceMappedNullableValues group fields 7 rows (fun value -> Some value.latitude)
+                writeEvidenceMappedNullableValues group fields 8 rows (fun value -> Some value.longitude)
+                writeEvidenceMappedNullableValues group fields 9 rows (fun value -> Some value.compactnessMetres)
+                writeEvidenceMappedValues group fields 10 rows _.support)
+        let assignmentFields = [|
+            text "context_id";field<int64> "stop_id" false;text "mode";text "line_id"
+            text "assignment_kind";text "authored_post_key";text "same_stop_block_role"
+            text "movement_family_id";text "resolution";text "selected_location_id"
+            text "selected_hypothesis_id";text "selected_side_group_id";number "score";number "margin" |]
+        write "assignments.parquet" assignmentFields (result.Assignments.ReadRows())
+            (fun group fields (rows:JdfPostInference.ContextPostAssignment array) ->
+                let strings index mapping = writeEvidenceMappedStrings group fields index rows mapping
+                let optionalText index (mapping:JdfPostInference.ContextPostAssignment -> string option) =
+                    strings index (mapping >> Option.toObj)
+                strings 0 _.contextId
+                writeEvidenceMappedValues group fields 1 rows _.stopId
+                strings 2 _.mode; strings 3 _.lineId; strings 4 _.assignmentKind
+                optionalText 5 _.authoredPostKey; strings 6 _.sameStopBlockRole
+                strings 7 _.movementFamilyId; strings 8 _.resolution
+                optionalText 9 _.selectedLocationId; optionalText 10 _.selectedHypothesisId
+                optionalText 11 _.selectedSideGroupId
+                writeEvidenceMappedNullableValues group fields 12 rows _.score
+                writeEvidenceMappedNullableValues group fields 13 rows _.margin)
+        JdfPostInferencePolicy.writePolicy (Path.Combine(temporary,"policy.json")) policy
+        Directory.Move(temporary,outputFull)
+    finally
+        if Directory.Exists(temporary) then Directory.Delete(temporary,true)
+
 let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
                         (callFacts: CallDerivedFacts)
                         (emittedTransferCalls: HashSet<struct (string * int64)>) =
@@ -1833,8 +2041,9 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
         writer.WriteNumber(routeType, values |> Seq.length)
     writer.WriteEndObject()
     writer.WriteStartObject("estimated_posts")
+    let selectedDocument = postInferencePolicyPath |> Option.map JdfPostInferencePolicy.loadPolicyWithScorer
     let selectedPolicy =
-        postInferencePolicyPath |> Option.map JdfPostInferencePolicy.loadPolicy
+        selectedDocument |> Option.map _.policy
         |> Option.defaultValue JdfPostInferencePolicy.conservativeRoutedV4
     writer.WriteString("execution_mode",
         if postInferenceEvidencePath.IsSome && routingPbfPath.IsSome then "live"
@@ -1844,6 +2053,13 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteNumber("policy_schema_version",selectedPolicy.schemaVersion)
     writer.WriteString("policy_id",selectedPolicy.policyId)
     writer.WriteString("policy_sha256",JdfPostInferencePolicy.policySha256 selectedPolicy)
+    writer.WriteString("scorer",
+        match selectedDocument |> Option.map _.scorer with
+        | Some(JdfPostInferencePolicy.LearnedScorer _) -> "learned"
+        | _ -> "heuristic")
+    match selectedDocument with
+    | Some document -> writer.WriteString("policy_document_sha256",document.documentSha256)
+    | None -> writer.WriteNull("policy_document_sha256")
     writer.WriteBoolean("diagnostic_labels", diagnosticPostLabels)
     match routingPbfPath with
     | Some value ->
@@ -2112,6 +2328,13 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
                                                    inputPath evidencePath =
     if String.IsNullOrWhiteSpace(converterVersion) then
         invalidArg "converterVersion" "Converter version is required"
+    if JdfPostEvidence.isRestrictedCaptureToolVersion converterVersion then
+        invalidArg "converterVersion" "Converter version must not contain a capture restriction marker"
+    // A restricted pack records its restriction in the tool version, and
+    // therefore in the pack ID.
+    let captureToolVersion =
+        converterVersion
+        + JdfPostEvidence.captureRestrictionToolVersionSuffix executionOptions.captureRestriction
     if not(jdfInputContainsRelation inputPath "JrutilPostCandidateEvidence.txt") then
         invalidArg "inputPath"
             "Post-inference evidence capture requires JrutilPostCandidateEvidence.txt"
@@ -2191,26 +2414,40 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
         progress "prepare-routing-snaps" "completed" (int64 graph.EdgeCount)
                  (Some(int64 graph.EdgeCount)) "edges" None 0
         use captured =
-            JdfPostEvidence.captureToStore
+            JdfPostEvidence.captureToStoreRestricted
                 { maximumWorkers=executionOptions.maximumWorkers
                   memoryBudgetBytes=executionOptions.memoryBudgetBytes
                   preflight=capturePreflight
                   progress=fun phase count total detail ->
                       progress phase "running" count total "items" detail
                                executionOptions.maximumWorkers }
+                executionOptions.captureRestriction
                 graph batch
         progress "capture-post-inference-evidence" "started" 0L None "rows" None 0
-        writePostEvidenceStore descriptor converterVersion stopIdsCis evidencePath routingPbfPath captured
+        writePostEvidenceStore descriptor captureToolVersion stopIdsCis evidencePath routingPbfPath captured
             (fun phase count total -> progress phase "running" count total "rows" None 1)
         let routingHash=fileSha256 routingPbfPath
         use store=JdfPostEvidenceStore.openValidatedStore
                       { mergedJdfSha256=Some descriptor.payloadSha256
                         routingPbfSha256=Some routingHash
-                        captureToolVersion=Some converterVersion }
+                        captureToolVersion=Some captureToolVersion }
                       evidencePath
         progress "capture-post-inference-evidence" "completed"
                  store.Manifest.routePointEvidenceCount
                  (Some store.Manifest.routePointEvidenceCount) "rows" None 0
+        executionOptions.exportPostContextCallsPath |> Option.iter(fun path ->
+            progress "capture-evidence-context-calls" "started" 0L None "calls" None 0
+            let full=Path.GetFullPath(path)
+            if File.Exists(full) || Directory.Exists(full) then
+                invalidArg "exportPostContextCallsPath" $"Context-call export already exists: {full}"
+            let temporary=full + $".tmp-{Guid.NewGuid():N}"
+            try
+                writePostContextCalls descriptor captureToolVersion routingHash store.Manifest.packId
+                    executionOptions.captureRestriction batch temporary
+                File.Move(temporary,full)
+            finally
+                if File.Exists(temporary) then File.Delete(temporary)
+            progress "capture-evidence-context-calls" "completed" 1L (Some 1L) "files" None 0)
         CaptureCompleted(
             store.Manifest,
             { estimatedEvidenceBytes=estimatedBytes
@@ -2283,18 +2520,18 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                               mergedJdfSha256=Some descriptor.payloadSha256 }
                           full
             let manifest=store.Manifest
+            if JdfPostEvidence.isRestrictedCaptureToolVersion manifest.captureToolVersion then
+                (store :> IDisposable).Dispose()
+                invalidArg "postInferenceEvidencePath"
+                    "Restricted post-inference evidence (region or excluded sources) is for replay review and training only; capture a complete pack for bundle conversion"
+            let policy,scorer = policyAndScorer executionOptions.postInferencePolicyPath
             let policy =
-                executionOptions.postInferencePolicyPath
-                |> Option.map JdfPostInferencePolicy.loadPolicy
-                |> Option.defaultValue JdfPostInferencePolicy.conservativeRoutedV4
+                policy
                 |> JdfPostInferencePolicy.validatePolicyForEvidence manifest.captureCeilings.routedExcessMetres manifest.captureCeilings.maximumCorridorVariants
-            store,manifest,policy)
+            store,manifest,(policy,scorer))
     let livePolicy =
-        executionOptions.postInferencePolicyPath
-        |> Option.map JdfPostInferencePolicy.loadPolicy
-        |> Option.defaultValue JdfPostInferencePolicy.conservativeRoutedV4
-        |> JdfPostInferencePolicy.validatePolicy JdfPostInference.CaptureRoutedExcessHorizonMetres
-        |> Some
+        let policy,scorer = policyAndScorer executionOptions.postInferencePolicyPath
+        Some(JdfPostInferencePolicy.validatePolicy JdfPostInference.CaptureRoutedExcessHorizonMetres policy,scorer)
     if estimatedPosts && routingPbfPath.IsSome
        && not (jdfInputContainsRelation inputPath "JrutilPostCandidateEvidence.txt") then
         invalidArg "inputPath"
@@ -2415,11 +2652,11 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             Log.Information("Bundle phase: preparing streaming JDF to GTFS conversion")
             let preparation =
                 match replayEvidence,routingGraph with
-                | Some(evidenceStore,manifest,policy),_ ->
+                | Some(evidenceStore,manifest,(policy,scorer)),_ ->
                     started "replay-post-inference" (Some manifest.routePointEvidenceCount) "rows"
                     let postPlan =
-                        JdfPostInferenceEvaluator.evaluateWithDiagnostics
-                            executionOptions.includePostInferenceScores evidenceStore policy
+                        JdfPostInferenceEvaluator.evaluateWithScorer
+                            executionOptions.includePostInferenceScores evidenceStore policy scorer
                         |> JdfToGtfs.postEstimationPlanFromInferenceResult
                     progressCompleted "replay-post-inference" manifest.routePointEvidenceCount
                                       (Some manifest.routePointEvidenceCount) "rows"
@@ -2464,8 +2701,9 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                                       (Some manifest.routePointEvidenceCount) "rows"
                     started "evaluate-post-inference" (Some manifest.routePointEvidenceCount) "rows"
                     let postPlan =
-                        JdfPostInferenceEvaluator.evaluateWithDiagnostics
-                            executionOptions.includePostInferenceScores evidenceStore livePolicy.Value
+                        let policy,scorer = livePolicy.Value
+                        JdfPostInferenceEvaluator.evaluateWithScorer
+                            executionOptions.includePostInferenceScores evidenceStore policy scorer
                         |> JdfToGtfs.postEstimationPlanFromInferenceResult
                     progressCompleted "evaluate-post-inference" manifest.routePointEvidenceCount
                                       (Some manifest.routePointEvidenceCount) "rows"
@@ -2547,7 +2785,9 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     nativeCalls.Append(JrUtil.Serving.TripCallWriter.fromGtfs stopTime location boarding routeStop)
                     nativeSummaries.Append(stopTime)
                     nativeSourceCalls.Append(stopTime)
-                    nativeRouteStops.Append(row.routeId, routeStop, stopTime.stopId)
+                    // A route stop is served at one stop place; the post (boarding point) varies by
+                    // trip and direction and is carried by trip_call.boarding_point_id.
+                    nativeRouteStops.Append(row.routeId, routeStop, location)
                     let transferKey = struct (stopTime.tripId, row.sourceRouteStopId)
                     if transferCallQueries.Contains(transferKey) then
                         emittedTransferCalls.Add(transferKey) |> ignore
@@ -2832,6 +3072,10 @@ let executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converter
         if executionOptions.capturePostInferenceEvidencePath.IsSome then
             invalidArg "executionOptions"
                 "--capture-post-inference-evidence is valid only in capture-only execution"
+        if executionOptions.captureRestriction<>JdfPostEvidence.noCaptureRestriction
+           || executionOptions.exportPostContextCallsPath.IsSome then
+            invalidArg "executionOptions"
+                "--capture-stop-region, --capture-exclude-source and --export-post-context-calls are valid only in capture-only execution"
         writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
                                   internationalPolicy internationalOverrides transportModeRules
                                   estimatedPosts routingPbfPath diagnosticPostLabels

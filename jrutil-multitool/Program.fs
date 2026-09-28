@@ -23,7 +23,8 @@ Usage:
     jrutil-multitool.exe jdf-to-gtfs [options] <JDF-in-dir> <GTFS-out-dir>
     jrutil-multitool.exe jdf-to-bundle [options] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
     jrutil-multitool.exe jdf-validate-post-inference --evidence=DIR
-    jrutil-multitool.exe jdf-replay-post-inference [options] --evidence=DIR --output=DIR
+    jrutil-multitool.exe jdf-replay-post-inference [options] [--policy=FILE] --evidence=DIR --output=DIR
+    jrutil-multitool.exe jdf-export-post-features [options] [--policy=FILE] --evidence=DIR --output=DIR
     jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
     jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
@@ -54,6 +55,9 @@ Options:
     --post-review-stops=FILE     Stop IDs/names for routed-inference review GeoJSON
     --capture-post-inference-evidence=DIR  Persist reusable policy-neutral routed evidence
     --post-inference-evidence-only         Stop after writing the evidence directory
+    --capture-stop-region=BOX              Capture only stops in MINLON,MINLAT,MAXLON,MAXLAT (review/training packs)
+    --capture-exclude-source=PREFIXES      Drop observations whose source ID starts with a comma-separated prefix
+    --export-post-context-calls=FILE       Also write per-call context IDs (Parquet) for label joins
     --post-inference-evidence=DIR          Reuse captured routed evidence without loading a graph
     --post-inference-policy=FILE           Versioned routed-inference policy JSON
     --no-post-inference-scores             Skip diagnostic score rows for publication-only bundles
@@ -510,6 +514,15 @@ let main (args: string array) =
                     reviewStopsPath = optArgValue args "--post-review-stops"
                     capturePostInferenceEvidencePath = optArgValue args "--capture-post-inference-evidence"
                     postInferenceEvidenceOnly = argFlagSet args "--post-inference-evidence-only"
+                    captureRestriction =
+                        { JdfPostEvidence.CaptureRestriction.stopRegion =
+                            optArgValue args "--capture-stop-region"
+                            |> Option.map JdfPostEvidence.parseCaptureStopRegion
+                          excludedSourcePrefixes =
+                            optArgValue args "--capture-exclude-source"
+                            |> Option.map JdfPostEvidence.parseCaptureExcludedSources
+                            |> Option.defaultValue [||] }
+                    exportPostContextCallsPath = optArgValue args "--export-post-context-calls"
                     postInferenceEvidencePath = postInferenceEvidence
                     postInferencePolicyPath = optArgValue args "--post-inference-policy"
                     includePostInferenceScores = not(argFlagSet args "--no-post-inference-scores")
@@ -568,6 +581,16 @@ let main (args: string array) =
             with e ->
                 exitCode <- 1
                 Log.Error(e,"JDF post-inference evidence validation failed")
+        else if argFlagSet args "jdf-export-post-features" then
+            try
+                JdfBundle.exportPostInferenceFeatures
+                    (argValue args "--evidence")
+                    (optArgValue args "--policy")
+                    (argValue args "--output")
+                Log.Information("Finished!")
+            with e ->
+                exitCode <- 1
+                Log.Error(e,"JDF post-inference feature export failed")
         else if argFlagSet args "jdf-replay-post-inference" then
             try
                 JdfBundle.replayPostInferenceEvidence
