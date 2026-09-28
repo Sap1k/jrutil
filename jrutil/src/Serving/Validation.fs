@@ -24,18 +24,15 @@ module Validation =
     }
     with member value.isValid = value.errors.Length = 0
 
-    let private reclaimValidationMemory () =
-        let current = Process.GetCurrentProcess()
-        current.Refresh()
-        if current.PrivateMemorySize64 >= 3_000_000_000L then
-            // Parquet validation allocates bounded row-group arrays, but the
-            // runtime otherwise keeps their committed segments across every
-            // relation.  Release those dead phase buffers between files. This
-            // is reclamation only; it does not impose a GC heap hard limit.
-            GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
-            GC.WaitForPendingFinalizers()
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+    // Parquet validation allocates bounded row-group arrays, but the runtime
+    // otherwise keeps their committed segments across every relation. Release
+    // those dead phase buffers between files and row-group batches. This is
+    // reclamation only; it does not impose a GC heap hard limit. The gate
+    // prevents repeated full collections once the footprint stays above the
+    // threshold without further growth.
+    let private reclaimGate = MemoryReclaim.gate 3_000_000_000L
+
+    let private reclaimValidationMemory () = reclaimGate.Check() |> ignore
 
     let private sha256File (path: string) =
         use stream = File.OpenRead(path)

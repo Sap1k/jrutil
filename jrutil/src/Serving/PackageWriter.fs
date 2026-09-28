@@ -190,6 +190,8 @@ module PackageWriter =
     let private writeSelectedFieldProvenance progress (path: string) (relation: Schema.Relation) rows =
         let mutable reclaimOperation = ""
         let mutable nextReclaim = 200000L
+        let reclaimGate =
+            MemoryReclaimGate(3_000_000_000L, MemoryReclaim.DefaultMinimumGrowthBytes, reclaimManagedPhaseMemory)
         let report operation count =
             progress operation count
             if operation <> reclaimOperation then
@@ -197,10 +199,7 @@ module PackageWriter =
                 nextReclaim <- 200000L
             if count >= nextReclaim then
                 while nextReclaim <= count do nextReclaim <- nextReclaim + 200000L
-                let current = Process.GetCurrentProcess()
-                current.Refresh()
-                if current.PrivateMemorySize64 >= 3_000_000_000L then
-                    reclaimManagedPhaseMemory ()
+                reclaimGate.Check() |> ignore
         let indexes = relation.fields |> Array.mapi (fun index field -> field.name, index) |> dict
         let objectTypeIndex, objectKeyIndex = indexes.["object_type"], indexes.["object_key"]
         let keyIndexes = relation.sortKey |> Array.map (fun name -> indexes.[name])
