@@ -80,6 +80,7 @@
     <Compile Include="src/Jdf/JdfMerger.fs" />
     <Compile Include="src/Jdf/JdfFixups.fs" />
     <Compile Include="src/GeoData/Osm.fs" />
+    <Compile Include="src/Jdf/JdfPostScorer.fs" />
     <Compile Include="src/Jdf/JdfPostInferencePolicy.fs" />
     <Compile Include="src/Jdf/JdfPostInference.fs" />
     <Compile Include="src/Jdf/JdfPostEvidence.fs" />

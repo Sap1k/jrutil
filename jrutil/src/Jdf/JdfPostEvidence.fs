@@ -108,6 +108,95 @@ and PostEvidenceCaptureUpperBounds = {
     routePointEvidenceCount:int64
 }
 
+/// Diagnostic capture restriction: only stops whose precise location lies in
+/// this WGS84 box receive contexts. Neighbour anchors, observations and route
+/// points stay complete, so in-region contexts are routed exactly as in a
+/// full capture. Region packs are training/review data, never publication input.
+type CaptureStopRegion = {
+    minLongitude:float;minLatitude:float;maxLongitude:float;maxLatitude:float
+}
+
+let parseCaptureStopRegion (value:string) =
+    let parts=value.Split(',') |> Array.map _.Trim()
+    let parsed=
+        parts |> Array.map(fun part ->
+            match Double.TryParse(part,Globalization.NumberStyles.Float,
+                                  Globalization.CultureInfo.InvariantCulture) with
+            | true,number when Double.IsFinite number -> number
+            | _ -> invalidArg "value" $"Invalid capture stop region coordinate: '{part}'")
+    if parsed.Length<>4 then
+        invalidArg "value" "Capture stop region must be MINLON,MINLAT,MAXLON,MAXLAT"
+    let region={minLongitude=parsed.[0];minLatitude=parsed.[1]
+                maxLongitude=parsed.[2];maxLatitude=parsed.[3]}
+    if region.minLongitude>=region.maxLongitude || region.minLatitude>=region.maxLatitude
+       || region.minLongitude< -180.0 || region.maxLongitude>180.0
+       || region.minLatitude< -90.0 || region.maxLatitude>90.0 then
+        invalidArg "value" "Capture stop region must be a non-empty WGS84 box"
+    region
+
+let captureStopRegionContains region struct(longitude:float,latitude:float) =
+    longitude>=region.minLongitude && longitude<=region.maxLongitude
+    && latitude>=region.minLatitude && latitude<=region.maxLatitude
+
+[<Literal>]
+let CaptureStopRegionMarker = "+region:"
+
+/// Suffix recorded in the pack's capture tool version, and therefore in its
+/// pack ID, so a partial pack can never be mistaken for a complete one.
+let captureStopRegionToolVersionSuffix region =
+    let format (value:float) = value.ToString("R",Globalization.CultureInfo.InvariantCulture)
+    CaptureStopRegionMarker
+    + String.Join(",",[|format region.minLongitude;format region.minLatitude
+                        format region.maxLongitude;format region.maxLatitude|])
+
+[<Literal>]
+let CaptureExcludedSourceMarker = "+exclude-source:"
+
+/// Diagnostic capture restrictions. Excluded source prefixes remove
+/// observations by `sourceObjectId` prefix (e.g. `external:PID.csv`), so a
+/// training pack cannot contain the catalogue its labels come from.
+type CaptureRestriction = {
+    stopRegion:CaptureStopRegion option
+    excludedSourcePrefixes:string array
+}
+
+let noCaptureRestriction = { stopRegion=None; excludedSourcePrefixes=[||] }
+
+let validateCaptureRestriction restriction =
+    for prefix in restriction.excludedSourcePrefixes do
+        if String.IsNullOrWhiteSpace prefix || prefix.Trim()<>prefix
+           || prefix.Contains(';') || prefix.Contains(',') then
+            invalidArg "restriction" $"Invalid excluded capture source prefix: '{prefix}'"
+    { restriction with
+        excludedSourcePrefixes=
+            restriction.excludedSourcePrefixes |> Array.distinct |> Array.sortWith(fun left right ->
+                String.CompareOrdinal(left,right)) }
+
+let parseCaptureExcludedSources (value:string) =
+    value.Split(',') |> Array.map _.Trim()
+
+let captureRestrictionToolVersionSuffix restriction =
+    let restriction=validateCaptureRestriction restriction
+    let region=
+        restriction.stopRegion
+        |> Option.map captureStopRegionToolVersionSuffix |> Option.defaultValue ""
+    let excluded=
+        if restriction.excludedSourcePrefixes.Length=0 then ""
+        else CaptureExcludedSourceMarker+String.Join(";",restriction.excludedSourcePrefixes)
+    region+excluded
+
+let isRestrictedCaptureToolVersion (value:string) =
+    not(isNull value)
+    && (value.Contains(CaptureStopRegionMarker,StringComparison.Ordinal)
+        || value.Contains(CaptureExcludedSourceMarker,StringComparison.Ordinal))
+
+let private observationExcluded restriction (observation:JdfModel.PostCandidateEvidence) =
+    match observation.sourceObjectId with
+    | Some identity ->
+        restriction.excludedSourcePrefixes
+        |> Array.exists(fun prefix -> identity.StartsWith(prefix,StringComparison.Ordinal))
+    | None -> false
+
 let defaultCaptureOptions = {
     maximumWorkers=1;memoryBudgetBytes=Int64.MaxValue
     preflight=ignore;progress=fun _ _ _ _ -> ()
@@ -246,6 +335,75 @@ let private candidateIsWithinParentCentroid centroid (candidate:JdfModel.PostCan
     distanceSquared (float candidate.lat,float candidate.lon) (latitude,longitude)
     <= maximumDistanceSquared
 
+/// One usable call of a road/tram trip with its post-evidence context
+/// identity. Capture and label extraction share this enumeration so their
+/// context IDs cannot drift apart.
+type PostContextCall = {
+    routeId:string;routeDistinction:int;tripId:int64
+    callIndex:int;call:JdfModel.TripStop
+    blockStart:int;blockFinish:int;sameStopBlockId:string option
+    key:PostEvidenceContextKey;contextId:string
+}
+
+let private postInferenceMode = function
+    | JdfModel.Bus | JdfModel.Trolleybus | JdfModel.Tram -> true
+    | _ -> false
+
+let private orderedUsableCalls (calls:JdfModel.TripStop array) =
+    calls |> Array.filter callIsUsable
+          |> Array.sortBy(fun call ->
+              call.routeStopId*(if Jdf.tripIsReverse call.tripId then -1L else 1L))
+
+let private tripDirection (ordered:JdfModel.TripStop array) =
+    if ordered.Length>0 && Jdf.tripIsReverse ordered.[0].tripId then 1 else 0
+
+let private contextCallsForOrdered routeId distinction mode
+                                   (ordered:JdfModel.TripStop array) = [|
+    let pattern=completePatternHash ordered
+    let direction=tripDirection ordered
+    let mutable start=0
+    while start<ordered.Length do
+        let stopId=ordered.[start].stopId
+        let mutable finish=start+1
+        while finish<ordered.Length && ordered.[finish].stopId=stopId do finish<-finish+1
+        let blockId=
+            if finish-start>1 then
+                Some(stableId "same-stop-block:"
+                    [|routeId;string distinction;pattern;string start;string finish|])
+            else None
+        for index=start to finish-1 do
+            let role=
+                if finish-start=1 then "through"
+                elif index=start then "incoming"
+                elif index=finish-1 then "outgoing"
+                else "interior"
+            let authored=authoredPostKey ordered.[index]
+            yield {
+                routeId=routeId;routeDistinction=distinction;tripId=ordered.[index].tripId
+                callIndex=index;call=ordered.[index]
+                blockStart=start;blockFinish=finish;sameStopBlockId=blockId
+                key={stopId=stopId;mode=modeCode mode;lineId=routeId
+                     routeDistinction=distinction;direction=direction
+                     patternHash=pattern;patternPosition=index
+                     sameStopBlockRole=role;authoredPostKey=authored}
+                contextId=
+                    stableId "context:" [|
+                        string stopId;modeCode mode;routeId;string distinction
+                        string direction;pattern;string index;role
+                        authored |> Option.defaultValue "" |] }
+        start<-finish |]
+
+/// Context identities of every usable call of every road/tram trip, without
+/// the per-pattern deduplication capture applies. Calls at stops without
+/// captured candidates are included; they simply match no context.
+let contextCallsForBatch (batch:JdfModel.JdfBatch) = seq {
+    let modes=batch.routes |> Seq.map(fun route -> (route.id,route.idDistinction),route.transportMode) |> Map.ofSeq
+    for ((routeId,distinction,_),calls) in
+            batch.tripStops |> Utils.groupAdjacentBy(fun call -> call.routeId,call.routeDistinction,call.tripId) do
+        let mode=modes.[routeId,distinction]
+        if postInferenceMode mode then
+            yield! contextCallsForOrdered routeId distinction mode (orderedUsableCalls calls) }
+
 let private medoidCoordinate (points:PostEvidenceRoutePoint array) =
     points
     |> Array.minBy(fun point ->
@@ -254,10 +412,13 @@ let private medoidCoordinate (points:PostEvidenceRoutePoint array) =
         point.routePointId)
     |> fun point -> struct(point.longitude,point.latitude)
 
-let captureToStoreWithCancellation (cancellationToken:CancellationToken)
-                                   (options:PostEvidenceCaptureOptions)
-                                   (graph:PackedRoutingGraph)(batch:JdfModel.JdfBatch) =
+let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToken)
+                                             (options:PostEvidenceCaptureOptions)
+                                             (restriction:CaptureRestriction)
+                                             (graph:PackedRoutingGraph)(batch:JdfModel.JdfBatch) =
     cancellationToken.ThrowIfCancellationRequested()
+    let restriction=validateCaptureRestriction restriction
+    let region=restriction.stopRegion
     if options.maximumWorkers<1 then invalidArg "options" "maximumWorkers must be positive"
     if options.memoryBudgetBytes<1L then invalidArg "options" "memoryBudgetBytes must be positive"
     let temporaryDirectory=Path.Combine(Path.GetTempPath(),"jrutil-post-evidence-capture")
@@ -270,6 +431,7 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
             stopId,struct(float value.lon,float value.lat)) |> Map.ofSeq
     let observationRows =
         batch.postCandidateEvidence
+        |> Seq.filter(fun value -> not(observationExcluded restriction value))
         |> Seq.filter(fun value ->
             preciseLocations
             |> Map.tryFind value.stopId
@@ -325,31 +487,33 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
     let anchors=
         pointsByStop
         |> Map.fold(fun state stopId points -> Map.add stopId (medoidCoordinate points) state) preciseLocations
+    let stopInRegion stopId =
+        match region with
+        | None -> true
+        | Some value ->
+            preciseLocations |> Map.tryFind stopId
+            |> Option.exists(captureStopRegionContains value)
     let modes=batch.routes |> Seq.map(fun route -> (route.id,route.idDistinction),route.transportMode) |> Map.ofSeq
     let groups=batch.tripStops |> Utils.groupAdjacentBy(fun call -> call.routeId,call.routeDistinction,call.tripId)
     let seen=HashSet<string>()
     let patternRows = seq {
         for ((routeId,distinction,_),calls) in groups do
             let mode=modes.[routeId,distinction]
-            if mode=JdfModel.Bus || mode=JdfModel.Trolleybus || mode=JdfModel.Tram then
-                let ordered=calls |> Array.filter callIsUsable
-                                  |> Array.sortBy(fun call ->
-                                      call.routeStopId*(if Jdf.tripIsReverse call.tripId then -1L else 1L))
+            if postInferenceMode mode then
+                let ordered=orderedUsableCalls calls
                 let pattern=completePatternHash ordered
-                let direction=if ordered.Length>0 && Jdf.tripIsReverse ordered.[0].tripId then 1 else 0
+                let direction=tripDirection ordered
                 let authored=ordered |> Array.map(authoredPostKey >> Option.defaultValue "") |> String.concat ";"
                 let identity=sprintf "%s|%i|%i|%s|%s" routeId distinction direction pattern authored
                 if seen.Add(identity) then
-                    yield routeId,distinction,mode,ordered,pattern,direction }
+                    yield ordered,contextCallsForOrdered routeId distinction mode ordered }
     let workRows = seq {
-        for routeId,distinction,mode,ordered,pattern,direction in patternRows do
-            let mutable start=0
-            while start<ordered.Length do
-                let stopId=ordered.[start].stopId
-                let mutable finish=start+1
-                while finish<ordered.Length && ordered.[finish].stopId=stopId do finish<-finish+1
+        for ordered,contextCalls in patternRows do
+            for block in contextCalls |> Array.groupBy _.blockStart |> Array.map snd do
+                let first=block.[0]
+                let start,finish,stopId=first.blockStart,first.blockFinish,first.key.stopId
                 match pointsByStop |> Map.tryFind stopId with
-                | Some points when points.Length>=2 ->
+                | Some points when points.Length>=2 && stopInRegion stopId ->
                     let previous=
                         seq {start-1 .. -1 .. 0} |> Seq.tryPick(fun index ->
                             if ordered.[index].stopId=stopId then None
@@ -363,17 +527,8 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
                     let pointCoordinates=
                         points |> Array.map(fun point ->
                             {longitude=point.longitude;latitude=point.latitude})
-                    let blockId=
-                        if finish-start>1 then
-                            Some(stableId "same-stop-block:"
-                                [|routeId;string distinction;pattern;string start;string finish|])
-                        else None
-                    for index=start to finish-1 do
-                        let role=
-                            if finish-start=1 then "through"
-                            elif index=start then "incoming"
-                            elif index=finish-1 then "outgoing"
-                            else "interior"
+                    for contextCall in block do
+                        let role=contextCall.key.sameStopBlockRole
                         let previousId,previousCoordinates =
                             if role="outgoing" || role="interior" then None,pointCoordinates
                             else
@@ -390,26 +545,18 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
                                 |> Option.map(fun (_,struct(longitude,latitude)) ->
                                     [|{longitude=longitude;latitude=latitude}|])
                                 |> Option.defaultValue pointCoordinates
-                        let authored=authoredPostKey ordered.[index]
-                        let key={stopId=stopId;mode=modeCode mode;lineId=routeId
-                                 routeDistinction=distinction;direction=direction
-                                 patternHash=pattern;patternPosition=index
-                                 sameStopBlockRole=role;authoredPostKey=authored}
-                        let contextId=
-                            stableId "context:" [|
-                                string stopId;modeCode mode;routeId;string distinction
-                                string direction;pattern;string index;role
-                                authored |> Option.defaultValue "" |]
                         yield {
-                            context={ordinal = -1;contextId=contextId;key=key;movementFamilyId=""
+                            context={ordinal = -1;contextId=contextCall.contextId;key=contextCall.key
+                                     movementFamilyId=""
                                      previousStopId=previousId;nextStopId=nextId
-                                     assignmentKind=(if authored.IsSome then "authored" else "unlabelled")
-                                     sameStopBlockId=blockId}
+                                     assignmentKind=
+                                         (if contextCall.key.authoredPostKey.IsSome then "authored"
+                                          else "unlabelled")
+                                     sameStopBlockId=contextCall.sameStopBlockId}
                             previousCoordinates=previousCoordinates
                             nextCoordinates=nextCoordinates
                             points=points }
-                | _ -> ()
-                start<-finish }
+                | _ -> () }
     let workKey (value:CaptureWorkRow) =
         value.context.key.stopId,value.context.key.mode,value.context.key.lineId,
         value.context.key.routeDistinction,value.context.key.direction,
@@ -691,5 +838,11 @@ let captureToStoreWithCancellation (cancellationToken:CancellationToken)
         for value in owned do value.Dispose()
         reraise()
 
+let captureToStoreWithCancellation cancellationToken options graph batch =
+    captureToStoreRestrictedWithCancellation cancellationToken options noCaptureRestriction graph batch
+
 let captureToStore options graph batch =
     captureToStoreWithCancellation CancellationToken.None options graph batch
+
+let captureToStoreRestricted options restriction graph batch =
+    captureToStoreRestrictedWithCancellation CancellationToken.None options restriction graph batch

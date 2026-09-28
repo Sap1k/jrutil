@@ -126,7 +126,9 @@ type JdfBundleTests() =
                             observation 100L "100-east" 50.0M 14.00005M "road" "" "active"
                             observation 100L "100-west" 50.0M 13.99995M "road" "" "active"
                             observation 100L "100-obsolete" 50.0M 14.00008M "road" "" "disused"
-                            observation 100L "100-conflict" 50.00002M 14.00010M "tram" "road" "active"
+                            // Road explicitly denied, no explicit mode: a modality conflict that
+                            // the mode gate leaves eligible (a tram-only post would be rejected).
+                            observation 100L "100-conflict" 50.00002M 14.00010M "" "road" "active"
                             observation 200L "200-east" 50.01M 14.00005M "road" "" "active"
                             observation 200L "200-west" 50.01M 13.99995M "road" "" "active"
                             observation 200L "200-far" 50.01M 14.02M "road" "" "active" |]}
@@ -537,6 +539,250 @@ type JdfBundleTests() =
             if Directory.Exists(root) then Directory.Delete(root,true)
 
     [<TestMethod>]
+    member _.``Capture stop region parses strictly and marks its tool version``() =
+        let region=JdfPostEvidence.parseCaptureStopRegion " 13.39, 49.53,15.55,50.73 "
+        assertEqual 13.39 region.minLongitude
+        assertEqual 50.73 region.maxLatitude
+        for invalid in [|"13.39,49.53,15.55";"15.55,49.53,13.39,50.73";"13.39,50.73,15.55,49.53"
+                         "a,49.53,15.55,50.73";"NaN,49.53,15.55,50.73";"-181,49.53,15.55,50.73"|] do
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                JdfPostEvidence.parseCaptureStopRegion invalid |> ignore) |> ignore
+        Assert.IsTrue(JdfPostEvidence.captureStopRegionContains region struct(14.42,50.08))
+        Assert.IsFalse(JdfPostEvidence.captureStopRegionContains region struct(16.61,49.19))
+        let suffix=JdfPostEvidence.captureStopRegionToolVersionSuffix region
+        assertEqual "+region:13.39,49.53,15.55,50.73" suffix
+        Assert.IsTrue(JdfPostEvidence.isRestrictedCaptureToolVersion("tool"+suffix))
+        Assert.IsFalse(JdfPostEvidence.isRestrictedCaptureToolVersion "tool")
+        let restriction:JdfPostEvidence.CaptureRestriction = {
+            stopRegion=Some region
+            excludedSourcePrefixes=
+                JdfPostEvidence.parseCaptureExcludedSources
+                    "external:PID.csv, external:MPVNet_PID.csv,external:PID.csv" }
+        let combined=JdfPostEvidence.captureRestrictionToolVersionSuffix restriction
+        assertEqual
+            "+region:13.39,49.53,15.55,50.73+exclude-source:external:MPVNet_PID.csv;external:PID.csv"
+            combined
+        Assert.IsTrue(JdfPostEvidence.isRestrictedCaptureToolVersion("tool+exclude-source:x"))
+        assertEqual "" (JdfPostEvidence.captureRestrictionToolVersionSuffix
+                            JdfPostEvidence.noCaptureRestriction)
+        for invalid in [|"";" external:PID.csv";"a;b"|] do
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                JdfPostEvidence.validateCaptureRestriction
+                    {JdfPostEvidence.noCaptureRestriction with excludedSourcePrefixes=[|invalid|]}
+                |> ignore) |> ignore
+
+    [<TestMethod>]
+    member _.``Context-call enumeration reproduces every captured context identity``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-context-calls-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let descriptorPath,input,routing=routedCaptureFixture root
+            use archive=ZipFile.OpenRead(input)
+            let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
+            use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(routing)
+            use captured=JdfPostEvidence.captureToStore JdfPostEvidence.defaultCaptureOptions graph batch
+            let calls=JdfPostEvidence.contextCallsForBatch batch |> Seq.toArray
+            let byId=calls |> Array.groupBy _.contextId |> Map.ofArray
+            let contexts=captured.contexts.ReadRows() |> Seq.toArray
+            Assert.IsTrue(contexts.Length>0)
+            for context in contexts do
+                match byId |> Map.tryFind context.contextId with
+                | Some values ->
+                    for value in values do
+                        assertEqual context.key value.key
+                        assertEqual context.sameStopBlockId value.sameStopBlockId
+                | None -> Assert.Fail($"Context {context.contextId} has no enumerated call")
+            // Every trip contributes its calls, not only the first trip of a pattern.
+            Assert.IsTrue(calls |> Array.distinctBy(fun value -> value.routeId,value.tripId)
+                          |> Array.length > 1)
+
+            let evidence=Path.Combine(root,"evidence")
+            let export=Path.Combine(root,"context-calls.parquet")
+            let options={JdfBundle.defaultBundleExecutionOptions with
+                            postInferenceEvidenceOnly=true
+                            capturePostInferenceEvidencePath=Some evidence
+                            exportPostContextCallsPath=Some export}
+            match JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                      descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                      JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                      options input (Path.Combine(root,"unused")) with
+            | JdfBundle.CaptureCompleted(manifest,_) ->
+                let parquet=readParquet export
+                assertEqual manifest.packId parquet.CustomMetadata.["obehy.pack_id"]
+                assertEqual "post_context_calls" parquet.CustomMetadata.["obehy.relation"]
+                assertEqual (int64 calls.Length) (int64 parquet.Data.Count)
+                let exportedIds=parquet.Data |> Seq.map(fun row -> string row.["context_id"]) |> Set.ofSeq
+                for context in contexts do
+                    Assert.IsTrue(exportedIds.Contains context.contextId)
+                let tripIds=parquet.Data |> Seq.map(fun row -> string row.["gtfs_trip_id"]) |> Set.ofSeq
+                Assert.IsTrue(tripIds |> Set.forall(fun value -> value.StartsWith("jdf:trip:")))
+            | _ -> Assert.Fail("Capture-only execution did not return CaptureCompleted")
+            Assert.IsFalse(Directory.GetFiles(root,"context-calls.parquet.tmp-*").Length>0)
+            let bundleOptions={JdfBundle.defaultBundleExecutionOptions with
+                                  exportPostContextCallsPath=Some(Path.Combine(root,"other.parquet"))}
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                    descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                    JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                    bundleOptions input (Path.Combine(root,"live")) |> ignore) |> ignore
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
+    member _.``Feature export writes the evaluator's diagnostic rows hypotheses and decisions``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-feature-export-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let descriptorPath,input,routing=routedCaptureFixture root
+            let evidence=Path.Combine(root,"evidence")
+            let options={JdfBundle.defaultBundleExecutionOptions with
+                            postInferenceEvidenceOnly=true
+                            capturePostInferenceEvidencePath=Some evidence}
+            JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                options input (Path.Combine(root,"unused")) |> ignore
+            let output=Path.Combine(root,"features")
+            JdfBundle.exportPostInferenceFeatures evidence None output
+            use store=JdfPostEvidenceStore.openValidatedStore
+                          JdfPostEvidenceStore.noIdentityExpectation evidence
+            use expected=JdfPostInferenceEvaluator.evaluateWithDiagnostics true store
+                             JdfPostInferencePolicy.conservativeRoutedV4
+            let scores=readParquet(Path.Combine(output,"diagnostic_scores.parquet"))
+            let hypotheses=readParquet(Path.Combine(output,"hypotheses.parquet"))
+            let assignments=readParquet(Path.Combine(output,"assignments.parquet"))
+            assertEqual expected.DiagnosticScores.Count (int64 scores.Data.Count)
+            assertEqual expected.Hypotheses.Length hypotheses.Data.Count
+            assertEqual expected.Assignments.Count (int64 assignments.Data.Count)
+            assertEqual store.Manifest.packId scores.CustomMetadata.["obehy.pack_id"]
+            assertEqual JdfPostInferencePolicy.conservativeRoutedV4.policyId
+                        assignments.CustomMetadata.["obehy.policy_id"]
+            let first=expected.DiagnosticScores.ReadRows() |> Seq.head
+            let row=scores.Data.[0]
+            assertEqual first.contextId (string row.["context_id"])
+            assertEqual first.candidateId (string row.["candidate_id"])
+            Assert.IsTrue(File.Exists(Path.Combine(output,"policy.json")))
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                JdfBundle.exportPostInferenceFeatures evidence None output) |> ignore
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
+    member _.``Excluded capture sources remove only matching observations``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-capture-exclude-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let _,input,routing=routedCaptureFixture root
+            use archive=ZipFile.OpenRead(input)
+            let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
+            use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(routing)
+            let restriction={JdfPostEvidence.noCaptureRestriction with
+                                excludedSourcePrefixes=[|"100-we"|]}
+            use full=JdfPostEvidence.captureToStore JdfPostEvidence.defaultCaptureOptions graph batch
+            use restricted=
+                JdfPostEvidence.captureToStoreRestricted
+                    JdfPostEvidence.defaultCaptureOptions restriction graph batch
+            let ids (store:JdfPostEvidence.CapturedPostEvidence) =
+                store.observations.ReadRows() |> Seq.map _.observationId |> Set.ofSeq
+            let removed=Set.difference (ids full) (ids restricted)
+            assertEqual (Set.ofList ["100-west"]) removed
+            Assert.IsTrue(restricted.contexts.ReadRows() |> Seq.exists(fun value -> value.key.stopId=100L))
+            Assert.IsFalse(restricted.routePoints.ReadRows()
+                           |> Seq.exists(fun value -> value.observationIds |> Array.contains "100-west"))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
+    member _.``Region capture routes only in-region stops exactly as a full capture does``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-capture-region-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let _,input,routing=routedCaptureFixture root
+            use archive=ZipFile.OpenRead(input)
+            let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
+            use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(routing)
+            let options={JdfPostEvidence.defaultCaptureOptions with maximumWorkers=2}
+            // Stop 100 is at 50.00 N and stop 200 at 50.01 N.
+            let region=JdfPostEvidence.parseCaptureStopRegion "13.99,49.995,14.01,50.005"
+            use full=JdfPostEvidence.captureToStore options graph batch
+            use restricted=
+                JdfPostEvidence.captureToStoreRestricted options
+                    {JdfPostEvidence.noCaptureRestriction with stopRegion=Some region} graph batch
+            let fullContexts=full.contexts.ReadRows() |> Seq.toArray
+            let regionContexts=restricted.contexts.ReadRows() |> Seq.toArray
+            Assert.IsTrue(fullContexts |> Array.exists(fun value -> value.key.stopId=200L))
+            Assert.IsTrue(regionContexts.Length>0)
+            Assert.IsTrue(regionContexts |> Array.forall(fun value -> value.key.stopId=100L))
+            // Observations and route points stay complete so neighbour anchors
+            // (medoids) are identical to the full capture.
+            assertEqual (full.routePoints.ReadRows() |> Seq.toArray)
+                        (restricted.routePoints.ReadRows() |> Seq.toArray)
+            let stop100Contexts=fullContexts |> Array.filter(fun value -> value.key.stopId=100L)
+            assertEqual stop100Contexts regionContexts
+            let inRegion (rows:seq<'T>) (stopId:'T -> int64) =
+                rows |> Seq.filter(fun row -> stopId row=100L) |> Seq.toArray
+            assertEqual (inRegion (full.corridorVariants.ReadRows()) _.stopId)
+                        (restricted.corridorVariants.ReadRows() |> Seq.toArray)
+            assertEqual (inRegion (full.routePointEvidence.ReadRows()) _.stopId)
+                        (restricted.routePointEvidence.ReadRows() |> Seq.toArray)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
+    member _.``Restricted evidence packs replay for review but are rejected for bundle conversion``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-capture-region-pack-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let descriptorPath,input,routing=routedCaptureFixture root
+            let capture name region =
+                let evidence=Path.Combine(root,name)
+                let options={JdfBundle.defaultBundleExecutionOptions with
+                                postInferenceEvidenceOnly=true
+                                capturePostInferenceEvidencePath=Some evidence
+                                captureRestriction=region}
+                match JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                          descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                          JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                          options input (Path.Combine(root,name+"-unused")) with
+                | JdfBundle.CaptureCompleted(manifest,_) -> evidence,manifest
+                | _ -> failwith "Capture-only execution did not return CaptureCompleted"
+            let region=
+                {JdfPostEvidence.noCaptureRestriction with
+                    stopRegion=Some(JdfPostEvidence.parseCaptureStopRegion "13.99,49.995,14.01,50.005")}
+            let _,fullManifest=capture "full" JdfPostEvidence.noCaptureRestriction
+            let regionEvidence,regionManifest=capture "region" region
+            assertEqual "test-tool+region:13.99,49.995,14.01,50.005" regionManifest.captureToolVersion
+            let excludedEvidence,excludedManifest=
+                capture "excluded" {JdfPostEvidence.noCaptureRestriction with
+                                        excludedSourcePrefixes=[|"100-we"|]}
+            assertEqual "test-tool+exclude-source:100-we" excludedManifest.captureToolVersion
+            Assert.AreNotEqual(fullManifest.packId,regionManifest.packId)
+            Assert.IsTrue(regionManifest.contextCount>0L)
+            Assert.IsTrue(regionManifest.contextCount<fullManifest.contextCount)
+            let report=Path.Combine(root,"region-replay")
+            JdfBundle.replayPostInferenceEvidence regionEvidence None None None None report
+            Assert.IsTrue(File.Exists(Path.Combine(report,"summary.json")))
+            for evidence in [|regionEvidence;excludedEvidence|] do
+                let replayOptions={JdfBundle.defaultBundleExecutionOptions with
+                                      postInferenceEvidencePath=Some evidence}
+                let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
+                    JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                        descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                        JdfToGtfs.emptyTransportModeRules true None false
+                        replayOptions input (Path.Combine(root,"bundle")) |> ignore)
+                StringAssert.Contains(error.Message,"Restricted post-inference evidence")
+                Assert.IsFalse(Directory.Exists(Path.Combine(root,"bundle")))
+            let liveOptions={JdfBundle.defaultBundleExecutionOptions with
+                                captureRestriction=region}
+            Assert.ThrowsExactly<ArgumentException>(fun () ->
+                JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                    descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                    JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                    liveOptions input (Path.Combine(root,"live")) |> ignore) |> ignore
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
     member _.``Post evidence excludes candidates outside the precise parent centroid radius``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-post-candidate-radius-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
@@ -787,6 +1033,66 @@ type JdfBundleTests() =
                                |> Array.map(fun value -> value.tripId,value.stopSequence,value.stopId)
                                |> Array.sort
             assertEqual (unspecified liveFeed) (unspecified replayFeed)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
+    member _.``Learned v3 policy publishes identical live and replay bundles``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-learned-policy-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let descriptorPath,input,routing=routedCaptureFixture root
+            // v3 document: the compiled default policy plus the golden fixture's model.
+            let v2Path=Path.Combine(root,"policy-v2.json")
+            JdfPostInferencePolicy.writePolicy v2Path JdfPostInferencePolicy.conservativeRoutedV4
+            use golden=JsonDocument.Parse(File.ReadAllText(
+                           Path.Combine(__SOURCE_DIRECTORY__,"TestData","post-scorer-golden.json")))
+            let policyPath=Path.Combine(root,"learned.json")
+            File.WriteAllText(policyPath,
+                $"""{{"schema_version":3,"policy":{File.ReadAllText v2Path},"scorer":{{"kind":"learned","model":{golden.RootElement.GetProperty("model").GetRawText()}}}}}""")
+            let loaded=JdfPostInferencePolicy.loadPolicyWithScorer policyPath
+            Assert.IsTrue(match loaded.scorer with JdfPostInferencePolicy.LearnedScorer _ -> true | _ -> false)
+            let evidence=Path.Combine(root,"evidence")
+            JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                {JdfBundle.defaultBundleExecutionOptions with
+                    maximumWorkers=3;memoryBudgetBytes=1L;postInferenceEvidenceOnly=true
+                    capturePostInferenceEvidencePath=Some evidence}
+                input (Path.Combine(root,"capture-unused")) |> ignore
+            let liveOutput=Path.Combine(root,"live")
+            let replayOutput=Path.Combine(root,"replay")
+            JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                {JdfBundle.defaultBundleExecutionOptions with
+                    maximumWorkers=3;memoryBudgetBytes=1L;postInferencePolicyPath=Some policyPath}
+                input liveOutput |> ignore
+            JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                JdfToGtfs.emptyTransportModeRules true None false
+                {JdfBundle.defaultBundleExecutionOptions with
+                    memoryBudgetBytes=1L;postInferenceEvidencePath=Some evidence
+                    postInferencePolicyPath=Some policyPath}
+                input replayOutput |> ignore
+            JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
+            JrUtil.Serving.Validation.validatePackage replayOutput |> ignore
+            CollectionAssert.AreEqual(
+                File.ReadAllBytes(Path.Combine(liveOutput,"gtfs.zip")),
+                File.ReadAllBytes(Path.Combine(replayOutput,"gtfs.zip")),"gtfs.zip")
+            // A route stop is served at the calls' stop place, whatever post each trip uses.
+            let serving name = Path.Combine(liveOutput,"serving",name+".parquet")
+            let routeStopLocations =
+                JrUtil.Serving.PackageReader.readTextRows (serving "route_stop") [| "route_stop_id"; "location_id" |]
+                |> Seq.map (fun row -> row.[0], row.[1]) |> dict
+            let calls =
+                JrUtil.Serving.PackageReader.readTextRows (serving "trip_call") [| "route_stop_id"; "location_id" |]
+                |> Seq.filter (fun row -> not (String.IsNullOrEmpty row.[0])) |> Seq.toArray
+            Assert.IsTrue(calls.Length>0)
+            for row in calls do Assert.AreEqual(routeStopLocations.[row.[0]],row.[1],row.[0])
+            let manifest=File.ReadAllText(Path.Combine(liveOutput,"manifest.json"))
+            StringAssert.Contains(manifest,"\"scorer\": \"learned\"")
+            StringAssert.Contains(manifest,loaded.documentSha256)
         finally
             if Directory.Exists(root) then Directory.Delete(root,true)
 
@@ -1187,6 +1493,28 @@ type JdfBundleTests() =
                     (JdfPostInference.hardGateReason gates None (Some 1.0) (Some 2.0) (Some 1.0))
         assertEqual (Some "topology")
                     (JdfPostInference.hardGateReason gates (Some "topology") None None None)
+
+        // Most, nádraží: tram-only stop positions and catalogue points beside
+        // them are not bus posts; a catalogue point beside a bus platform is.
+        Assert.IsTrue(JdfPostInference.modeIncompatible "A" [|"TRAM"|])
+        Assert.IsFalse(JdfPostInference.modeIncompatible "E" [|"TRAM"|])
+        Assert.IsFalse(JdfPostInference.modeIncompatible "A" [|"ROAD";"TRAM"|])
+        Assert.IsFalse(JdfPostInference.modeIncompatible "A" [||])
+        Assert.IsFalse(JdfPostInference.modeIncompatible "T" [|"BUS"|])
+        let known =
+            JdfPostInference.effectiveModes [|
+                "tram-osm",252L,50.509036,13.658256,[|"TRAM"|]
+                "tram-catalogue",252L,50.509077,13.658262,[||]           // ~4.6 m from the tram stop
+                "bay-osm",252L,50.510519,13.657981,[|"ROAD"|]
+                "bay-catalogue",252L,50.510541,13.657933,[||]            // ~4 m from the bus platform
+                "lonely-catalogue",252L,50.5120,13.6600,[||]
+                "other-stop",253L,50.509080,13.658260,[||] |]            // same place, different stop
+        assertEqual [|"TRAM"|] known.["tram-catalogue"]
+        assertEqual [|"ROAD"|] known.["bay-catalogue"]
+        assertEqual [||] known.["lonely-catalogue"]
+        assertEqual [||] known.["other-stop"]
+        Assert.IsTrue(JdfPostInference.modeIncompatible "A" known.["tram-catalogue"])
+        Assert.IsFalse(JdfPostInference.modeIncompatible "A" known.["bay-catalogue"])
 
         let isolation={baseline with spatialIsolation={minimumSeparationMetres=10.0;maximumAdjustment=0.2}}
         Assert.AreEqual(0.1,JdfPostInference.spatialIsolationAdjustment isolation (Some 5.0),1e-12)

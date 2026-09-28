@@ -471,6 +471,23 @@ and schema fingerprint of every relation. V1 and incomplete older v2 packs are
 rejected and must be recaptured. Capture-only cannot be combined with a policy.
 Capture-only is dispatched before policy and bundle preparation and returns a
 typed `CaptureCompleted` result to the CLI.
+`--capture-stop-region=MINLON,MINLAT,MAXLON,MAXLAT` (capture-only) routes only
+contexts at stops whose precise location lies in the box. Observations, route
+points and neighbour anchors stay complete, so in-region rows equal those of a
+full capture. `--capture-exclude-source=PREFIX[,PREFIX…]` drops observations
+whose source object ID starts with a prefix (e.g. `external:PID.csv:`), so a
+training pack cannot contain the catalogue its labels come from. Restrictions
+are appended to the capture-tool version (`<version>+region:…+exclude-source:…`)
+and therefore to the pack ID. Such packs replay with `jdf-replay-post-inference`
+for review and training, but `jdf-to-bundle --post-inference-evidence` rejects
+them. `--export-post-context-calls=FILE` additionally writes every usable
+road/tram call in the region with its evidence `context_id`, GTFS trip ID and
+per-stop occurrence, for joining external call mappings.
+
+`jdf-export-post-features --evidence=DIR [--policy=FILE] --output=DIR` writes
+the evaluator's per-candidate diagnostic rows, consolidated hypotheses and one
+policy's context decisions as Parquet for offline analysis and training
+(`scripts/post-scorer`).
 Its disk preflight is derived from the canonical deduplicated route-pattern
 plan, not from the number of timetable calls. The upper bound includes every
 captured relation, and atomic publication requires one temporary pack plus a
@@ -494,6 +511,24 @@ The sole production decision boundary is a validated `PostEvidenceStore` plus a
 stores, while its hypotheses, side groups, authored positions, and counters are
 complete policy outputs. `JdfToGtfs` only adapts that result to the conversion
 plan; capture and bundle orchestration do not contain a second evaluator.
+
+A policy file is either a v2 policy (heuristic scorer) or a v3 document
+`{"schema_version":3,"policy":{…v2…},"scorer":{"kind":"heuristic"|"learned","model":{…}}}`.
+A learned scorer (`JdfPostScorer`) is the two-stage conditional logit trained
+by `scripts/post-scorer` (`model.json`, format `post-scorer-two-stage-v1`).
+It replaces the per-family decision for unlabelled contexts:
+- `Physical` publishes the post;
+- `Area` publishes the most probable post of a confident 40 m area;
+- abstention publishes the centroid.
+
+Consolidation, hard gates, authored and same-stop resolution still come from
+the embedded v2 policy. The bundle manifest records the scorer and the
+document's SHA-256. `JdfPostScorerTests` pins F#/Python parity on a golden
+fixture (`TestData/post-scorer-golden.json`, from `python -m
+post_scorer.golden`).
+
+A `route_stop` is published at the calls' stop place. The post each trip uses
+(which differs by direction) is on `trip_call.boarding_point_id`.
 
 Capture canonicalizes observations, route points, and context work through one
 bounded replayable-row abstraction. Rows remain in chunks below budget and use

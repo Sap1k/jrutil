@@ -36,6 +36,7 @@ type private ReplayScore = {
     corridorDistance:float option; signedLateralOffset:float option
     corridorHeading:float option; attachmentHeading:float option
     snapEdgeId:int option;snapFraction:float option;topologyFailureReason:string option
+    serviceEdgeCount:int
 }
 
 type private ReplayContext = {
@@ -50,6 +51,7 @@ type private ReplayCorridor = {
     corridorId:string option
     ingressThreadId:string option;egressThreadId:string option
     routingAvailability:string;invariantFailureReason:string option
+    serviceEdgeCount:int
 }
 
 type private ReplayRoutePoint = {
@@ -100,6 +102,7 @@ type private ReplayVariantColumns = {
     ids:string array;ranks:int array;relativeCostMetres:Nullable<float> array
     relativeCostFractions:Nullable<float> array;corridorIds:string array option
     ingress:string array option;egress:string array option;availability:string array;failures:string array
+    serviceEdges:int array
 }
 
 type private ReplayAttachmentColumns = {
@@ -179,7 +182,8 @@ let private replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<i
                         ingress=if includeDiagnostics then Some(strings count group fields "ingress_thread_id") else None
                         egress=if includeDiagnostics then Some(strings count group fields "egress_thread_id") else None
                         availability=strings count group fields "routing_availability"
-                        failures=strings count group fields "invariant_failure_reason" }
+                        failures=strings count group fields "invariant_failure_reason"
+                        serviceEdges=ints count group fields "service_edge_count" }
         finally reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
     }
     let attachmentGroups = seq {
@@ -265,7 +269,8 @@ let private replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<i
                     ingressThreadId=variants.ingress |> Option.bind(fun values -> optionalString values variantRow)
                     egressThreadId=variants.egress |> Option.bind(fun values -> optionalString values variantRow)
                     routingAvailability=variants.availability.[variantRow]
-                    invariantFailureReason=optionalString variants.failures variantRow }
+                    invariantFailureReason=optionalString variants.failures variantRow
+                    serviceEdgeCount=variants.serviceEdges.[variantRow] }
                 if not(ensureAttachment())
                    || attachmentColumns.Value.ids.[attachmentIndex]<>contextId
                    || attachmentColumns.Value.ranks.[attachmentIndex]<>rank then
@@ -305,7 +310,8 @@ let private replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<i
                             snapEdgeId=attachments.snapEdges |> Option.bind(fun values ->
                                 if values.[attachmentRow].HasValue then Some values.[attachmentRow].Value else None)
                             snapFraction=attachments.snapFractions |> Option.bind(fun values -> optionalDouble values attachmentRow)
-                            topologyFailureReason=failure }
+                            topologyFailureReason=failure
+                            serviceEdgeCount=corridor.serviceEdgeCount }
                 variantIndex<-variantIndex+1
         if ensureVariant() then
             invalidArg "evidencePath" "Corridor evidence references an unknown context"
@@ -394,6 +400,84 @@ let private readReplayRoutePoints evidencePath (selectedStops:Set<int64> option)
         finally
             reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
     end
+
+/// Source class of an observation: "osm", or "external:<catalogue file>".
+/// Each source maps a physical post at most once (learned-scorer clustering).
+let private observationSource (observationId:string) =
+    if isNull observationId then "?"
+    elif observationId.StartsWith("osm:",StringComparison.Ordinal) then "osm"
+    elif observationId.StartsWith("external:",StringComparison.Ordinal) then
+        let parts=observationId.Split(':')
+        if parts.Length>1 then "external:"+parts.[1] else "external:"
+    else observationId.Split(':').[0]
+
+type private ObservationFacts = {
+    tags:Dictionary<string,struct(string*bool)>   // observation id -> local_ref (or null), public_transport=platform
+    stopLevelSources:HashSet<string>
+}
+
+[<Literal>]
+let private StopLevelMaximumShare = 0.5
+
+[<Literal>]
+let private StopLevelMinimumStops = 20
+
+/// Observation tags and stop-level source granularity for the learned scorer
+/// (mirrors post_scorer.features.source_granularity and osm_facts.observation_tags).
+/// A stop-level source publishes one point per stop: at stops where OSM maps two
+/// or more posts it almost never has two points itself.
+let private readObservationFacts evidencePath =
+    use stream=File.OpenRead(Path.Combine(evidencePath,"observations.parquet"))
+    let reader=ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
+    try
+        let fields=reader.Schema.DataFields |> Array.map(fun field -> field.Name,field) |> Map.ofArray
+        let tags=Dictionary<string,struct(string*bool)>(StringComparer.Ordinal)
+        let pointsByStopSource=Dictionary<struct(string*string),HashSet<string>>()
+        for groupIndex=0 to reader.RowGroupCount-1 do
+            use group=reader.OpenRowGroupReader(groupIndex)
+            let count=int group.RowCount
+            let read name =
+                let values=Array.zeroCreate<string> count
+                group.ReadAsync(fields.[name],values.AsMemory(),Nullable(),CancellationToken.None)
+                     .AsTask().GetAwaiter().GetResult()
+                values
+            let stops=read "gtfs_stop_place_id"
+            let points=read "route_point_id"
+            let observations=read "observation_id"
+            let rawTags=read "raw_tags"
+            for index=0 to count-1 do
+                let mutable localRef:string=null
+                let mutable platform=false
+                if not(String.IsNullOrEmpty rawTags.[index]) then
+                    for pair in rawTags.[index].Split(';') do
+                        let separator=pair.IndexOf('=')
+                        if separator>0 then
+                            let key=pair.Substring(0,separator)
+                            let value=pair.Substring(separator+1)
+                            if key="local_ref" && isNull localRef then localRef<-value
+                            elif key="public_transport" && value="platform" then platform<-true
+                tags.[observations.[index]]<-struct(localRef,platform)
+                let key=struct(stops.[index],observationSource observations.[index])
+                match pointsByStopSource.TryGetValue key with
+                | true,set -> set.Add(points.[index]) |> ignore
+                | _ -> pointsByStopSource.[key]<-HashSet<string>([points.[index]],StringComparer.Ordinal)
+        let multiPostStops =
+            pointsByStopSource
+            |> Seq.choose(fun pair ->
+                let struct(stop,source)=pair.Key
+                if source="osm" && pair.Value.Count>=2 then Some stop else None)
+            |> HashSet
+        let stopLevel=HashSet<string>(StringComparer.Ordinal)
+        pointsByStopSource
+        |> Seq.filter(fun pair -> let struct(stop,_)=pair.Key in multiPostStops.Contains stop)
+        |> Seq.groupBy(fun pair -> let struct(_,source)=pair.Key in source)
+        |> Seq.iter(fun (source,values) ->
+            let values=values |> Seq.toArray
+            let share=(values |> Array.filter(fun pair -> pair.Value.Count>=2) |> Array.length |> float)/float values.Length
+            if values.Length>=StopLevelMinimumStops && share<StopLevelMaximumShare then stopLevel.Add(source) |> ignore)
+        { tags=tags;stopLevelSources=stopLevel }
+    finally
+        reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
 let private medianFloat values =
     let ordered=values |> Seq.sort |> Seq.toArray
@@ -670,6 +754,13 @@ let private evaluateReplayPolicy capturedHorizon
             JdfPostInference.spatialIsolationAdjustment policy nearest
     let alternativeApplies (row:ReplayScore) =
         row.alternativeCorridorCount>1
+    let knownModes =
+        hypothesisDetails
+        |> Seq.map(fun pair ->
+            let point,_,_,_,explicitModes,_,_=pair.Value
+            pair.Key,point.stopId,point.latitude,point.longitude,explicitModes)
+        |> Seq.toArray
+        |> JdfPostInference.effectiveModes
     let evaluated =
         rows
         |> Array.map(fun row ->
@@ -677,6 +768,10 @@ let private evaluateReplayPolicy capturedHorizon
                 hypothesisDetails |> Map.tryFind row.candidateId
                 |> Option.bind(fun (_,hasCurrent,hasObsolete,_,_,_,_) ->
                     if hasObsolete && not hasCurrent then Some "obsolete-lifecycle" else None)
+                |> Option.orElse(
+                    knownModes |> Map.tryFind row.candidateId
+                    |> Option.bind(fun modes ->
+                        if JdfPostInference.modeIncompatible row.mode modes then Some "mode-incompatible" else None))
             let rejection=JdfPostInference.hardGateReason policy (lifecycleFailure |> Option.orElse row.topologyFailureReason)
                               row.corridorDistance row.signedLateralOffset row.routedExcess
             let routedFit=row.routedExcess |> Option.map(JdfPostInference.routedFit policy) |> Option.defaultValue 0.0
@@ -942,6 +1037,143 @@ let private evaluateReplayPolicy capturedHorizon
     { sameStopBlocks=sameStopBlocks;distinctPairChoices=distinctPairChoices
       unresolvedBlockEdges=unresolvedBlockEdges },hypothesisDetails
 
+[<Literal>]
+let private LearnedExcessCapMetres = 1000.0
+
+[<Literal>]
+let private MinimumNumberedBays = 3
+
+let private roadModes = set [ "ROAD"; "BUS"; "TROLLEYBUS"; "SHARED" ]
+
+/// The learned scorer's candidate table and decisions for one stop, reproducing
+/// post_scorer.features.build_candidate_table exactly: candidates only stop-level
+/// sources know about are dropped, candidates are clustered into physical posts and
+/// areas, post modes exclude incompatible candidates per context, and the frozen
+/// feature columns are computed by name.
+let private learnedStopDecisions (policy:JdfPostInferencePolicy.PostInferencePolicyV2)
+                                 (model:JdfPostScorer.Model) (facts:ObservationFacts)
+                                 (points:ReplayRoutePoint array) (values:ReplayScore array) =
+    let rows,details=consolidateReplayRows policy points values
+    if rows.Length=0 then Map.empty else
+    let stopId=values.[0].stopId
+    // Hypotheses a post-level source knows about, with their tags and sources.
+    let hypotheses =
+        details
+        |> Seq.choose(fun pair ->
+            let medoid,_,_,_,_,_,members=pair.Value
+            let observations=
+                members |> Array.collect _.observationIds |> Array.distinct |> Array.sortWith(fun a b -> String.CompareOrdinal(a,b))
+                |> Array.filter(fun id -> not(facts.stopLevelSources.Contains(observationSource id)))
+            if observations.Length=0 then None else
+            let tagOf id = match facts.tags.TryGetValue id with | true,value -> value | _ -> struct(null,false)
+            let localRef=observations |> Array.tryPick(fun id -> let struct(value,_)=tagOf id in Option.ofObj value)
+            let platform=observations |> Array.exists(fun id -> let struct(_,value)=tagOf id in value)
+            let sources=observations |> Array.map observationSource |> Array.distinct |> Array.sort
+            let modes=members |> Array.collect _.explicitModes |> Array.filter((<>) "") |> Array.distinct
+            Some(pair.Key,(medoid.latitude,medoid.longitude,localRef,platform,sources,modes)))
+        |> Seq.sortWith(fun (a,_) (b,_) -> String.CompareOrdinal(a,b))
+        |> Seq.toArray
+    if hypotheses.Length=0 then Map.empty else
+    let ids=hypotheses |> Array.map fst
+    let info=hypotheses |> Array.map snd
+    let postIndex=
+        JdfPostScorer.clusterPosts
+            (info |> Array.map(fun (lat,_,_,_,_,_) -> lat)) (info |> Array.map(fun (_,lon,_,_,_,_) -> lon))
+            (info |> Array.map(fun (_,_,_,_,sources,_) -> sources)) (info |> Array.map(fun (_,_,ref,_,_,_) -> ref))
+    let postOf=Array.map2(fun id index -> id,$"{stopId}:{index}") ids postIndex |> dict
+    let hypothesisInfo=Array.zip ids info |> dict
+    let postMembers=ids |> Array.groupBy(fun id -> postOf.[id]) |> dict
+    let postSupport=
+        postMembers |> Seq.map(fun pair ->
+            pair.Key, pair.Value |> Array.collect(fun id -> let _,_,_,_,sources,_=hypothesisInfo.[id] in sources) |> Array.distinct |> Array.length)
+        |> dict
+    let maximumSupport=postSupport.Values |> Seq.max
+    let postModes=
+        postMembers |> Seq.map(fun pair ->
+            pair.Key, pair.Value |> Array.collect(fun id -> let _,_,_,_,_,modes=hypothesisInfo.[id] in modes) |> Array.distinct)
+        |> dict
+    let numbered id = let _,_,ref,platform,_,_=hypothesisInfo.[id] in ref.IsSome && platform
+    let numberedCount=ids |> Array.filter numbered |> Array.length
+    let postIsBay=
+        postMembers |> Seq.map(fun pair -> pair.Key, numberedCount>=MinimumNumberedBays && (pair.Value |> Array.exists numbered)) |> dict
+    // Areas over post centres, ordered by post id string as in the reference.
+    let orderedPosts=postMembers.Keys |> Seq.sortWith(fun a b -> String.CompareOrdinal(a,b)) |> Seq.toArray
+    let centre post =
+        let members=postMembers.[post] |> Array.map(fun id -> hypothesisInfo.[id])
+        members |> Array.averageBy(fun (lat,_,_,_,_,_) -> lat), members |> Array.averageBy(fun (_,lon,_,_,_,_) -> lon)
+    let modeClass post =
+        let modes=postModes.[post]
+        if modes.Length=0 then "any" elif modes |> Array.exists roadModes.Contains then "road" else "tram"
+    let areaIndex=
+        JdfPostScorer.clusterAreas (orderedPosts |> Array.map(centre >> fst)) (orderedPosts |> Array.map(centre >> snd))
+                                   (orderedPosts |> Array.map modeClass)
+    let areaOf=Array.map2(fun post index -> post,$"{stopId}:a{index}") orderedPosts areaIndex |> dict
+    let stopPostCount=orderedPosts.Length
+    // Variant-0 diagnostic-equivalent rows per context, restricted to post candidates
+    // whose post modes the context mode can use.
+    let baseRows=
+        rows |> Array.filter(fun row ->
+            row.variantRank=0 && postOf.ContainsKey row.candidateId
+            && (let modes=postModes.[postOf.[row.candidateId]]
+                modes.Length=0 || not(JdfPostInference.modeIncompatible row.mode modes)))
+    let featureValue (row:ReplayScore) (contextMinimum:float) (name:string) =
+        let alignment,side,proximity =
+            JdfPostInference.geometryComponents policy row.corridorDistance row.signedLateralOffset
+                row.corridorHeading row.attachmentHeading
+        let capped=row.routedExcess |> Option.map(fun value -> Math.Clamp(value,0.0,LearnedExcessCapMetres))
+                   |> Option.defaultValue LearnedExcessCapMetres
+        let lifecycleFailure=
+            details |> Map.tryFind row.candidateId
+            |> Option.bind(fun (_,hasCurrent,hasObsolete,_,_,_,_) ->
+                if hasObsolete && not hasCurrent then Some "obsolete-lifecycle" else None)
+        let rejection=
+            JdfPostInference.hardGateReason policy (lifecycleFailure |> Option.orElse row.topologyFailureReason)
+                row.corridorDistance row.signedLateralOffset row.routedExcess
+        let post=postOf.[row.candidateId]
+        let flag value = if value then 1.0 else 0.0
+        match name with
+        | "side" -> side
+        | "alignment" -> alignment
+        | "proximity" -> proximity
+        | "corridor_distance" -> row.corridorDistance |> Option.defaultValue 0.0
+        | "routed_fit" -> row.routedExcess |> Option.map(JdfPostInference.routedFit policy) |> Option.defaultValue 0.0
+        | "routed_excess_metres_capped" -> capped
+        | "excess_minus_context_min" -> capped-contextMinimum
+        | "eligible" -> flag rejection.IsNone
+        | "has_local_ref" -> let _,_,ref,_,_,_=hypothesisInfo.[row.candidateId] in flag ref.IsSome
+        | "is_bay" -> flag postIsBay.[post]
+        | "post_support" -> float postSupport.[post]
+        | "post_support_deficit" -> float(maximumSupport-postSupport.[post])
+        | "is_tram" -> flag(row.mode="E")
+        | "is_trolleybus" -> flag(row.mode="T")
+        | "anchor_previous_missing" -> flag row.previousStopId.IsNone
+        | "anchor_next_missing" -> flag row.nextStopId.IsNone
+        | "service_edge_count" -> float row.serviceEdgeCount
+        | other -> invalidOp $"Learned scorer feature {other} is not available in JrUtil"
+    let cappedExcess (row:ReplayScore) =
+        row.routedExcess |> Option.map(fun value -> Math.Clamp(value,0.0,LearnedExcessCapMetres))
+        |> Option.defaultValue LearnedExcessCapMetres
+    let byContext=baseRows |> Array.groupBy _.contextId
+    let candidates=
+        [| for _,contextRows in byContext do
+               let minimum=contextRows |> Array.map cappedExcess |> Array.min
+               for row in contextRows do
+                   let _,_,_,platform,_,_=hypothesisInfo.[row.candidateId]
+                   yield ({ contextId=row.contextId;hypothesisId=row.candidateId
+                            postId=postOf.[row.candidateId];areaId=areaOf.[postOf.[row.candidateId]]
+                            isPlatform=platform
+                            features=model.stage1.features |> Array.map(featureValue row minimum) }
+                          : JdfPostScorer.Candidate) |]
+    let stopText (value:int64 option) = value |> Option.map(fun id -> $"jdf:stop:{id}")
+    let contexts=
+        byContext |> Array.map(fun (contextId,contextRows) ->
+            let first=contextRows.[0]
+            ({ contextId=contextId;previousStop=stopText first.previousStopId;nextStop=stopText first.nextStopId
+               stopPostCount=stopPostCount } : JdfPostScorer.ContextKey))
+    JdfPostScorer.scoreStop model contexts candidates
+    |> Array.map(fun decision -> decision.contextId,decision)
+    |> Map.ofArray
+
 let private evaluateReplayPolicies capturedHorizon
                                    (policies:JdfPostInferencePolicy.PostInferencePolicyV2 array)
                                    (routePointsByStop:Map<int64,ReplayRoutePoint array>)
@@ -1085,10 +1317,11 @@ let private ResultRowMemoryBudgetBytes=256L*1024L*1024L
 /// The sole production policy-evaluation boundary. The store has already
 /// passed structural, hash, ordering, key, FK, sentinel, and coverage checks;
 /// no JDF, graph, GTFS object, path, or unvalidated row collection can enter.
-let evaluateWithDiagnostics includeDiagnostics
-                            (store:JdfPostEvidenceStore.PostEvidenceStore)
-                            (policy:JdfPostInferencePolicy.PostInferencePolicyV2)
-                            : JdfPostInference.PostInferenceResult =
+let evaluateWithScorer includeDiagnostics
+                       (store:JdfPostEvidenceStore.PostEvidenceStore)
+                       (policy:JdfPostInferencePolicy.PostInferencePolicyV2)
+                       (scorer:JdfPostInferencePolicy.ScorerChoice)
+                       : JdfPostInference.PostInferenceResult =
     JdfPostInferencePolicy.PostInferencePhaseProbe.record "evaluator-entry"
     Interlocked.Increment(&evaluatorEntryCountValue) |> ignore
     let manifest=store.Manifest
@@ -1098,6 +1331,12 @@ let evaluateWithDiagnostics includeDiagnostics
             manifest.captureCeilings.maximumCorridorVariants policy
     let evidencePath=store.Directory
     let routePointsByStop=readReplayRoutePoints evidencePath None
+    // The learned scorer replaces the heuristic's decision for unlabelled contexts;
+    // authored posts, same-stop pairs and counters stay on the heuristic path.
+    let learned =
+        match scorer with
+        | JdfPostInferencePolicy.LearnedScorer model -> Some(model,readObservationFacts evidencePath)
+        | JdfPostInferencePolicy.HeuristicScorer -> None
     let temporaryDirectory=Path.Combine(Path.GetTempPath(),"jrutil-post-inference-results")
     let decisions=ResizeArray<ReplayDecision>()
     let hypotheses=ResizeArray<JdfPostInference.ConsolidatedPostHypothesis>()
@@ -1160,11 +1399,32 @@ let evaluateWithDiagnostics includeDiagnostics
                             |> Array.map(fun value ->
                                 struct(value.stopId,value.movementFamilyId),value)
                             |> Map.ofArray
+                        let learnedDecisions =
+                            learned |> Option.map(fun (model,facts) ->
+                                learnedStopDecisions policy model facts points values)
                         for context in contextRows do
                             let decision=decisionsByFamily.[struct(context.stopId,context.movementFamilyId)]
+                            let learnedDecision =
+                                match learnedDecisions with
+                                | Some decisions when context.assignmentKind="unlabelled" ->
+                                    Some(decisions |> Map.tryFind context.contextId)
+                                | _ -> None
+                            let decision =
+                                match learnedDecision with
+                                | Some(Some value) ->
+                                    { decision with score=Some value.postProbability
+                                                    margin=Some value.areaProbability }
+                                | _ -> decision
                             let resolution,locationId,hypothesisId,sideGroupId =
                                 if context.assignmentKind<>"unlabelled" then
                                     decision.resolution,None,None,None
+                                elif learnedDecision.IsSome then
+                                    match learnedDecision.Value with
+                                    | Some { resolution=JdfPostScorer.Physical; hypothesisId=Some candidate } ->
+                                        "Physical",Some(replayPhysicalLocationId context.stopId candidate),Some candidate,None
+                                    | Some { resolution=JdfPostScorer.Area; hypothesisId=Some candidate } ->
+                                        "Area",Some(replayPhysicalLocationId context.stopId candidate),Some candidate,None
+                                    | _ -> "Centroid",None,None,None
                                 elif decision.resolution="Physical" then
                                     match decision.candidateId with
                                     | Some candidate ->
@@ -1216,7 +1476,7 @@ let evaluateWithDiagnostics includeDiagnostics
             |> Seq.choose(fun value ->
                 match value.assignmentKind,value.selectedHypothesisId,value.selectedLocationId with
                 | "unlabelled",Some hypothesis,Some location
-                    when value.resolution="Physical" ->
+                    when value.resolution="Physical" || value.resolution="Area" ->
                     Some(struct(value.stopId,hypothesis),location)
                 | _ -> None)
             |> Map.ofSeq
@@ -1370,6 +1630,10 @@ let evaluateWithDiagnostics includeDiagnostics
     with _ ->
         assignments.Dispose()
         reraise()
+
+/// The tuned heuristic scorer (policy v2 behaviour).
+let evaluateWithDiagnostics includeDiagnostics store policy =
+    evaluateWithScorer includeDiagnostics store policy JdfPostInferencePolicy.HeuristicScorer
 
 let evaluate (store:JdfPostEvidenceStore.PostEvidenceStore)
              (policy:JdfPostInferencePolicy.PostInferencePolicyV2) =

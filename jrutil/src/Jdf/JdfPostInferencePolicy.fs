@@ -310,6 +310,63 @@ let loadPolicy path =
     if isNull(box policy) then invalidArg "path" $"Post-inference policy is empty: {path}"
     validatePolicy DefaultCapturedRoutedExcessHorizonMetres policy
 
+[<Literal>]
+let PolicyDocumentSchemaVersion = 3
+
+/// How candidates are ranked and decided: the tuned heuristic (policy v2), or the
+/// learned two-stage scorer (jrutil/scripts/post-scorer) embedded in a v3 document.
+type ScorerChoice =
+    | HeuristicScorer
+    | LearnedScorer of JdfPostScorer.Model
+
+type LoadedPolicy = {
+    policy: PostInferencePolicyV2
+    scorer: ScorerChoice
+    documentSha256: string
+}
+
+/// Load a v2 policy file (heuristic scorer) or a v3 document
+/// `{"schema_version":3,"policy":{…v2…},"scorer":{"kind":"heuristic"|"learned","model":{…}}}`.
+/// The document hash covers the embedded model.
+let loadPolicyWithScorer path =
+    PostInferencePhaseProbe.record "policy-loading"
+    if not(File.Exists path) then invalidArg "path" $"Post-inference policy does not exist: {path}"
+    let text = File.ReadAllText(path)
+    let documentSha256 =
+        Encoding.UTF8.GetBytes(text) |> SHA256.HashData |> Convert.ToHexString |> _.ToLowerInvariant()
+    use document = JsonDocument.Parse(text)
+    let root = document.RootElement
+    let version =
+        match root.TryGetProperty("schema_version") with
+        | true, value when value.ValueKind = JsonValueKind.Number -> value.GetInt32()
+        | _ -> invalidArg "path" "Post-inference policy has no schema_version"
+    let parsePolicy (element: JsonElement) =
+        let policy = JsonSerializer.Deserialize<PostInferencePolicyV2>(element.GetRawText(), jsonOptions)
+        if isNull(box policy) then invalidArg "path" $"Post-inference policy is empty: {path}"
+        validatePolicy DefaultCapturedRoutedExcessHorizonMetres policy
+    if version = PolicySchemaVersion then
+        { policy = parsePolicy root; scorer = HeuristicScorer; documentSha256 = documentSha256 }
+    elif version = PolicyDocumentSchemaVersion then
+        let policy =
+            match root.TryGetProperty("policy") with
+            | true, value when value.ValueKind = JsonValueKind.Object -> parsePolicy value
+            | _ -> invalidArg "path" "Policy document v3 requires a policy object"
+        let scorer =
+            match root.TryGetProperty("scorer") with
+            | true, value when value.ValueKind = JsonValueKind.Object ->
+                match value.TryGetProperty("kind") with
+                | true, kind when kind.GetString() = "heuristic" -> HeuristicScorer
+                | true, kind when kind.GetString() = "learned" ->
+                    match value.TryGetProperty("model") with
+                    | true, model when model.ValueKind = JsonValueKind.Object ->
+                        LearnedScorer(JdfPostScorer.parseModel model)
+                    | _ -> invalidArg "path" "A learned scorer requires a model object"
+                | _ -> invalidArg "path" "Scorer kind must be heuristic or learned"
+            | _ -> invalidArg "path" "Policy document v3 requires a scorer object"
+        { policy = policy; scorer = scorer; documentSha256 = documentSha256 }
+    else
+        invalidArg "path" $"Unsupported policy schema {version}; expected {PolicySchemaVersion} or {PolicyDocumentSchemaVersion}"
+
 let PolicySweepFields = [|
     "consolidation.maximum_diameter_metres";"consolidation.maximum_chainage_difference_metres"
     "consolidation.maximum_heading_difference_degrees";"consolidation.opposite_side_tolerance_metres"

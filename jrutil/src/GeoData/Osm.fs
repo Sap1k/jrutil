@@ -146,10 +146,14 @@ let getCzOtherStops pbfPath = cacheVoidFunc "cz-osm-other-stops" <| fun () ->
             "bus"; "psv"; "tram"; "trolleybus"
             "access"; "vehicle"; "motor_vehicle"
             "abandoned"; "disused"; "construction"; "proposed"; "temporary"
+            // Stand number: separates numbered bays for the learned post scorer.
+            "local_ref"
         |]
         let rawTags =
             auditKeys
-            |> Array.choose (fun key -> tag key |> Option.map (fun value -> $"{key}={value}"))
+            |> Array.choose (fun key ->
+                // Values are joined with ';', so a ';' inside a value would split it.
+                tag key |> Option.map (fun value -> $"""{key}={value.Replace(";", ",")}"""))
             |> String.concat ";"
         {
         id = feat.Attributes.["id"] :?> int64
