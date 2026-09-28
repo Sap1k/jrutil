@@ -377,6 +377,46 @@ type JdfToGtfsTests() =
         assertEqual expectedStreamed streamed
 
     [<TestMethod>]
+    member _.``Timed calls at border-only stops are kept without boarding or alighting``() =
+        let source = batch ()
+        let borderStop =
+            source.tripStops
+            |> Seq.find (fun call ->
+                match call.departureTime, call.arrivalTime with
+                | Some (JdfModel.StopTime _), _ | _, Some (JdfModel.StopTime _) -> true
+                | _ -> false)
+            |> fun call -> call.stopId
+        let attributeId = 999
+        let border = {
+            source with
+                attributeRefs =
+                    Array.append source.attributeRefs [|
+                        { attributeId = attributeId; value = JdfModel.BorderStopOnly
+                          reserved1 = None }
+                    |]
+                stops =
+                    source.stops
+                    |> Array.map (fun stop ->
+                        if stop.id = borderStop then
+                            { stop with attributes = Array.append [| Some attributeId |] (Array.create 5 None) }
+                        else stop)
+        }
+        let key (call: GtfsModel.StopTime) = call.tripId, call.stopSequence
+        let before = JdfToGtfs.getGtfsStopTimes false source |> Seq.toArray
+        let after = JdfToGtfs.getGtfsStopTimes false border |> Seq.toArray
+        assertEqual (before |> Array.map key) (after |> Array.map key)
+        let isBorderCall (call: GtfsModel.StopTime) =
+            let prefix = JdfToGtfs.jdfStopId false borderStop
+            call.stopId = prefix || call.stopId.StartsWith(prefix + ":")
+        let borderCalls = after |> Array.filter isBorderCall
+        Assert.IsTrue(borderCalls.Length > 0)
+        for call in borderCalls do
+            assertEqual (Some GtfsModel.NoService) call.pickupType
+            assertEqual (Some GtfsModel.NoService) call.dropoffType
+        let unchanged calls = calls |> Array.filter (isBorderCall >> not)
+        assertEqual (unchanged before) (unchanged after)
+
+    [<TestMethod>]
     member _.``JDF routes receive default colors by transport mode``() =
         let sourceRoute = (batch ()).routes.[0]
         let colors mode publicLineNumber =
