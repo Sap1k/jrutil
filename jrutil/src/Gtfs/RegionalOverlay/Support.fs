@@ -99,14 +99,8 @@ let parseDate value =
 let dateString (value: LocalDate) =
     value.ToString("yyyyMMdd", CultureInfo.InvariantCulture)
 
-let secondSunday year =
-    let first = LocalDate(year, 12, 1)
-    let offset = (int IsoDayOfWeek.Sunday - int first.DayOfWeek + 7) % 7 + 7
-    first.PlusDays(offset)
-
 let gvdWindow year =
-    let startDate = secondSunday (year - 1)
-    let endDate = (secondSunday year).PlusDays(-1)
+    let startDate, endDate = JrUtil.Utils.gvdBounds year
     let dates = [| for offset in 0 .. Period.Between(startDate, endDate, PeriodUnits.Days).Days -> startDate.PlusDays(offset) |]
     let index = Dictionary<LocalDate, int>()
     dates |> Array.iteri (fun i date -> index.[date] <- i)

@@ -732,6 +732,35 @@ type JdfMerger(
                     |> Option.iter (fun r2now ->
                         this.resolveOneRouteOverlap(r1, r2now))
 
+    /// Keep only versions valid on or after `reference` within the GVD, clamped to
+    /// its bounds. The GVD change is a hard cutover, so validity past its end (often
+    /// open-ended on international lines) is never real. Run after overlap
+    /// resolution, which needs every version's published validity.
+    member this.boundValidity(reference: LocalDate, gvdStart: LocalDate, gvdEnd: LocalDate) =
+        let mutable expired = 0
+        let mutable nextGvd = 0
+        let mutable clamped = 0
+        for id in routesByLicNum.Keys |> Seq.toArray do
+            for route in routesByLicNum.[id] |> Seq.toArray do
+                if route.timetableValidTo < reference || route.timetableValidTo < gvdStart then
+                    expired <- expired + 1
+                    this.deleteRoute(route)
+                else if route.timetableValidFrom > gvdEnd then
+                    nextGvd <- nextGvd + 1
+                    this.deleteRoute(route)
+                else if route.timetableValidFrom < gvdStart || route.timetableValidTo > gvdEnd then
+                    clamped <- clamped + 1
+                    routesByLicNum.[id].Remove(route) |> ignore
+                    routesByLicNum.[id].Add(
+                        {route with
+                            timetableValidFrom = max route.timetableValidFrom gvdStart
+                            timetableValidTo = min route.timetableValidTo gvdEnd})
+        Log.Information(
+            "Bounded route validity to {GvdStart}..{GvdEnd} as of {Reference}: \
+             dropped {Expired} expired and {NextGvd} next-GVD versions, clamped {Clamped}",
+            NodaTime.Text.LocalDatePattern.Iso.Format(gvdStart), NodaTime.Text.LocalDatePattern.Iso.Format(gvdEnd),
+            NodaTime.Text.LocalDatePattern.Iso.Format(reference), expired, nextGvd, clamped)
+
     member this.beginAdd(batch: JdfBatch) =
         let attributeRefIdMap = Dictionary<int, int>()
         let existingAttributeRefsByValue =

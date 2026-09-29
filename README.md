@@ -283,6 +283,18 @@ route-stop occurrences and source order are retained in `route_stop_zone` and
 projected to `cz_route_stop_zones.txt`. Standard `stop_times.txt` never contains
 the old non-standard `stop_zone_ids` column.
 
+Output routes group the merged versions of one CIS line. Versions that share
+agency, public line number, name, route type and colours form one route, and
+detour (výluka) timetables form a separate route. The group containing the
+line's earliest-starting version is `jdf:route:<line>` (detours:
+`jdf:route:<line>:detour`). Any other group appends eight hex characters hashed
+from its semantics. Detour routes keep the route colour and use amber text
+(`ffd23f`), or dark orange (`7a3500`) where amber would contrast below 3:1.
+Serving `route.timetable_kind` is `regular` or `detour` for JDF routes. Trips,
+zones and diagnostics keep the per-version `(line, distinction)` identity, and
+route-stop keys include the version (`<route>/<distinction>/<route stop>`)
+because route stop numbers are unique only within one version.
+
 Generated intermediate identifiers consistently use colon-separated
 namespaces: `jdf:agency:…`, `jdf:route:…`, `jdf:trip:…`, `jdf:stop:…`,
 `jdf:zone:…`, `jdf:notice:…`, `jdf:transfer:…` and `jdf:restriction:…`.
@@ -344,6 +356,14 @@ or a directory. Directory inputs recursively load `*.csv` files in stable
 relative-path order and remove exact duplicate rows before constructing the
 stop matcher. Pass `--strict` to `merge-jdf` when a malformed input batch must
 fail the command instead of being logged and skipped.
+
+`merge-jdf` requires `--gvd-year` and `--reference-date`. After resolving
+version overlaps it drops timetables that expired before the reference date or
+start after the GVD, and clamps the rest to the GVD bounds. The December GVD
+change is a hard cutover, even for international lines that claim validity
+indefinitely. Pass the same `--gvd-year` to `jdf-to-bundle` to record the GVD as
+the package `service_horizon`. `regional-gtfs-overlay` rejects a base package
+whose horizon belongs to a different GVD.
 
 ## Parallelism and memory budgets
 

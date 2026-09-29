@@ -46,7 +46,7 @@ module PackageReader =
             if field.IsNullable then readNullableValues<DateTime> group field count else readValues<DateTime> group field count
         else invalidOp $"Unsupported compiler-view field type {field.ClrType.FullName} for {field.Name}"
 
-    let internal readTextRows path (columns: string array) = seq {
+    let private readTextRowsCore optional path (columns: string array) = seq {
         use stream = File.OpenRead(path)
         let reader = ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
         try
@@ -56,12 +56,22 @@ module PackageReader =
                 let count = int group.RowCount
                 let values =
                     columns |> Array.map (fun column ->
-                        readColumn group fields.[column] count)
+                        match fields.TryGetValue(column) with
+                        | true, field -> readColumn group field count
+                        | false, _ when Set.contains column optional -> Array.create count ""
+                        | false, _ -> invalidOp $"{Path.GetFileName(path: string)} has no column {column}")
                 for index in 0 .. count - 1 do
                     yield values |> Array.map (fun column -> Option.ofObj column.[index] |> Option.defaultValue "")
         finally
             reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
     }
+
+    let internal readTextRows path columns = readTextRowsCore Set.empty path columns
+
+    /// Like readTextRows, but the named columns may be absent (read as "") in
+    /// packages written before they were introduced.
+    let internal readTextRowsWithOptional (optional: string list) path columns =
+        readTextRowsCore (Set.ofList optional) path columns
 
     let private writeCsv (path: string) (columns: string array) (rows: seq<string array>) =
         Directory.CreateDirectory(Path.GetDirectoryName(path)) |> ignore
@@ -87,9 +97,16 @@ module PackageReader =
 
         let serving relation = Path.Combine(packageDirectory, "serving", relation + ".parquet")
         let routeKeys = readTextRows (serving "road_route_key") [| "route_id"; "cis_line_id" |] |> Seq.distinct |> Seq.sortBy id
+        let timetableKinds =
+            readTextRowsWithOptional [ "timetable_kind" ] (serving "route") [| "route_id"; "timetable_kind" |]
+            |> Seq.map (fun row -> row.[0], row.[1]) |> dict
+        let timetableKind route =
+            match timetableKinds.TryGetValue(route) with
+            | true, kind -> kind
+            | _ -> ""
         writeCsv (Path.Combine(extensions, "cz_routes.txt"))
-            [| "route_id"; "cis_line_id"; "public_line_number"; "source_provenance" |]
-            (routeKeys |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; "serving-v2" |]))
+            [| "route_id"; "cis_line_id"; "public_line_number"; "source_provenance"; "timetable_kind" |]
+            (routeKeys |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; "serving-v2"; timetableKind row.[0] |]))
 
         let locations = readTextRows (serving "location") [| "location_id"; "parent_location_id" |]
         writeCsv (Path.Combine(extensions, "cz_stops.txt"))

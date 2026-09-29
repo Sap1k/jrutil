@@ -21,7 +21,7 @@ jrutil, a tool for working with czech public transport data
 
 Usage:
     jrutil-multitool.exe jdf-to-gtfs [options] <JDF-in-dir> <GTFS-out-dir>
-    jrutil-multitool.exe jdf-to-bundle [options] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
+    jrutil-multitool.exe jdf-to-bundle [options] [--gvd-year=YEAR] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
     jrutil-multitool.exe jdf-validate-post-inference --evidence=DIR
     jrutil-multitool.exe jdf-replay-post-inference [options] [--policy=FILE] --evidence=DIR --output=DIR
     jrutil-multitool.exe jdf-export-post-features [options] [--policy=FILE] --evidence=DIR --output=DIR
@@ -32,7 +32,7 @@ Usage:
     jrutil-multitool.exe validate-package <package-dir>
     jrutil-multitool.exe compare-packages (--byte-identical | --migration-audit) <left-package> <right-package>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
-    jrutil-multitool.exe merge-jdf [options] <JDF-out-dir> <JDF-in-dir>...
+    jrutil-multitool.exe merge-jdf [options] --gvd-year=YEAR --reference-date=DATE <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
 
 Options:
@@ -63,7 +63,8 @@ Options:
     --no-post-inference-scores             Skip diagnostic score rows for publication-only bundles
     --evidence=DIR                         Evidence directory for policy replay
     --policy=FILE                          Policy JSON for policy replay
-    --gvd-year=YEAR                       Explicit GVD year for a regional overlay
+    --gvd-year=YEAR                       GVD year: overlay window, merge-jdf validity bound, jdf-to-bundle manifest
+    --reference-date=DATE                 merge-jdf: drop timetables expired before YYYY-MM-DD
     --audit-date=DATE                     Coverage audit date YYYY-MM-DD (default: CIS snapshot Prague date)
     --source=BINDING                      Overlay source binding SOURCE_ID=GTFS.zip
     --source-descriptor=BINDING           Source checksum binding SOURCE_ID=descriptor.json
@@ -529,6 +530,12 @@ let main (args: string array) =
                     diagnosticsOutput = optArgValue args "--diagnostics-out"
                     diagnosticTraces = argFlagSet args "--diagnostic-traces"
                     progress = bundleProgress
+                    gvdYear =
+                        optArgValue args "--gvd-year"
+                        |> Option.map (fun value ->
+                            match Int32.TryParse(value) with
+                            | true, year when year >= 2000 && year <= 9999 -> year
+                            | _ -> invalidArg "--gvd-year" "Expected a four-digit year")
                 }
                 phase "jdf-to-bundle" "write-bundle" "started"
                 let bundleResult =
@@ -966,6 +973,16 @@ let main (args: string array) =
             let mergeById = argFlagSet args "--by-id"
             let strict = argFlagSet args "--strict"
             let mergePlan = jobsFor "merge-jdf" Execution.MergeParsing (4L * Execution.GiB)
+            let mutable gvdYear = 0
+            if not (Int32.TryParse(argValue args "--gvd-year", &gvdYear)) || gvdYear < 2000 || gvdYear > 9999 then
+                invalidArg "--gvd-year" "Expected a four-digit year"
+            let referenceDate =
+                let parsed = NodaTime.Text.LocalDatePattern.Iso.Parse(argValue args "--reference-date")
+                if not parsed.Success then invalidArg "--reference-date" "Expected YYYY-MM-DD"
+                parsed.Value
+            let gvdStart, gvdEnd = Utils.gvdBounds gvdYear
+            if referenceDate < gvdStart || referenceDate > gvdEnd then
+                invalidArg "--reference-date" $"The reference date is outside GVD {gvdYear} ({gvdStart}..{gvdEnd})"
 
             let outPath = Path.GetFullPath(outDir)
             let outParent = Path.GetDirectoryName(outPath)
@@ -1041,6 +1058,7 @@ let main (args: string array) =
             phase "merge-jdf" "resolve-route-overlaps" "started"
             Log.Information("Resolving route overlaps")
             merger.resolveRouteOverlaps()
+            merger.boundValidity(referenceDate, gvdStart, gvdEnd)
             phase "merge-jdf" "resolve-route-overlaps" "completed"
             resourceUsage "merge-jdf" "resolve-route-overlaps" merger.tripStopSpillBytes
 

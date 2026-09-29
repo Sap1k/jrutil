@@ -112,23 +112,23 @@ type JdfToGtfsTests() =
     member _.``JDF conversion emits Oběhy identities and public line numbers``() =
         let feed = batch () |> JdfToGtfs.getGtfsFeed false
 
-        route "jdf:route:586001:1" feed
+        route "jdf:route:586001" feed
         |> fun item ->
             assertEqual (Some "10") item.shortName
             assertEqual (Some "0076a3") item.color
             assertEqual (Some "ffffff") item.textColor
-        route "jdf:route:446002:1" feed
+        route "jdf:route:446002" feed
         |> fun item ->
             assertEqual (Some "N2") item.shortName
             assertEqual (Some "80166f") item.color
             assertEqual (Some "ffffff") item.textColor
-        route "jdf:route:582486:1" feed
+        route "jdf:route:582486" feed
         |> fun item -> assertEqual (Some "486") item.shortName
 
         let czRoutes = feed.czRoutes |> Option.get
         let numericRoute =
             czRoutes
-            |> Array.find (fun item -> item.routeId = "jdf:route:586001:1")
+            |> Array.find (fun item -> item.routeId = "jdf:route:586001")
         assertEqual (Some "586001") numericRoute.cisLineId
         assertEqual (Some "10") numericRoute.publicLineNumber
         assertEqual "jdf:1.11" numericRoute.sourceProvenance
@@ -875,3 +875,70 @@ type JdfToGtfsTests() =
                     .Contains("stop_zone_ids"))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
+
+    member private _.routeVersions (versions: (bool * string * LocalDate) list) =
+        let template = batch ()
+        let original = template.routes |> Array.find (fun route -> route.id = "586001")
+        let routes =
+            versions
+            |> List.mapi (fun index (detour, name, validFrom) ->
+                { original with
+                    idDistinction = index + 1
+                    detour = detour
+                    name = name
+                    timetableValidFrom = validFrom })
+            |> List.toArray
+        { template with
+            routes = Array.append (template.routes |> Array.filter (fun route -> route.id <> "586001")) routes
+            routeIntegrations = template.routeIntegrations |> Array.filter (fun value -> value.routeId <> "586001") }
+
+    [<TestMethod>]
+    member this.``Route versions collapse into one regular and one detour route``() =
+        let name = (batch ()).routes |> Array.find (fun route -> route.id = "586001") |> fun route -> route.name
+        let versions = this.routeVersions [
+            false, name, LocalDate(2026, 1, 1)
+            true, name, LocalDate(2026, 2, 1)
+            true, name, LocalDate(2026, 3, 1)
+            false, name, LocalDate(2026, 4, 1)
+            true, name, LocalDate(2026, 5, 1) ]
+        let grouping = JdfToGtfs.getRouteGrouping versions
+        let idOf distinction = grouping.routeIds.[struct ("586001", distinction)]
+        assertEqual [ "jdf:route:586001"; "jdf:route:586001:detour"; "jdf:route:586001:detour"
+                      "jdf:route:586001"; "jdf:route:586001:detour" ]
+                    ([ 1 .. 5 ] |> List.map idOf)
+        let routes =
+            JdfToGtfs.getGtfsRoutes versions
+            |> Array.filter (fun route -> route.id.StartsWith("jdf:route:586001"))
+            |> Array.sortBy (fun route -> route.id)
+        assertEqual [| "jdf:route:586001"; "jdf:route:586001:detour" |] (routes |> Array.map (fun route -> route.id))
+        assertEqual (Some "ffffff") routes.[0].textColor
+        assertEqual (Some JdfToGtfs.detourTextColor) routes.[1].textColor
+        assertEqual routes.[0].color routes.[1].color
+
+    [<TestMethod>]
+    member this.``A later version with different semantics gets a hashed route id``() =
+        let versions = this.routeVersions [
+            false, "Old name", LocalDate(2026, 1, 1)
+            false, "New name", LocalDate(2026, 6, 1) ]
+        let grouping = JdfToGtfs.getRouteGrouping versions
+        assertEqual "jdf:route:586001" grouping.routeIds.[struct ("586001", 1)]
+        let renamed = grouping.routeIds.[struct ("586001", 2)]
+        Assert.IsTrue(
+            Text.RegularExpressions.Regex.IsMatch(renamed, "^jdf:route:586001:[0-9a-f]{8}$"),
+            renamed)
+
+    [<TestMethod>]
+    member _.``Detour text falls back to dark orange on light route colours``() =
+        let route = (batch ()).routes |> Array.find (fun route -> route.id = "586001")
+        let metro = { route with transportMode = JdfModel.Metro; detour = true }
+        let color, textColor = JdfToGtfs.getGtfsRouteColorsWithDetour (Some "B") metro
+        assertEqual (Some "fbaf33") color
+        assertEqual (Some JdfToGtfs.detourFallbackTextColor) textColor
+        Assert.IsTrue(JdfToGtfs.contrastRatio JdfToGtfs.detourFallbackTextColor "fbaf33" >= 3.0)
+
+    [<TestMethod>]
+    member _.``Route stop keys stay unique across versions of one route``() =
+        let first = JrUtil.Serving.Identity.routeStopKey "jdf:route:586001" "1" "3"
+        let second = JrUtil.Serving.Identity.routeStopKey "jdf:route:586001" "2" "3"
+        Assert.AreNotEqual(first, second)
+        assertEqual "jdf:route:586001/3" (JrUtil.Serving.Identity.routeStopKey "jdf:route:586001" "" "3")

@@ -681,13 +681,35 @@ module PackageWriter =
             | 5 | 6 | 7 | 1300 -> "cable"
             | 11 | 800 -> "trolleybus"
             | _ -> "bus"
+        // JDF routes are regular or detour (výluka) timetables; other sources carry no kind.
+        let timetableKinds =
+            let path = Path.Combine(legacy, "source_route_metadata.parquet")
+            if File.Exists(path) then
+                PackageReader.readTextRowsWithOptional [ "detour" ] path [| "gtfs_route_id"; "detour" |]
+                |> Seq.filter (fun row -> row.[1] <> "")
+                |> Seq.map (fun row -> row.[0], (if row.[1] = "True" then "detour" else "regular"))
+                |> Seq.distinct
+                |> dict
+            else
+                // A regional overlay keeps base route ids, so inherit the base package's kinds.
+                match tryBasePackage legacy with
+                | Some package when File.Exists(Path.Combine(package, "serving", "route.parquet")) ->
+                    PackageReader.readTextRowsWithOptional [ "timetable_kind" ] (Path.Combine(package, "serving", "route.parquet")) [| "route_id"; "timetable_kind" |]
+                    |> Seq.filter (fun row -> row.[1] <> "")
+                    |> Seq.map (fun row -> row.[0], row.[1])
+                    |> dict
+                | _ -> dict []
         let routes = csv gtfs "routes.txt" |> Seq.map (fun row -> objectRow [
             "route_id", box (value "route_id" row); "agency_id", box (value "agency_id" row)
             "mode", box (mode (value "route_type" row)); "gtfs_route_type", box (routeType (value "route_type" row))
             "short_name", nullableString (value "route_short_name" row); "long_name", nullableString (value "route_long_name" row)
             "description", nullableString (value "route_desc" row); "url", nullableString (value "route_url" row)
             "color", nullableString (value "route_color" row); "text_color", nullableString (value "route_text_color" row)
-            "sort_order", nullableParsed integer (value "route_sort_order" row) ])
+            "sort_order", nullableParsed integer (value "route_sort_order" row)
+            "timetable_kind",
+                (match timetableKinds.TryGetValue(value "route_id" row) with
+                 | true, kind -> box kind
+                 | _ -> null) ])
         let calendarRows = csv gtfs "calendar.txt" |> Seq.map (fun row ->
             let mask =
                 [| "monday"; "tuesday"; "wednesday"; "thursday"; "friday"; "saturday"; "sunday" |]
@@ -1512,6 +1534,9 @@ module PackageWriter =
         let read name columns =
             let path = Path.Combine(legacy, name)
             if File.Exists(path) then PackageReader.readTextRows path columns else Seq.empty
+        let readOptional optional name columns =
+            let path = Path.Combine(legacy, name)
+            if File.Exists(path) then PackageReader.readTextRowsWithOptional optional path columns else Seq.empty
         let snapshots = combinedSourceManifest legacy manifest
         let sourceId = defaultSourceId manifest snapshots
         let digest = match snapshots.TryGetValue(sourceId) with | true, value -> value | _ -> String.replicate 64 "0"
@@ -1528,10 +1553,10 @@ module PackageWriter =
                 | _ -> ()
         }
         let routeStopZonesRaw =
-            read "source_route_stop_zone_metadata.parquet" [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order" |]
+            readOptional [ "source_route_version" ] "source_route_stop_zone_metadata.parquet" [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order"; "source_route_version" |]
             |> Seq.toArray
         let routeStopZones = routeStopZonesRaw |> Seq.map (fun row -> objectRow [
-            "route_id", box row.[0]; "route_stop_id", box (Identity.compositeKey [ row.[0]; row.[1] ])
+            "route_id", box row.[0]; "route_stop_id", box (Identity.routeStopKey row.[0] row.[4] row.[1])
             "zone_id", box row.[2]; "source_order", box (integer row.[3]) ])
         let semanticZones = routeStopZonesRaw |> Seq.map (fun row -> objectRow [
             "zone_id", box row.[2]; "fare_system_id", null; "zone_code", box row.[2]; "name", null
@@ -1599,10 +1624,10 @@ module PackageWriter =
                     "target_derivation", box "jdf_structured"; "resolution_status", box "unresolved"; "target_route_id", null; "target_trip_id", null; "target_location_id", null
                     "source_id", box sourceId; "source_snapshot_sha256", box digest; "source_object_id", box row.[0] ])
         let restrictions =
-            read "source_travel_restriction_metadata.parquet"
-                [| "assignment_scope"; "gtfs_route_id"; "gtfs_trip_id"; "source_route_stop_id"; "group_code" |]
+            readOptional [ "source_route_version" ] "source_travel_restriction_metadata.parquet"
+                [| "assignment_scope"; "gtfs_route_id"; "gtfs_trip_id"; "source_route_stop_id"; "group_code"; "source_route_version" |]
             |> Seq.map (fun row ->
-                let routeStop = if String.IsNullOrEmpty row.[1] then null else box (Identity.compositeKey [ row.[1]; row.[3] ])
+                let routeStop = if String.IsNullOrEmpty row.[1] then null else box (Identity.routeStopKey row.[1] row.[5] row.[3])
                 objectRow [
                     "assignment_id", box (Identity.bindingId "restriction" [ "scope", row.[0]; "route", row.[1]; "trip", row.[2]; "route_stop", row.[3]; "group", row.[4] ])
                     "scope", box row.[0]; "route_id", nullableString row.[1]; "trip_id", nullableString row.[2]
@@ -1813,9 +1838,9 @@ module PackageWriter =
                 let locations =
                     PackageReader.readTextRows (fst compiled.["route_stop"]) [| "route_id"; "route_stop_id"; "location_id" |]
                     |> Seq.map (fun row -> struct(row.[0], row.[1]), row.[2]) |> dict
-                PackageReader.readTextRows zoneMetadata [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order" |]
+                PackageReader.readTextRowsWithOptional [ "source_route_version" ] zoneMetadata [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order"; "source_route_version" |]
                 |> Seq.choose (fun row ->
-                    let routeStop = Identity.compositeKey [ row.[0]; row.[1] ]
+                    let routeStop = Identity.routeStopKey row.[0] row.[4] row.[1]
                     match locations.TryGetValue(struct(row.[0], routeStop)) with
                     | true, stop -> Some [| row.[0]; routeStop; stop; row.[2]; row.[3] |]
                     | _ -> None)

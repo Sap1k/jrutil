@@ -350,13 +350,19 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
     let sourceNativeRoutes = Dictionary<string, CsvRow * string>(StringComparer.Ordinal)
     let authorityCandidates = ResizeArray<string * string * string array * DateSet.Dates * CallValue array * CsvRow>()
     let blockedAuthorityDates = HashSet<struct (string * int)>()
+    // A CIS line can have a regular and a detour (výluka) base route. Source trips
+    // belong to the regular one; trip matching still considers both.
+    let preferRegularRoutes (routes: string array) =
+        let regular = routes |> Array.filter (fun route -> not (prepared.baseDetourRoutes.Contains route))
+        if regular.Length = 0 then routes else regular
     let authorityIdentity (sourceTripRow: CsvRow) =
         match routeMatching.cisForSourceTrip sourceTripRow with
-        | Some cisLineId -> Some (cisLineId, routeMatching.directBaseRoutesForSourceTrip sourceTripRow)
+        | Some cisLineId -> Some (cisLineId, preferRegularRoutes (routeMatching.directBaseRoutesForSourceTrip sourceTripRow))
         | None ->
             let sourceRouteId = rowValue sourceTripRow "route_id"
             match routeMatching.routeCandidates.TryGetValue(sourceRouteId) with
-            | true, (routes, "structural_trip_evidence") when routes.Length = 1 ->
+            | true, (routes, "structural_trip_evidence") when (preferRegularRoutes routes).Length = 1 ->
+                let routes = preferRegularRoutes routes
                 match prepared.baseCisByRoute.TryGetValue(routes.[0]) with
                 | true, cisLineId -> Some (cisLineId, routes)
                 | _ -> None

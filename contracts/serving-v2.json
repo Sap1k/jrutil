@@ -222,6 +222,11 @@
           "name": "sort_order",
           "type": "int32",
           "nullable": true
+        },
+        {
+          "name": "timetable_kind",
+          "type": "string",
+          "nullable": true
         }
       ],
       "primary_key": [
