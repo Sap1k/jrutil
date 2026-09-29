@@ -30,7 +30,7 @@ Usage:
     jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
     jrutil-multitool.exe regional-gtfs-overlay-all [options]
     jrutil-multitool.exe validate-package <package-dir>
-    jrutil-multitool.exe compare-packages (--byte-identical | --migration-audit) <left-package> <right-package>
+    jrutil-multitool.exe compare-packages (--byte-identical | --semantic | --migration-audit) [--expect=FILE] <left-package> <right-package>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] --gvd-year=YEAR --reference-date=DATE <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
@@ -71,6 +71,8 @@ Options:
     --diagnostics-out=DIR                 Optional separate detailed diagnostics artifact
     --diagnostic-traces                   Include large compiler trace relations in diagnostics
     --byte-identical                      Require every production byte to match
+    --semantic                            Compare relations by key, GTFS as row multisets, JSON canonically
+    --expect=FILE                         Allow-list of intended semantic differences (`<kind> <glob>` lines)
     --migration-audit                     Validate an explicit legacy-to-production migration
     --policy-grid=FILE                     Deterministic policy variants for replay
     --expectations=FILE                    Labelled routed-post expectation TSV
@@ -483,6 +485,21 @@ let main (args: string array) =
                 if argFlagSet args "--byte-identical" then
                     JrUtil.Serving.Validation.compareByteIdentical left right
                     Log.Information("Production packages are byte-identical")
+                elif argFlagSet args "--semantic" then
+                    let expectations =
+                        optArgValue args "--expect"
+                        |> Option.map (File.ReadAllLines >> JrUtil.Serving.Comparison.parseExpectations)
+                        |> Option.defaultValue []
+                    let report = JrUtil.Serving.Comparison.comparePackages expectations left right
+                    for difference in report.differences do
+                        let expected = not (List.contains difference report.unexpected)
+                        let level = if expected then Events.LogEventLevel.Information else Events.LogEventLevel.Error
+                        Log.Write(level, "{Expected}{Kind} {Subject}: {Summary}",
+                                  (if expected then "expected " else ""), difference.kind, difference.subject, difference.summary)
+                        for sample in difference.samples do Log.Write(level, "    {Sample}", sample)
+                    Log.Information("Compared {Count} package parts; {Differences} differences, {Unexpected} unexpected",
+                                    report.compared.Length, report.differences.Length, report.unexpected.Length)
+                    if not report.isEquivalent then exitCode <- 1
                 else
                     JrUtil.Serving.Validation.migrationAudit left right
                     Log.Information("Production migration structure is valid")
