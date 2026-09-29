@@ -357,3 +357,79 @@ type JdfMergerTests() =
                 CollectionAssert.AreEqual(expected, actual, name)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
+
+    member private _.resolvedValidity(versions: (bool * LocalDate * LocalDate) list) =
+        let batch (detour, validFrom, validTo) =
+            { template.Value with
+                version = { template.Value.version with creationDate = Some (LocalDate(2026, 9, 25)) }
+                routes =
+                    template.Value.routes
+                    |> Array.map (fun route -> {
+                        route with
+                            detour = detour
+                            timetableValidFrom = validFrom
+                            timetableValidTo = validTo
+                    }) }
+        use merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
+        versions |> List.iter (batch >> merger.add)
+        merger.resolveRouteOverlaps()
+        let licNum = template.Value.routes.[0].id
+        merger.batch.routes
+        |> Array.filter (fun route -> route.id = licNum)
+        |> Array.map (fun route -> route.detour, route.timetableValidFrom, route.timetableValidTo)
+        |> Array.sortBy (fun (_, validFrom, _) -> validFrom)
+        |> Array.toList
+
+    [<TestMethod>]
+    member this.``Later versions supersede an open-ended older detour``() =
+        let date (month: int) (day: int) = LocalDate(2026, month, day)
+        let validTo = LocalDate(2027, 8, 31)
+        let resolved =
+            this.resolvedValidity [
+                true, date 8 29, validTo
+                false, date 9 12, validTo
+                false, date 9 26, validTo
+                false, date 9 19, validTo
+            ]
+        assertEqual
+            [ true, date 8 29, date 9 11
+              false, date 9 12, date 9 18
+              false, date 9 19, date 9 25
+              false, date 9 26, validTo ]
+            resolved
+
+    [<TestMethod>]
+    member this.``A cut open-ended detour does not delay later versions``() =
+        let date (month: int) (day: int) = LocalDate(2026, month, day)
+        let validTo = LocalDate(2027, 8, 31)
+        // Batch order mirrors CIS file names, not validity
+        let resolved =
+            this.resolvedValidity [
+                false, date 8 29, validTo
+                true, date 9 12, validTo
+                false, date 9 26, validTo
+                false, date 9 5, validTo
+                false, date 9 19, validTo
+            ]
+        assertEqual
+            [ false, date 8 29, date 9 4
+              false, date 9 5, date 9 11
+              true, date 9 12, date 9 18
+              false, date 9 19, date 9 25
+              false, date 9 26, validTo ]
+            resolved
+
+    [<TestMethod>]
+    member this.``A bounded detour keeps priority over a later regular version``() =
+        let date (month: int) (day: int) = LocalDate(2026, month, day)
+        let resolved =
+            this.resolvedValidity [
+                false, date 1 1, date 12 31
+                true, date 5 4, date 10 22
+                false, date 6 1, date 12 31
+            ]
+        assertEqual
+            [ false, date 1 1, date 5 3
+              true, date 5 4, date 10 22
+              false, date 10 23, date 12 31 ]
+            resolved
