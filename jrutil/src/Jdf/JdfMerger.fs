@@ -322,6 +322,8 @@ type JdfMerger(
     let stopsByIds = Dictionary()
     let stopPostsSet = HashSet()
     let batchDateByRoute = Dictionary()
+    // Validity as published, before overlap resolution cuts it
+    let originalValidityByRoute = Dictionary<string * int, LocalDate * LocalDate>()
 
     let locationDistance (loc1: StopLocation) (loc2: StopLocation) =
         let locToPt (loc: StopLocation) =
@@ -495,6 +497,7 @@ type JdfMerger(
         alternateRouteNamesByRoute.Remove((routeId, routeDistinction)) |> ignore
         reservationOptionsByRoute.Remove((routeId, routeDistinction)) |> ignore
         batchDateByRoute.Remove((routeId, routeDistinction)) |> ignore
+        originalValidityByRoute.Remove((routeId, routeDistinction)) |> ignore
 
     member private this.copyRoute(copy: Route) =
         let oldDist = copy.idDistinction
@@ -579,15 +582,29 @@ type JdfMerger(
             })
         batchDateByRoute.[(copy.id, newDist)] <-
             batchDateByRoute.[(copy.id, oldDist)]
+        originalValidityByRoute.[(copy.id, newDist)] <-
+            originalValidityByRoute.[(copy.id, oldDist)]
 
     member private this.resolveOneRouteOverlap(r1, r2) =
         assert (r1.idDistinction <> r2.idDistinction)
         let r1Date = batchDateByRoute.[(r1.id, r1.idDistinction)]
         let r2Date = batchDateByRoute.[(r2.id, r2.idDistinction)]
+        // CIS publishes many detour timetables open-ended, ending with the
+        // regular versions. Such a detour only lasts until the next version
+        // starts, so it has no priority over a variant that starts later and
+        // was originally published with the same end.
+        let detourPriority (route: Route) (other: Route) =
+            let routeFrom, routeTo =
+                originalValidityByRoute.[(route.id, route.idDistinction)]
+            let otherFrom, otherTo =
+                originalValidityByRoute.[(other.id, other.idDistinction)]
+            route.detour && not (routeTo = otherTo && routeFrom < otherFrom)
+        let r1Detour = detourPriority r1 r2
+        let r2Detour = detourPriority r2 r1
         let r2Priority =
-            (r2.detour && (not r1.detour || r1Date < r2Date))
-            || (not r1.detour && r1Date < r2Date)
-        let r1Priority = r1.detour && (not r2.detour || r2Date < r1Date)
+            (r2Detour && (not r1Detour || r1Date < r2Date))
+            || (not r1Detour && r1Date < r2Date)
+        let r1Priority = r1Detour && (not r2Detour || r2Date < r1Date)
 
         // Validity ranges don't overlap, keep both
         if r1.timetableValidTo < r2.timetableValidFrom
@@ -919,6 +936,8 @@ type JdfMerger(
 
             batchDateByRoute.[(r.id, r.idDistinction)] <-
                 batch.version.creationDate
+            originalValidityByRoute.[(r.id, r.idDistinction)] <-
+                (r.timetableValidFrom, r.timetableValidTo)
         let routeIdMap = Dictionary<string * int, string * int>()
         for source, mapped in Seq.zip batch.routes newRoutes do
             routeIdMap.[(source.id, source.idDistinction)] <-
