@@ -272,15 +272,15 @@ type JdfBundleTests() =
             JrUtil.Serving.Validation.compareByteIdentical first second
 
             let files = Directory.GetFiles(first, "*", SearchOption.AllDirectories)
-            assertEqual 44 files.Length
+            assertEqual 39 files.Length
             assertEqual false (Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
             assertEqual false (File.Exists(Path.Combine(first, "source_call_metadata.parquet")))
 
             use manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "manifest.json")))
             assertEqual "jrutil-production" (manifest.RootElement.GetProperty("bundle_format").GetString())
-            assertEqual 1 (manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            assertEqual 2 (manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
-            assertEqual 37 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
+            assertEqual 2 (manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            assertEqual 3 (manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
+            assertEqual 36 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
 
             let relation name columns =
                 JrUtil.Serving.PackageReader.readTextRows

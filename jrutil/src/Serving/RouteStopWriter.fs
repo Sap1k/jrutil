@@ -57,16 +57,14 @@ module RouteStopWriter =
                 use input = new BinaryReader(File.OpenRead(spoolPath))
                 while input.BaseStream.Position < input.BaseStream.Length do yield decode input
             }
-            let compareRows left right =
-                let order = StringComparer.Ordinal.Compare(left.route, right.route)
-                if order <> 0 then order else StringComparer.Ordinal.Compare(left.stop, right.stop)
+            let key row = row.route + "\u001f" + row.stop
             let schema = Schema.relations |> Array.find (fun relation -> relation.name = "route_stop")
             let columns (rows: Row array) =
                 let column field = rows |> Array.map field
                 [| ColumnWriter.Text(column _.route); ColumnWriter.Text(column _.stop); ColumnWriter.Text(column _.location) |]
             try
-                RelationWriter.write path schema budget 32768 (4L * 1024L * 1024L) 8192
-                    token progress size compareRows (=) encode decode columns rows
+                RelationWriter.write path schema budget (4L * 1024L * 1024L) 8192
+                    token progress size key encode decode columns rows
             finally File.Delete(spoolPath)
         interface IDisposable with
             member _.Dispose() =

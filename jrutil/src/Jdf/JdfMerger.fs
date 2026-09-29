@@ -284,6 +284,9 @@ type JdfMerger(
     stopMergeStrategy: StopMergeStrategy,
     ?tripStopSpoolPath: string,
     ?tripStopTransformWorkers: int) =
+    // The merged batch is dated by the build's reference date, not the wall
+    // clock, so identical inputs produce identical merged JDF bytes.
+    let mutable referenceDate: LocalDate option = None
     let stops = ResizeArray()
     let stopPosts = ResizeArray()
     let agenciesByIco = MultiDict()
@@ -407,7 +410,7 @@ type JdfMerger(
             duNum = None
             region = None
             batchId = None
-            creationDate = Some <| dateToday ()
+            creationDate = referenceDate |> Option.orElseWith (fun () -> Some (dateToday ()))
             generator = Some "JrUtil JdfMerger"
         }
         stops = stops |> Seq.toArray
@@ -737,6 +740,7 @@ type JdfMerger(
     /// open-ended on international lines) is never real. Run after overlap
     /// resolution, which needs every version's published validity.
     member this.boundValidity(reference: LocalDate, gvdStart: LocalDate, gvdEnd: LocalDate) =
+        referenceDate <- Some reference
         let mutable expired = 0
         let mutable nextGvd = 0
         let mutable clamped = 0

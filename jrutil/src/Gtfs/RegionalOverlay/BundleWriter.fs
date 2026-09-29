@@ -52,20 +52,6 @@ let private writeLegacy ({
     try
         Directory.CreateDirectory(gtfsOutput) |> ignore
         Directory.CreateDirectory(extensionsOutput) |> ignore
-        let selectedFieldsPath = Path.Combine(temporary, "provenance", "selected_fields.csv")
-        Directory.CreateDirectory(Path.GetDirectoryName(selectedFieldsPath)) |> ignore
-        use selectedFieldsWriter = new StreamWriter(selectedFieldsPath, false, new UTF8Encoding(false))
-        selectedFieldsWriter.NewLine <- "\n"
-        selectedFieldsWriter.WriteLine(
-            [| "output_object_id"; "field"; "source_id"; "value"; "capability_mode" |]
-            |> Array.map csvEscape
-            |> String.concat ",")
-        let mutable selectedFieldCount = 0L
-        let writeSelectedField (values: string array) =
-            writeCsvRow selectedFieldsWriter values
-            selectedFieldCount <- selectedFieldCount + 1L
-            if selectedFieldCount % 1000000L = 0L then
-                logProgress "write-selected-field-provenance" selectedFieldCount None
         logProgress "write-output-calls" 0L None
         let stopTimeColumns = columnsOf prepared.baseGtfs "stop_times.txt"
         let stopTimeIndexes = stopTimeColumns |> Array.mapi (fun index column -> column, index) |> dict
@@ -207,69 +193,6 @@ let private writeLegacy ({
             "route_color", "route_color"
             "route_text_color", "route_text_color"
         |]
-        for baseTrip in prepared.baseTripValues do
-            match projection.slicesByBaseTrip.TryGetValue(baseTrip.id) with
-            | true, slices ->
-                for slice in slices do
-                    match slice.selection with
-                    | Some selection ->
-                        let provenanceSources = String.concat ";" selection.sourceIds
-                        selection.outputShapeId
-                        |> Option.iter (fun value ->
-                            writeSelectedField [| slice.trip.id; "shape_id"; provenanceSources; value; (capability prepared.policy "shapes").mode |])
-                        for index in 0 .. selection.outputStopIds.Length - 1 do
-                            if not (String.IsNullOrEmpty(selection.outputStopIds.[index])) then
-                                writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "stop_id"; provenanceSources
-                                    selection.outputStopIds.[index]; (capability prepared.policy "call_boarding_points").mode
-                                |]
-                            selection.distances.[index]
-                            |> Option.iter (fun value ->
-                                writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "shape_dist_traveled"; provenanceSources
-                                    value.ToString("G29", CultureInfo.InvariantCulture); (capability prepared.policy "shapes").mode
-                                |])
-                            selection.arrivals.[index]
-                            |> Option.iter (fun value ->
-                                writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "arrival_time"; provenanceSources
-                                    value; (capability prepared.policy "schedules").mode
-                                |])
-                            selection.departures.[index]
-                            |> Option.iter (fun value ->
-                                writeSelectedField [|
-                                    slice.trip.id + "#" + string (index + 1); "departure_time"; provenanceSources
-                                    value; (capability prepared.policy "schedules").mode
-                                |])
-                    | None -> ()
-            | _ -> ()
-        for addition in projection.sourceTripAdditions do
-            let additionSource = addition.projection.sourceId
-            addition.trip.shapeId
-            |> Option.iter (fun value ->
-                writeSelectedField [| addition.trip.id; "shape_id"; additionSource; value; (capability prepared.policy "shapes").mode |])
-            for index in 0 .. addition.projection.sourceCalls.Length - 1 do
-                let call = addition.projection.sourceCalls.[index]
-                let outputStopId = projection.outputStopForSource.[call.stopId]
-                writeSelectedField [|
-                    addition.trip.id + "#" + string (index + 1); "stop_id"; additionSource
-                    outputStopId; (capability prepared.policy "call_boarding_points").mode
-                |]
-                if addition.trip.shapeId.IsSome then
-                    call.distance
-                    |> Option.iter (fun value ->
-                        writeSelectedField [|
-                            addition.trip.id + "#" + string (index + 1); "shape_dist_traveled"; additionSource
-                            value.ToString("G29", CultureInfo.InvariantCulture); (capability prepared.policy "shapes").mode
-                        |])
-                writeSelectedField [|
-                    addition.trip.id + "#" + string (index + 1); "arrival_time"; additionSource
-                    call.arrival; (capability prepared.policy "schedules").mode
-                |]
-                writeSelectedField [|
-                    addition.trip.id + "#" + string (index + 1); "departure_time"; additionSource
-                    call.departure; (capability prepared.policy "schedules").mode
-                |]
         let routeColumns = columnsOf prepared.baseGtfs "routes.txt"
         let agencyColumns = columnsOf prepared.baseGtfs "agency.txt"
         let sourceNativeAgencyRows = Dictionary<string, CsvRow>(StringComparer.Ordinal)
@@ -291,8 +214,6 @@ let private writeLegacy ({
                                     let values = sourceRows |> Seq.map (fun source -> rowValue source column) |> Seq.filter (String.IsNullOrWhiteSpace >> not) |> Seq.distinct |> Seq.toArray
                                     if values.Length = 1 then
                                         row.[column] <- values.[0]
-                                        let sources = sourceRows |> Seq.filter (fun source -> rowValue source column = values.[0]) |> Seq.map (sourceIdentity prepared.binding.sourceId) |> Seq.distinct |> Seq.sort |> String.concat ";"
-                                        writeSelectedField [| routeId; column; sources; values.[0]; (capability prepared.policy capabilityName).mode |]
                                     elif values.Length > 1 then
                                         addDiagnostic prepared.diagnostics "route_display_conflict" routeId $"Conflicting {column} values"
                         | _ -> ()
@@ -326,15 +247,6 @@ let private writeLegacy ({
 
         let baseStopRowsById = prepared.baseStopRows |> Array.map (fun row -> rowValue row "stop_id", row) |> dict
         let sourceStopByOutput = projection.outputStopForSource |> Seq.map (fun pair -> pair.Value, pair.Key) |> dict
-        let sourcesForPlace targetPlace =
-            source.stopGroups
-            |> Seq.choose (fun group ->
-                match source.stopGroupMatches.TryGetValue(group.groupId) with
-                | true, mapped when mapped = targetPlace -> Some (sourceIdentity prepared.binding.sourceId group.members.[0])
-                | _ -> None)
-            |> Seq.distinct
-            |> Seq.sort
-            |> String.concat ";"
         let regionalZonesByPlace = Dictionary<string, string array>(StringComparer.Ordinal)
         if enabled prepared.policy "stop_zones" then
             for group in source.stopGroups do
@@ -415,7 +327,6 @@ let private writeLegacy ({
                         setUniqueZone stopId row
                         if source.authoritativeGtfsStopCorrections.ContainsKey(stopId) then
                             row.["stop_name"] <- source.authoritativeGtfsStopCorrections.[stopId].name
-                            writeSelectedField [| stopId; "stop_name"; sourcesForPlace stopId; row.["stop_name"]; "authoritative_approximate_correction" |]
                         match projection.outputParentCoordinates.TryGetValue(stopId) with
                         | true, coordinates ->
                             let unique = coordinates |> Seq.distinct |> Seq.toArray
@@ -423,7 +334,6 @@ let private writeLegacy ({
                                 let lat, lon = unique.[0]
                                 row.["stop_lat"] <- lat.ToString("G29", CultureInfo.InvariantCulture)
                                 row.["stop_lon"] <- lon.ToString("G29", CultureInfo.InvariantCulture)
-                                writeSelectedField [| stopId; "stop_lat,stop_lon"; sourcesForPlace stopId; row.["stop_lat"] + "," + row.["stop_lon"]; (capability prepared.policy "stop_coordinates").mode |]
                             elif unique.Length > 1 then addDiagnostic prepared.diagnostics "stop_coordinate_conflict" stopId "Multiple authoritative coordinates"
                         | _ -> ()
                         yield row
@@ -703,9 +613,6 @@ let private writeLegacy ({
             }
             |> writeRows (Path.Combine(extensionsOutput, "cz_trip_stop_zones.txt")) (columnsOf prepared.baseExtensions "cz_trip_stop_zones.txt")
 
-        selectedFieldsWriter.Flush()
-        selectedFieldsWriter.Dispose()
-        logProgress "write-selected-field-provenance" selectedFieldCount (Some selectedFieldCount)
         logProgress "write-reports" 0L None
         let reports = Reports.write {
             prepared = prepared

@@ -1,0 +1,5 @@
+# selected_field_provenance was removed from the contract; trip and route
+# provenance stays in object_origin, source_trip_map and source_entity_map.
+file serving/selected_field_provenance.parquet
+manifest relations
+manifest build_spec_sha256

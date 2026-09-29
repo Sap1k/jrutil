@@ -1,16 +1,11 @@
 {
   "bundle_format": "jrutil-production",
-  "bundle_version": 1,
-  "serving_schema_version": 2,
-  "extension_schema_version": 2,
+  "bundle_version": 2,
+  "serving_schema_version": 3,
   "diagnostics_schema_version": 1,
   "identity_contract": "jrutil-identity-v1",
   "required_files": [
     "gtfs.zip",
-    "extensions/cz_zones.txt",
-    "extensions/cz_route_stop_zones.txt",
-    "extensions/cz_call_zones.txt",
-    "extensions/cz_transfer_constraints.txt",
     "serving/<relation>.parquet",
     "manifest.json",
     "diagnostics.json"

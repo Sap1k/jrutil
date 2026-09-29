@@ -1,0 +1,8 @@
+# The merged JDF is dated by the reference date instead of the wall clock.
+# Its bytes (and so its snapshot hash) change once; everything derived from
+# the date or the hash follows.
+column source_snapshot_sha256
+manifest sources
+manifest build_spec_sha256
+manifest compiler
+gtfs feed_info.txt

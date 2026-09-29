@@ -97,6 +97,5 @@ module BindingWriter =
                optional _.source_end_location_id; optional _.source_block_id; optional _.source_run_id; optional _.source_duty_id
                text _.call_pattern_sha256; optional _.variant_key |]
         let schema = Schema.relations |> Array.find (fun relation -> relation.name = "source_trip_map")
-        RelationWriter.write path schema (16L * 1024L * 1024L) 32768 (4L * 1024L * 1024L) 8192 token progress
-            size (fun left right -> StringComparer.Ordinal.Compare(left.binding_id, right.binding_id)) (=)
-            encode decode columns rows
+        RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token progress
+            size (fun row -> row.binding_id) encode decode columns rows

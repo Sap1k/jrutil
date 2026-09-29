@@ -281,7 +281,8 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "post_pruning.csv").Contains("disposition"))
             let transfers = readGtfs output1 "transfers.txt"
             Assert.IsFalse(transfers.Contains("max_waiting_time"))
-            Assert.IsTrue(File.ReadAllText(Path.Combine(output1, "extensions", "cz_transfer_constraints.txt")).Contains("300"))
+            let waits = (JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output1, "serving", "transfer.parquet")) [| "maximum_waiting_time" |] |> Seq.toArray)
+            Assert.IsTrue(waits |> Array.exists (fun row -> row.[0] = "300"))
             Assert.IsFalse(File.Exists(Path.Combine(output1, "gtfs-intermediate", "pathways.txt")))
             Assert.IsFalse(File.Exists(Path.Combine(output1, "gtfs-intermediate", "levels.txt")))
             let diagnosticManifest = File.ReadAllText(Path.Combine(output1 + ".diagnostics", "manifest.json"))
@@ -785,8 +786,8 @@ type RegionalGtfsOverlayTests() =
             CollectionAssert.AreEqual(files1, files2)
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
-            Assert.AreEqual(1, manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            Assert.AreEqual(2, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
+            Assert.AreEqual(2, manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            Assert.AreEqual(3, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
             Assert.AreEqual(2, manifest.RootElement.GetProperty("sources").GetArrayLength())
             JrUtil.Serving.Validation.validatePackage output1 |> ignore
             let mappings = File.ReadAllText(diagnosticPath output1 "traces" "operational_to_source_trips.csv")

@@ -9,13 +9,11 @@ module Schema =
     let BundleFormat = "jrutil-production"
 
     [<Literal>]
-    let BundleVersion = 1
+    let BundleVersion = 2
 
     [<Literal>]
-    let ServingSchemaVersion = 2
+    let ServingSchemaVersion = 3
 
-    [<Literal>]
-    let ExtensionSchemaVersion = 2
 
     [<Literal>]
     let DiagnosticsSchemaVersion = 1
@@ -45,7 +43,6 @@ module Schema =
         name: string
         fields: Field array
         primaryKey: string array
-        sortKey: string array
         foreignKeys: ForeignKey array
     }
 
@@ -57,7 +54,6 @@ module Schema =
         name = name
         fields = fields
         primaryKey = key
-        sortKey = key
         foreignKeys = foreignKeys
     }
 
@@ -94,7 +90,6 @@ module Schema =
         relation "road_route_key" [| required "entity_binding_id" Text; required "cis_line_id" Text; required "route_id" Text; required "valid_from" Date; required "valid_to" Date |] [| "entity_binding_id"; "cis_line_id" |] [||]
         relation "road_trip_key" [| required "binding_id" Text; required "cis_line_id" Text; required "cis_trip_id" Int64; required "trip_id" Text; required "valid_from" Date; required "valid_to" Date |] [| "binding_id"; "cis_line_id"; "cis_trip_id" |] [||]
         relation "rail_trip_key" [| required "binding_id" Text; required "train_number" Text; required "trip_id" Text; required "valid_from" Date; required "valid_to" Date |] [| "binding_id"; "train_number" |] [||]
-        relation "selected_field_provenance" [| required "object_type" Text; required "object_key" Text; required "field_name" Text; required "source_id" Text; required "source_snapshot_sha256" Text; required "source_object_id" Text; required "selection_rule" Text |] [| "object_type"; "object_key"; "field_name"; "source_id"; "source_snapshot_sha256"; "source_object_id"; "selection_rule" |] [||]
         relation "object_origin" [| required "object_type" Text; required "object_key" Text; required "source_id" Text; required "source_snapshot_sha256" Text; required "identifier_namespace" Text; required "source_object_id" Text; required "selection_rule" Text |] [| "object_type"; "object_key" |] [||]
         relation "binding_evidence" [| required "binding_kind" Text; required "binding_id" Text; required "evidence_source_id" Text; required "source_snapshot_sha256" Text; required "identifier_namespace" Text; required "source_object_id" Text; required "selection_rule" Text |] [| "binding_kind"; "binding_id"; "evidence_source_id"; "source_snapshot_sha256"; "identifier_namespace"; "source_object_id"; "selection_rule" |] [||]
         relation "route_stop" [| required "route_id" Text; required "route_stop_id" Text; required "location_id" Text |] [| "route_id"; "route_stop_id" |] [| fk [|"route_id"|] "route" [|"route_id"|]; fk [|"location_id"|] "location" [|"location_id"|] |]
@@ -103,9 +98,3 @@ module Schema =
 
     let relationNames = relations |> Array.map (fun value -> value.name)
 
-    let extensions = [|
-        "cz_zones.txt", [| "zone_id"; "zone_code"; "fare_system_id"; "source_id"; "source_scope" |], [| "zone_id" |]
-        "cz_route_stop_zones.txt", [| "route_id"; "route_stop_id"; "stop_id"; "zone_id"; "source_order" |], [| "route_id"; "route_stop_id"; "zone_id" |]
-        "cz_call_zones.txt", [| "trip_id"; "stop_sequence"; "zone_id"; "source_order" |], [| "trip_id"; "stop_sequence"; "zone_id" |]
-        "cz_transfer_constraints.txt", [| "transfer_key"; "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "max_waiting_time" |], [| "transfer_key" |]
-    |]
