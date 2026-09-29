@@ -45,6 +45,7 @@
     <Compile Include="src/Serving/Validation.fs" />
     <Compile Include="src/Serving/PackageReader.fs" />
     <Compile Include="src/Serving/Comparison.fs" />
+    <Compile Include="src/Serving/CompilerOutput.fs" />
     <Compile Include="src/Serving/ColumnWriter.fs" />
     <Compile Include="src/Serving/HashDedup.fs" />
     <Compile Include="src/Serving/RelationWriter.fs" />
@@ -95,6 +96,7 @@
     <Compile Include="src/CzPtt/CzPttMerger.fs" />
     <Compile Include="src/CzPtt/CzPttToGtfs.fs" />
     <Compile Include="src/CzPtt/CzPttBundle.fs" />
+    <Compile Include="src/CzPtt/CzPttPackage.fs" />
   </ItemGroup>
 
   <ItemGroup>

@@ -99,6 +99,35 @@ let gtfsFeedToFolder () =
         standardSerializer path feed
         extensionSerializer path feed
 
+/// The feed's standard and Czech tables as in-memory text tables
+/// (file name, header, replayable rows), with exactly the cell text the folder
+/// serializers write. Czech tables are compiler-internal.
+let feedTables (feed: GtfsFeed) =
+    let table name (formatter: string array * ('r -> string array)) (rows: 'r seq) =
+        let header, cells = formatter
+        name, header, (fun () -> rows |> Seq.map cells)
+    let optional name formatter rows = rows |> Option.map (table name formatter) |> Option.toList
+    let standard = [
+        yield table "agency.txt" getCellFormatter<Agency> feed.agencies
+        yield table "stops.txt" getCellFormatter<Stop> feed.stops
+        yield table "routes.txt" getCellFormatter<Route> feed.routes
+        yield table "trips.txt" getCellFormatter<Trip> feed.trips
+        yield! optional "shapes.txt" getCellFormatter<ShapePoint> feed.shapes
+        yield! optional "calendar.txt" getCellFormatter<CalendarEntry> feed.calendar
+        yield! optional "calendar_dates.txt" getCellFormatter<CalendarException> feed.calendarExceptions
+        yield! optional "transfers.txt" getCellFormatter<Transfer> feed.transfers
+        yield! feed.feedInfo |> Option.map (fun info -> table "feed_info.txt" getCellFormatter<FeedInfo> [ info ]) |> Option.toList
+        yield "stop_times.txt", standardStopTimeHeader, (fun () -> feed.stopTimes |> Seq.map standardStopTimeCells)
+    ]
+    let czech = [
+        yield! optional "cz_routes.txt" getCellFormatter<CzRoute> feed.czRoutes
+        yield! optional "cz_trips.txt" getCellFormatter<CzTrip> feed.czTrips
+        yield! optional "cz_stops.txt" getCellFormatter<CzStop> feed.czStops
+        yield! optional "cz_stop_zones.txt" getCellFormatter<CzStopZone> feed.czStopZones
+        yield! optional "cz_trip_stop_zones.txt" getCellFormatter<CzTripStopZone> feed.czTripStopZones
+    ]
+    standard, czech
+
 let gtfsParseFolder () =
     // In Python, I'd make a dictionary of file name -> type
     // I think this is the best I can do without reflection.

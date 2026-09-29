@@ -2046,32 +2046,20 @@ type CzPttToGtfsTests() =
                 "source_operational_call_metadata.parquet"
             |] do
                 Assert.IsFalse(File.Exists(Path.Combine(output, oldName)), oldName)
-            CzPttBundle.writeManifest output
-            use manifest =
-                JsonDocument.Parse(
-                    File.ReadAllBytes(Path.Combine(output, "manifest.json")))
-            let manifestFiles =
-                manifest.RootElement.GetProperty("files").EnumerateArray()
-                |> Seq.toArray
-            Assert.AreEqual(7, manifestFiles.Length)
-            Assert.IsTrue(
-                manifestFiles
-                |> Array.forall (fun item ->
-                    item.GetProperty("rows").ValueKind = JsonValueKind.Number))
-
-            result.feed
-            |> Gtfs.deduplicateCalendar
-            |> Gtfs.fillStandardRequiredFields
-            |> Gtfs.gtfsFeedToFolder () (Path.Combine(output, "gtfs-intermediate"))
-            let extensions = Path.Combine(output, "extensions")
-            Directory.CreateDirectory(extensions) |> ignore
-            for fileName in [| "cz_routes.txt"; "cz_trips.txt"; "cz_trip_stop_zones.txt" |] do
-                let source = Path.Combine(output, "gtfs-intermediate", fileName)
-                if File.Exists(source) then File.Move(source, Path.Combine(extensions, fileName))
-            CzPttBundle.writeManifest output
+            // The whole command path: in-memory feed, spooled metadata, no staging tree.
             let production = Path.Combine(root, "production")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) output production
+            let diagnostics = Path.Combine(root, "diagnostics")
+            let packageOptions: CzPttPackage.Options = {
+                catalog = catalog
+                conversion = { operationalPointMode = CzPttToGtfs.Gtfs; blockMode = CzPttToGtfs.Blocks }
+                sr70Path = Some sr70; sr70Name20Path = None; osmPath = None; osmAliasesPath = None
+                diagnosticsOutput = Some diagnostics; diagnosticTraces = false }
+            CzPttPackage.write packageOptions input production (fun _ _ -> ()) |> ignore
             JrUtil.Serving.Validation.validatePackage production |> ignore
+            Assert.IsFalse(Directory.EnumerateFileSystemEntries(root) |> Seq.exists (fun path -> Path.GetFileName(path).StartsWith(".")))
+            Assert.IsTrue(File.Exists(Path.Combine(diagnostics, "events", "diagnostics.json")))
+            use zip = System.IO.Compression.ZipFile.OpenRead(Path.Combine(production, "gtfs.zip"))
+            Assert.IsFalse(zip.Entries |> Seq.exists (fun entry -> entry.Name.StartsWith("cz_")))
             let rows relation columns =
                 JrUtil.Serving.PackageReader.readTextRows
                     (Path.Combine(production, "serving", relation + ".parquet")) columns

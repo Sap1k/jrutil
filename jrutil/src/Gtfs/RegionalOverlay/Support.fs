@@ -899,9 +899,8 @@ let descriptorRetrievedAtFromBase basePath =
 let validateInputs policyPath basePath outputPath gvdYear (binding: SourceBinding) =
     if gvdYear < 2000 || gvdYear > 9999 then invalidArg "--gvd-year" "GVD year is invalid"
     if not (Directory.Exists(basePath)) then invalidArg "base-bundle" $"Base bundle does not exist: {basePath}"
-    if not (File.Exists(Path.Combine(basePath, "gtfs.zip")))
-       && not (Directory.Exists(Path.Combine(basePath, "gtfs-intermediate"))) then
-        invalidArg "base-bundle" "Base bundle has neither a production GTFS ZIP nor compiler staging GTFS"
+    if not (File.Exists(Path.Combine(basePath, "gtfs.zip"))) then
+        invalidArg "base-bundle" "Base bundle is not a production package (no gtfs.zip)"
     if Directory.Exists(outputPath) || File.Exists(outputPath) then
         invalidArg "output-bundle" "Output already exists; overlay bundles are immutable"
     if not (File.Exists(policyPath)) then invalidArg "--policy" $"Policy does not exist: {policyPath}"

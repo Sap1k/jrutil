@@ -429,6 +429,36 @@ type JdfBundleTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``Routed bundle writes post-inference diagnostics only to the diagnostics artifact``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-routed-diagnostics-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let descriptorPath,input,routing=routedCaptureFixture root
+            let firstStop =
+                use archive=ZipFile.OpenRead(input)
+                let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
+                batch.stops.[0].id
+            let reviewStops=Path.Combine(root,"review-stops.txt")
+            File.WriteAllText(reviewStops,string firstStop+Environment.NewLine)
+            let diagnostics=Path.Combine(root,"diagnostics")
+            let output=Path.Combine(root,"bundle")
+            let options={JdfBundle.defaultBundleExecutionOptions with
+                            reviewStopsPath=Some reviewStops
+                            diagnosticsOutput=Some diagnostics}
+            JdfBundle.executeBundleWithRoutedPostInferenceOptions
+                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                JdfToGtfs.emptyTransportModeRules true (Some routing) false
+                options input output |> ignore
+            JrUtil.Serving.Validation.validatePackage output |> ignore
+            for name in [| "post-review.geojson"; "derived_post_scores.parquet"; "derived_post_assignments.parquet" |] do
+                Assert.IsTrue(File.Exists(Path.Combine(diagnostics,"post-inference",name)),name)
+            Assert.IsFalse(Directory.Exists(Path.Combine(output,"post-inference")))
+            // No scratch directory survives a successful build.
+            Assert.IsFalse(Directory.EnumerateDirectories(root) |> Seq.exists (fun path -> Path.GetFileName(path).StartsWith(".")))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
     member _.``Capture-only dispatch never enters policy evaluation or GTFS publication``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-capture-only-isolation-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
@@ -461,7 +491,7 @@ type JdfBundleTests() =
             let probes=JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
             let forbiddenProbes=[|"policy-loading";"evaluator-entry";"consolidation";"scoring"
                                   "resolution";"authored-selection";"result-adaptation";"gtfs-conversion"
-                                  "bundle-staging";"prepare-inference";"stream-stop-times"
+                                  "bundle-output";"prepare-inference";"stream-stop-times"
                                   "prepare-remaining-gtfs";"write-relations";"write-diagnostics"
                                   "hash-payloads";"activation"|]
             for phase in forbiddenProbes do

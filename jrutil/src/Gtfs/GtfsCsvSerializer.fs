@@ -73,6 +73,19 @@ let getSerializer<'r> =
         |> Array.map (fun c -> sprintf "\"%s\"" (c.Replace("\"","\"\"")))
         |> String.concat ","
 
+/// Header and unquoted cell texts of a record type, in serializer column order.
+let getCellFormatter<'r> =
+    assert FSharpType.IsRecord(typeof<'r>)
+    let formatters =
+        FSharpType.GetRecordFields(typeof<'r>)
+        |> Array.map (fun f -> getFormatter f.PropertyType)
+    let fieldGetter = FSharpValue.PreComputeRecordReader(typeof<'r>)
+    getHeader typeof<'r>, fun (row: 'r) ->
+        fieldGetter(row)
+        |> Array.zip formatters
+        |> Array.collect (fun (f, v) -> f v)
+        |> Array.map (fun cell -> if isNull cell then "" else cell)
+
 let getRowsSerializerWriter<'r> =
     let header = getHeader typeof<'r> |> String.concat ","
     let serializer = getSerializer<'r>
@@ -142,3 +155,30 @@ let writeStandardStopTimes (stream: Stream) (records: StopTime seq) =
         writeSeparator ()
         writeQuoted (record.timepoint |> Option.map timepointString |> Option.defaultValue "")
         writer.Write("\n")
+
+/// Cell texts of one standard stop time, identical to writeStandardStopTimes.
+let standardStopTimeHeader = getHeader typeof<StandardStopTime>
+
+let standardStopTimeCells (record: StopTime) =
+    let periodString (value: Period) =
+        let period = value.Normalize()
+        sprintf "%02d:%02d:%02d"
+            (period.Hours + int64 period.Days * 24L) period.Minutes period.Seconds
+    let serviceString = function
+        | RegularlyScheduled -> "0"
+        | NoService -> "1"
+        | PhoneBefore -> "2"
+        | CoordinationWithDriver -> "3"
+    let timepointString = function
+        | Approximate -> "0"
+        | Exact -> "1"
+    [| (if isNull record.tripId then "" else record.tripId)
+       record.arrivalTime |> Option.map periodString |> Option.defaultValue ""
+       record.departureTime |> Option.map periodString |> Option.defaultValue ""
+       (if isNull record.stopId then "" else record.stopId)
+       record.stopSequence.ToString(CultureInfo.InvariantCulture)
+       record.headsign |> Option.defaultValue ""
+       record.pickupType |> Option.map serviceString |> Option.defaultValue ""
+       record.dropoffType |> Option.map serviceString |> Option.defaultValue ""
+       record.shapeDistTraveled |> Option.map (fun value -> value.ToString(CultureInfo.InvariantCulture)) |> Option.defaultValue ""
+       record.timepoint |> Option.map timepointString |> Option.defaultValue "" |]
