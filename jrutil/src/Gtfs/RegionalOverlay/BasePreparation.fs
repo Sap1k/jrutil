@@ -19,6 +19,8 @@ type Result = {
     baseTrips: IDictionary<string, Trip>
     baseCisByRoute: IDictionary<string, string>
     baseRoutesByCis: IDictionary<string, string array>
+    /// Base routes carrying detour (výluka) timetables
+    baseDetourRoutes: HashSet<string>
     basePlaceByStop: IDictionary<string, string>
     baseStopGroupById: IDictionary<string, StopGroup>
     baseStopGroups: StopGroup array
@@ -77,6 +79,11 @@ let prepare (window: DateWindow) baseGtfs baseExtensions : Result =
         |> Array.groupBy fst
         |> Array.map (fun (cis, values) -> cis, values |> Array.map snd)
         |> dict
+    let baseDetourRoutes =
+        baseCzRouteRows
+        |> Seq.filter (fun row -> rowValue row "timetable_kind" = "detour")
+        |> Seq.map (fun row -> rowValue row "route_id")
+        |> HashSet
     let basePlaceByStop =
         csvRows baseExtensions "cz_stops.txt"
         |> Seq.map (fun row -> rowValue row "stop_id", rowValue row "stop_place_id")
@@ -93,6 +100,7 @@ let prepare (window: DateWindow) baseGtfs baseExtensions : Result =
         baseTrips = baseTrips
         baseCisByRoute = baseCisByRoute
         baseRoutesByCis = baseRoutesByCis
+        baseDetourRoutes = baseDetourRoutes
         basePlaceByStop = basePlaceByStop
         baseStopGroupById = baseStopGroupById
         baseStopGroups = baseStopGroups

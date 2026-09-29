@@ -45,6 +45,12 @@ module Identity =
     let compositeKey (components: string seq) =
         components |> Seq.map encodePathComponent |> String.concat "/"
 
+    /// Route stop key. JDF route stop numbers are unique only within one merged
+    /// route version, and one output route can hold several versions.
+    let routeStopKey route (version: string) stop =
+        if String.IsNullOrEmpty version then compositeKey [ route; stop ]
+        else compositeKey [ route; version; stop ]
+
     let canonicalFields (fields: (string * string) seq) =
         fields
         |> Seq.sortBy fst

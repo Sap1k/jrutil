@@ -133,6 +133,8 @@ type BundleExecutionOptions = {
     diagnosticsOutput: string option
     diagnosticTraces: bool
     progress: BundleProgressEvent -> unit
+    /// GVD the merged JDF was bounded to (merge-jdf --gvd-year); recorded in the manifest
+    gvdYear: int option
 }
 
 let defaultBundleExecutionOptions = {
@@ -149,6 +151,7 @@ let defaultBundleExecutionOptions = {
     diagnosticsOutput = None
     diagnosticTraces = false
     progress = ignore
+    gvdYear = None
 }
 
 let private logPhaseResources phase (timer: Stopwatch) =
@@ -618,7 +621,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
         batch.routes
         |> Array.sortBy (fun route -> route.id, route.idDistinction)
         |> Array.map (fun route -> row [
-            "gtfs_route_id", box (JdfToGtfs.jdfRouteId route.id route.idDistinction)
+            "gtfs_route_id", box (JdfToGtfs.gtfsRouteId batch route.id route.idDistinction)
             "source_route_id", box (JdfToGtfs.jdfSourceRouteId route.id route.idDistinction)
             "route_distinction", box route.idDistinction
             "source_agency_id", box route.agencyId
@@ -626,7 +629,8 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             "source_transport_mode", box (sourceTransportModes.[route.id, route.idDistinction] |> transportModeCode)
             "effective_transport_mode", box (transportModeCode route.transportMode)
             "valid_from", box (localDateString route.timetableValidFrom)
-            "valid_to", box (localDateString route.timetableValidTo) ])
+            "valid_to", box (localDateString route.timetableValidTo)
+            "detour", box route.detour ])
 
     let stopPlaces () =
         batch.stops
@@ -698,14 +702,16 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             Jdf.normalizeZoneTokens [routeStop.zone]
             |> Seq.mapi (fun index zoneCode ->
                 row [
-                    "gtfs_route_id", box (JdfToGtfs.jdfRouteId routeStop.routeId routeStop.routeDistinction)
+                    "gtfs_route_id", box (JdfToGtfs.gtfsRouteId batch routeStop.routeId routeStop.routeDistinction)
+                    "source_route_version", box routeStop.routeDistinction
                     "source_route_stop_id", box routeStop.routeStopId
                     "zone_id", box (JdfToGtfs.jdfSourceZoneId routeStop.routeId routeStop.routeDistinction zoneCode)
                     "zone_order", box index ]))
         |> Seq.distinctBy (fun value ->
-            value.["gtfs_route_id"], value.["source_route_stop_id"], value.["zone_id"])
+            value.["gtfs_route_id"], value.["source_route_version"], value.["source_route_stop_id"], value.["zone_id"])
         |> Seq.sortBy (fun value ->
-            string value.["gtfs_route_id"], unbox<int64> value.["source_route_stop_id"],
+            string value.["gtfs_route_id"], unbox<int> value.["source_route_version"],
+            unbox<int64> value.["source_route_stop_id"],
             unbox<int> value.["zone_order"], string value.["zone_id"])
         |> Seq.toArray
 
@@ -715,7 +721,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             id = id; kind = kind; route = route; trip = trip; label = ""; text = ""
             validFrom = Nullable(); validTo = Nullable(); serviceNoteType = "" }
         for notice in batch.routeInfo do
-            let route = JdfToGtfs.jdfRouteId notice.routeId notice.routeDistinction
+            let route = JdfToGtfs.gtfsRouteId batch notice.routeId notice.routeDistinction
             if not (String.IsNullOrWhiteSpace(notice.text)) && retainedRouteIds.Contains(route) then
                 yield { empty (routeNoticeId notice.routeId notice.routeDistinction notice.id) "route_information" route "" with text = notice.text }
         for notice in batch.serviceNotes do
@@ -763,13 +769,14 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             batch.routeStops
             |> Seq.collect (fun routeStop ->
                 let gtfsRouteId =
-                    JdfToGtfs.jdfRouteId routeStop.routeId routeStop.routeDistinction
+                    JdfToGtfs.gtfsRouteId batch routeStop.routeId routeStop.routeDistinction
                 if not (retainedRouteIds.Contains gtfsRouteId) then Seq.empty else
                 restrictionGroupCodes (restrictionMask restrictionLookup routeStop.attributes)
                 |> Seq.map (fun groupCode -> row [
                     "assignment_scope", box "route_stop"
                     "gtfs_route_id", box gtfsRouteId
                     "gtfs_trip_id", null
+                    "source_route_version", box routeStop.routeDistinction
                     "source_route_stop_id", box routeStop.routeStopId
                     "group_code", box groupCode ]))
         let tripCallAssignments =
@@ -778,16 +785,17 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
                 "assignment_scope", box "trip_call"
                 "gtfs_route_id", null
                 "gtfs_trip_id", box gtfsTripId
+                "source_route_version", null
                 "source_route_stop_id", box routeStopId
                 "group_code", box groupCode ])
         Seq.append routeStopAssignments tripCallAssignments
         |> Seq.distinctBy (fun value ->
             value.["assignment_scope"], value.["gtfs_route_id"], value.["gtfs_trip_id"],
-            value.["source_route_stop_id"], value.["group_code"])
+            value.["source_route_version"], value.["source_route_stop_id"], value.["group_code"])
         |> Seq.sortBy (fun value ->
             string value.["assignment_scope"], string value.["gtfs_route_id"],
-            string value.["gtfs_trip_id"], unbox<int64> value.["source_route_stop_id"],
-            string value.["group_code"])
+            string value.["gtfs_trip_id"], string value.["source_route_version"],
+            unbox<int64> value.["source_route_stop_id"], string value.["group_code"])
         |> Seq.toArray
 
     let candidateLookup =
@@ -1027,7 +1035,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             intField "route_distinction" false; stringField "source_agency_id" false
             intField "source_agency_distinction" false; stringField "source_transport_mode" false
             stringField "effective_transport_mode" false; stringField "valid_from" false
-            stringField "valid_to" false |] routes
+            stringField "valid_to" false; boolField "detour" false |] routes
         "source_stop_metadata.parquet", producer [|
             stringField "gtfs_stop_id" false; stringField "town" false
             stringField "district" true; stringField "nearby_place" true
@@ -1037,7 +1045,8 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             stringField "gtfs_stop_id" false; stringField "source_code" false
             stringField "feature_kind" false; stringField "source_object_id" false |] locationFeatures
         "source_route_stop_zone_metadata.parquet", producer [|
-            stringField "gtfs_route_id" false; int64Field "source_route_stop_id" false
+            stringField "gtfs_route_id" false; intField "source_route_version" false
+            int64Field "source_route_stop_id" false
             stringField "zone_id" false; intField "zone_order" false |] routeStopZones
         "source_transfer_metadata.parquet", producer [|
             stringField "source_transfer_id" false; stringField "gtfs_trip_id" false
@@ -1048,7 +1057,8 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             stringField "note" true |] transfers
         "source_travel_restriction_metadata.parquet", producer [|
             stringField "assignment_scope" false; stringField "gtfs_route_id" true
-            stringField "gtfs_trip_id" true; int64Field "source_route_stop_id" false
+            stringField "gtfs_trip_id" true; intField "source_route_version" true
+            int64Field "source_route_stop_id" false
             stringField "group_code" false |] restrictions
         "derived_post_locations.parquet", producer [|
             stringField "derived_location_id" false; stringField "gtfs_stop_place_id" false
@@ -1883,7 +1893,7 @@ let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
         |> Seq.filter (fun route -> publicLines.[route.id, route.idDistinction].IsNone)
         |> Seq.map (fun route -> {
             severity = "warning"; code = "missing_public_line_number"
-            sourceObjectId = JdfToGtfs.jdfRouteId route.id route.idDistinction
+            sourceObjectId = JdfToGtfs.jdfSourceRouteId route.id route.idDistinction
             message = "No unambiguous public line number could be selected"
         })
     let multiZones =
@@ -1966,6 +1976,18 @@ let private fileEntries maximumWorkers progress root parquetRows =
     else
         Parallel.For(0,paths.Length,ParallelOptions(MaxDegreeOfParallelism=min 2 maximumWorkers),calculate) |> ignore
     results |> Array.sortBy (fun entry -> entry.path)
+
+/// Record the bundle's GVD, which the serving manifest exposes as service_horizon.
+let private recordManifestGvd path (gvdYear: int option) =
+    gvdYear |> Option.iter (fun year ->
+        let startDate, endDate = Utils.gvdBounds year
+        let manifest = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path)).AsObject()
+        let gvd = System.Text.Json.Nodes.JsonObject()
+        gvd.["year"] <- System.Text.Json.Nodes.JsonValue.Create(year)
+        gvd.["start_date"] <- System.Text.Json.Nodes.JsonValue.Create(startDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
+        gvd.["end_date"] <- System.Text.Json.Nodes.JsonValue.Create(endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
+        manifest.["gvd"] <- gvd
+        File.WriteAllText(path, manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true))))
 
 let private writeManifest path descriptor (converterVersion: string) stopIdsCis
                           (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
@@ -2781,7 +2803,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     let parent = parents.[stopTime.stopId]
                     let location = parent |> Option.defaultValue stopTime.stopId
                     let boarding = if parent.IsSome then stopTime.stopId else null
-                    let routeStop = JrUtil.Serving.Identity.compositeKey [row.routeId; string row.sourceRouteStopId]
+                    let routeStop = JrUtil.Serving.Identity.routeStopKey row.routeId (string row.sourceRouteVersion) (string row.sourceRouteStopId)
                     nativeCalls.Append(JrUtil.Serving.TripCallWriter.fromGtfs stopTime location boarding routeStop)
                     nativeSummaries.Append(stopTime)
                     nativeSourceCalls.Append(stopTime)
@@ -2920,14 +2942,14 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                         | None -> "none"
                     { severity = "warning"
                       code = if decision.keep then "filtered_international_trips" else "filtered_international_route"
-                      sourceObjectId = JdfToGtfs.jdfRouteId decision.routeId decision.routeDistinction
+                      sourceObjectId = JdfToGtfs.jdfSourceRouteId decision.routeId decision.routeDistinction
                       message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; override={overrideValue}; domestic={decision.retainedDomesticTrips}; qualifying_cross_border={decision.qualifyingCrossBorderTrips}; rejected_cross_border={decision.rejectedCrossBorderTrips}; foreign_only={decision.foreignOnlyTrips}" })
             let transportModeDiagnostics =
                 transportModeDecisions
                 |> Seq.map (fun decision ->
                     { severity = if decision.corrected then "info" else "warning"
                       code = if decision.corrected then "corrected_transport_mode" else "transport_mode_rule_mismatch"
-                      sourceObjectId = JdfToGtfs.jdfRouteId decision.routeId decision.routeDistinction
+                      sourceObjectId = JdfToGtfs.jdfSourceRouteId decision.routeId decision.routeDistinction
                       message = $"{decision.message}; effective_mode={decision.effectiveMode}" })
             let bundleDiagnostics =
                 Seq.concat [ diagnostics batch feed callFacts emittedTransferCalls :> seq<_>
@@ -2958,7 +2980,8 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                           transportModeDecisions preparation.postPlan routingPbfPath
                           (executionOptions.postInferenceEvidencePath |> Option.orElse liveEvidenceTemporaryDirectory)
                           executionOptions.postInferencePolicyPath
-                          diagnosticPostLabels batch feed files)
+                          diagnosticPostLabels batch feed files
+            recordManifestGvd (Path.Combine(temp, "manifest.json")) executionOptions.gvdYear)
         Log.Information("Bundle phase: activating completed bundle")
         JdfPostInferencePolicy.PostInferencePhaseProbe.record "activation"
         let productionTemp = temp + ".production"

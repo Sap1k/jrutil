@@ -557,6 +557,17 @@ let rec dateTimeRange (startDate: DateTime) (endDate: DateTime)  =
 let dateToday () =
     LocalDate.FromDateTime(DateTime.Today)
 
+/// The first day of the Czech timetable year (GVD) valid from December of `year`:
+/// the second Sunday of December.
+let gvdSecondSunday year =
+    let first = LocalDate(year, 12, 1)
+    let offset = (int IsoDayOfWeek.Sunday - int first.DayOfWeek + 7) % 7 + 7
+    first.PlusDays(offset)
+
+/// First and last day of GVD `year`, e.g. 2026 = 2025-12-14 .. 2026-12-12.
+let gvdBounds year =
+    gvdSecondSunday (year - 1), (gvdSecondSunday year).PlusDays(-1)
+
 let constant x _ = x
 
 let argFlagSet (args: IDictionary<string, ArgValue>) name =

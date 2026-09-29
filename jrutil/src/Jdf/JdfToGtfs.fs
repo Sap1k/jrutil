@@ -280,7 +280,7 @@ let normalizeNumericDesignation (value: string) =
     let withoutZeros = value.TrimStart('0')
     if withoutZeros = "" then "0" else withoutZeros
 
-let getPublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
+let private computePublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
     let integrationsByRoute =
         jdfBatch.routeIntegrations
         |> Seq.groupBy (fun ri -> ri.routeId, ri.routeDistinction)
@@ -331,6 +331,90 @@ let getPublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
                 None
         key, publicLineNumber)
     |> Map
+
+let private publicLineNumberCache =
+    System.Runtime.CompilerServices.ConditionalWeakTable<JdfModel.JdfBatch, Map<string * int, string option>>()
+
+/// Public line numbers per (licence, distinction), computed once per batch.
+let getPublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
+    publicLineNumberCache.GetValue(jdfBatch, fun batch -> computePublicLineNumbers batch)
+
+// Detour (výluka) timetables keep the route colour but get amber text, or a dark
+// orange where amber would be unreadable on a light background.
+let detourTextColor = "ffd23f"
+let detourFallbackTextColor = "7a3500"
+
+let private relativeLuminance (hex: string) =
+    let channel index =
+        let value = float (Convert.ToInt32(hex.Substring(index, 2), 16)) / 255.0
+        if value <= 0.03928 then value / 12.92 else ((value + 0.055) / 1.055) ** 2.4
+    0.2126 * channel 0 + 0.7152 * channel 2 + 0.0722 * channel 4
+
+/// WCAG contrast ratio of two RRGGBB colours.
+let contrastRatio (first: string) (second: string) =
+    let a, b = relativeLuminance first, relativeLuminance second
+    (max a b + 0.05) / (min a b + 0.05)
+
+let getGtfsRouteColorsWithDetour publicLineNumber (jdfRoute: JdfModel.Route) =
+    let color, textColor = getGtfsRouteColors publicLineNumber jdfRoute
+    if not jdfRoute.detour then color, textColor else
+    let background = color |> Option.defaultValue "ffffff"
+    color,
+    Some (if contrastRatio detourTextColor background >= 3.0 then detourTextColor
+          else detourFallbackTextColor)
+
+/// Output GTFS routes group all merged versions of a CIS line that share route
+/// semantics, keeping detour timetables apart. The group holding the line's
+/// earliest-starting version (after merge-jdf bounding, the one in force) gets the
+/// plain id; other groups get a suffix hashed from their semantics.
+type RouteGrouping = {
+    routeIds: IReadOnlyDictionary<struct (string * int), string>
+    /// Output route id and the representative version, one per group
+    groups: (string * JdfModel.Route) array
+}
+
+let private routeGroupingCache =
+    System.Runtime.CompilerServices.ConditionalWeakTable<JdfModel.JdfBatch, RouteGrouping>()
+
+let private buildRouteGrouping (jdfBatch: JdfModel.JdfBatch) =
+    let publicLineNumbers = getPublicLineNumbers jdfBatch
+    let semanticKey (route: JdfModel.Route) =
+        let publicLine = publicLineNumbers.[route.id, route.idDistinction]
+        let color, textColor = getGtfsRouteColors publicLine route
+        String.Join("", [|
+            route.id; jdfAgencyId route.agencyId route.agencyDistinction
+            defaultArg publicLine ""; route.name; getGtfsRouteType route
+            defaultArg color ""; defaultArg textColor ""; string route.detour |])
+    let routeIds = Dictionary<struct (string * int), string>()
+    let groups = ResizeArray<string * JdfModel.Route>()
+    for licence, versions in jdfBatch.routes |> Array.groupBy (fun route -> route.id) |> Array.sortBy fst do
+        let baseId = sprintf "jdf:route:%s" (Uri.EscapeDataString(licence))
+        for detour in [ false; true ] do
+            let kindGroups =
+                versions
+                |> Array.filter (fun route -> route.detour = detour)
+                |> Array.groupBy semanticKey
+                |> Array.map (fun (key, members) ->
+                    key, members |> Array.sortBy (fun route -> route.timetableValidFrom, route.idDistinction))
+                |> Array.sortBy (fun (key, members) -> members.[0].timetableValidFrom, key)
+            kindGroups
+            |> Array.iteri (fun index (key, members) ->
+                let kindId = if detour then baseId + ":detour" else baseId
+                let routeId =
+                    if index = 0 then kindId
+                    else
+                        let hash = SHA256.HashData(Encoding.UTF8.GetBytes(key))
+                        kindId + ":" + Convert.ToHexString(hash, 0, 4).ToLowerInvariant()
+                for route in members do routeIds.[struct (route.id, route.idDistinction)] <- routeId
+                groups.Add((routeId, members.[0])))
+    { routeIds = routeIds; groups = groups.ToArray() }
+
+let getRouteGrouping (jdfBatch: JdfModel.JdfBatch) =
+    routeGroupingCache.GetValue(jdfBatch, fun batch -> buildRouteGrouping batch)
+
+/// Output GTFS route id of one merged route version.
+let gtfsRouteId (jdfBatch: JdfModel.JdfBatch) (routeId: string) routeDistinction =
+    (getRouteGrouping jdfBatch).routeIds.[struct (routeId, routeDistinction)]
 
 let applyTransportModeRules (ruleSet: TransportModeRuleSet) (batch: JdfModel.JdfBatch) =
     let publicLines = getPublicLineNumbers batch
@@ -933,14 +1017,14 @@ let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
 let getGtfsRoutesWithPublicLines
         (publicLineNumbers: Map<string * int, string option>)
                                 (jdfBatch: JdfModel.JdfBatch) =
-    jdfBatch.routes
-    |> Array.map (fun jdfRoute ->
+    (getRouteGrouping jdfBatch).groups
+    |> Array.map (fun (routeId, jdfRoute) ->
     let publicLineNumber =
         publicLineNumbers.[jdfRoute.id, jdfRoute.idDistinction]
     let routeColor, routeTextColor =
-        getGtfsRouteColors publicLineNumber jdfRoute
+        getGtfsRouteColorsWithDetour publicLineNumber jdfRoute
     {
-        id = jdfRouteId jdfRoute.id jdfRoute.idDistinction
+        id = routeId
         agencyId = Some (jdfAgencyId jdfRoute.agencyId
                                      jdfRoute.agencyDistinction)
         shortName = publicLineNumber
@@ -1648,7 +1732,7 @@ let private getGtfsTripsWithEndpoints (endpoints: IDictionary<struct(string * in
                 attrs |> Set.contains JdfModel.WheelchairAccessible
                 || attrs |> Set.contains JdfModel.PartlyWheelchairAccessible
         ({
-            routeId = jdfRouteId jdfTrip.routeId jdfTrip.routeDistinction
+            routeId = gtfsRouteId jdfBatch jdfTrip.routeId jdfTrip.routeDistinction
             serviceId = id
             id = id
             headsign =
@@ -1693,6 +1777,8 @@ type private StopTimeAttributeFlags =
 type StreamingStopTimeRow = {
     stopTime: GtfsModel.StopTime
     sourceRouteStopId: int64
+    /// Merged route version (distinction); route stop numbers are unique only within one
+    sourceRouteVersion: int
     routeId: string
 }
 
@@ -1988,7 +2074,8 @@ let private getGtfsStopTimeRowsInternal adjacentTripGroups stopIdCis
                     stopZoneIds = None
                 }
                 Some { stopTime = stopTime; sourceRouteStopId = jdfTripStop.routeStopId
-                       routeId = jdfRouteId routeId routeDistinction }
+                       sourceRouteVersion = routeDistinction
+                       routeId = gtfsRouteId jdfBatch routeId routeDistinction }
         )
         |> Seq.choose id
     )
@@ -2005,10 +2092,10 @@ let getGtfsStopTimes stopIdCis (jdfBatch: JdfModel.JdfBatch) =
 
 let getCzRoutes (publicLineNumbers: Map<string * int, string option>)
                 (jdfBatch: JdfModel.JdfBatch) =
-    jdfBatch.routes
-    |> Array.map (fun route ->
+    (getRouteGrouping jdfBatch).groups
+    |> Array.map (fun (routeId, route) ->
         {
-            routeId = jdfRouteId route.id route.idDistinction
+            routeId = routeId
             cisLineId = Some route.id
             publicLineNumber =
                 publicLineNumbers.[route.id, route.idDistinction]
@@ -2131,8 +2218,8 @@ let getCzStopZones stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
                                              routeStop.routeDistinction
                                              zoneCode
                 zoneCode = zoneCode
-                routeId = jdfRouteId routeStop.routeId
-                                     routeStop.routeDistinction
+                routeId = gtfsRouteId jdfBatch routeStop.routeId
+                                      routeStop.routeDistinction
                 idsSystemId = None
                 sourceProvenance = sprintf "jdf:%s" jdfBatch.version.version
             }: GtfsModel.CzStopZone))

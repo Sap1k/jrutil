@@ -358,7 +358,10 @@ type JdfMergerTests() =
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
-    member private _.resolvedValidity(versions: (bool * LocalDate * LocalDate) list) =
+    member private this.resolvedValidity(versions: (bool * LocalDate * LocalDate) list) =
+        this.mergedValidity(versions, ignore)
+
+    member private _.mergedValidity(versions: (bool * LocalDate * LocalDate) list, finish: JdfMerger.JdfMerger -> unit) =
         let batch (detour, validFrom, validTo) =
             { template.Value with
                 version = { template.Value.version with creationDate = Some (LocalDate(2026, 9, 25)) }
@@ -373,6 +376,7 @@ type JdfMergerTests() =
         use merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
         versions |> List.iter (batch >> merger.add)
         merger.resolveRouteOverlaps()
+        finish merger
         let licNum = template.Value.routes.[0].id
         merger.batch.routes
         |> Array.filter (fun route -> route.id = licNum)
@@ -433,3 +437,24 @@ type JdfMergerTests() =
               true, date 5 4, date 10 22
               false, date 10 23, date 12 31 ]
             resolved
+
+    [<TestMethod>]
+    member this.``Validity is bounded to the current GVD from the reference date``() =
+        let gvdStart, gvdEnd = Utils.gvdBounds 2026
+        let reference = LocalDate(2026, 9, 29)
+        let resolved =
+            this.mergedValidity(
+                [ false, LocalDate(2025, 6, 1), LocalDate(2026, 9, 28)
+                  false, LocalDate(2026, 9, 29), LocalDate(2099, 12, 31)
+                  true, LocalDate(2026, 12, 13), LocalDate(2027, 6, 30) ],
+                fun merger -> merger.boundValidity(reference, gvdStart, gvdEnd))
+        assertEqual [ false, LocalDate(2026, 9, 29), LocalDate(2026, 12, 12) ] resolved
+
+    [<TestMethod>]
+    member this.``Past starts are clamped to the GVD start``() =
+        let gvdStart, gvdEnd = Utils.gvdBounds 2026
+        let resolved =
+            this.mergedValidity(
+                [ false, LocalDate(2024, 12, 15), LocalDate(2026, 12, 12) ],
+                fun merger -> merger.boundValidity(LocalDate(2026, 1, 10), gvdStart, gvdEnd))
+        assertEqual [ false, LocalDate(2025, 12, 14), LocalDate(2026, 12, 12) ] resolved

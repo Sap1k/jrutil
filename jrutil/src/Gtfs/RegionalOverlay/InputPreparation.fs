@@ -55,6 +55,7 @@ type Result = {
     baseTrips: IDictionary<string, Trip>
     baseCisByRoute: IDictionary<string, string>
     baseRoutesByCis: IDictionary<string, string array>
+    baseDetourRoutes: HashSet<string>
     basePlaceByStop: IDictionary<string, string>
     baseStopGroupById: IDictionary<string, StopGroup>
     approximateStopName: string -> bool
@@ -101,6 +102,17 @@ let prepare ({
         invalidOp $"Source/base snapshot skew {snapshotSkew:F2} days exceeds policy maximum {policy.source.maximumSnapshotSkewDays}"
 
     let window = gvdWindow gvdYear
+    // A base bounded to another GVD has no service in this window; never overlay across the cutover.
+    let baseManifestPath = Path.Combine(baseBundle, "manifest.json")
+    if File.Exists(baseManifestPath) then
+        use baseManifest = System.Text.Json.JsonDocument.Parse(File.ReadAllText(baseManifestPath))
+        match baseManifest.RootElement.TryGetProperty("service_horizon") with
+        | true, horizon when horizon.ValueKind = System.Text.Json.JsonValueKind.Object
+                             && (fst (horizon.TryGetProperty("year"))) ->
+            let baseYear = horizon.GetProperty("year").GetInt32()
+            if baseYear <> gvdYear then
+                invalidArg "--gvd-year" $"The base package is bounded to GVD {baseYear}, not {gvdYear}"
+        | _ -> ()
     let snapshotDate = Instant.FromDateTimeOffset(baseRetrievedAt).InZone(DateTimeZoneProviders.Tzdb.["Europe/Prague"]).Date
     let auditDate = auditDate |> Option.defaultValue snapshotDate
     if not (window.index.ContainsKey(auditDate)) then invalidArg "--audit-date" "Audit date is outside the GVD window"
@@ -180,6 +192,7 @@ let prepare ({
         baseTrips = nationalBase.baseTrips
         baseCisByRoute = nationalBase.baseCisByRoute
         baseRoutesByCis = nationalBase.baseRoutesByCis
+        baseDetourRoutes = nationalBase.baseDetourRoutes
         basePlaceByStop = nationalBase.basePlaceByStop
         baseStopGroupById = nationalBase.baseStopGroupById
         approximateStopName = approximateStopName

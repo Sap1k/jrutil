@@ -8,4 +8,6 @@ Removed production families include `gtfs-intermediate/`, `cz_routes.txt`, `cz_t
 
 Consumers must validate `bundle_format`, all schema versions, the closed file inventory, Parquet metadata, keys, hashes, and semantic applicability before activation. Legacy packages are rejected with an instruction to rebuild. `validate-package` performs production validation. `compare-packages --byte-identical` checks reproducibility. `compare-packages --migration-audit` validates the target package and establishes the explicit legacy migration boundary.
 
+JDF output routes now group all versions of a CIS line (`jdf:route:<line>`, with a separate `jdf:route:<line>:detour` for výluka timetables) instead of emitting `jdf:route:<line>:<distinction>` per version. JDF route-stop keys include the version distinction. Serving v2 `route` gains the nullable `timetable_kind` (`regular` | `detour`); it is null for non-JDF routes. JDF service is bounded to the GVD recorded in `service_horizon`.
+
 Oběhy needs a coordinated serving-v2 importer, indexes, and central resolver before activation. Until then it must reject these packages. No Oběhy source is changed by this migration.
