@@ -76,6 +76,19 @@ type ServingContractTests() =
         Assert.AreEqual(2, gate.Reclaims)
 
     [<TestMethod>]
+    member _.``Serving modes follow basic and extended GTFS route types``() =
+        let mode = JrUtil.Serving.PackageWriter.servingMode
+        Assert.AreEqual("bus", mode 202, "National coach")
+        Assert.AreEqual("bus", mode 704)
+        Assert.AreEqual("metro", mode 401)
+        Assert.AreEqual("rail", mode 105, "Night train")
+        Assert.AreEqual("rail", mode 106)
+        Assert.AreEqual("tram", mode 900)
+        Assert.AreEqual("trolleybus", mode 800)
+        Assert.AreEqual("water", mode 1000)
+        Assert.AreEqual("cable", mode 1701, "JDF cable car")
+
+    [<TestMethod>]
     member _.``Composite public keys preserve identifier colons and escape delimiters``() =
         Assert.AreEqual(
             "jdf:route:000645:1/10%2Fwest",

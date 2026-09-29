@@ -641,6 +641,24 @@ module PackageWriter =
                     yield objectRow (Array.map2 (fun (field: JrUtil.Serving.Schema.Field) value -> field.name, parseField field value) relation.fields row)
         }
 
+    /// Serving mode for a basic or extended GTFS route type. Ranges follow the
+    /// overlay's mode classes: coaches (200-209) are buses and urban rail
+    /// (400-405) is metro.
+    let servingMode routeType =
+        match routeType with
+        | 0 -> "tram"
+        | value when value >= 900 && value <= 906 -> "tram"
+        | 1 -> "metro"
+        | value when value >= 400 && value <= 405 -> "metro"
+        | 2 -> "rail"
+        | value when value >= 100 && value <= 117 -> "rail"
+        | 4 -> "water"
+        | value when value >= 1000 && value <= 1021 -> "water"
+        | 5 | 6 | 7 | 1400 | 1701 -> "cable"
+        | value when value >= 1300 && value <= 1307 -> "cable"
+        | 11 | 800 -> "trolleybus"
+        | _ -> "bus"
+
     let private gtfsRelations legacy gtfs (tripCallSummaries: IDictionary<string, TripCallSummary>)
                               (nonContiguousTripSequences: IDictionary<string, HashSet<int>>) =
         let agencies = csv gtfs "agency.txt" |> Seq.map (fun row -> objectRow [
@@ -672,15 +690,7 @@ module PackageWriter =
                 "url", nullableString (value "stop_url" row); "timezone", nullableString (value "stop_timezone" row)
                 "wheelchair_boarding", nullableParsed int16 (value "wheelchair_boarding" row) ])
         let routeType value = integer value
-        let mode value =
-            match routeType value with
-            | 0 | 900 -> "tram"
-            | 1 -> "metro"
-            | 2 | 100 | 101 | 102 | 103 | 106 | 109 | 202 | 401 -> "rail"
-            | 4 | 1000 -> "water"
-            | 5 | 6 | 7 | 1300 -> "cable"
-            | 11 | 800 -> "trolleybus"
-            | _ -> "bus"
+        let mode value = servingMode (routeType value)
         // JDF routes are regular or detour (výluka) timetables; other sources carry no kind.
         let timetableKinds =
             let path = Path.Combine(legacy, "source_route_metadata.parquet")
