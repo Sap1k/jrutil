@@ -163,17 +163,11 @@ module PackageWriter =
             relation.fields
             |> Array.mapi (fun index field -> field.name, index)
             |> dict
-        let keyIndexes = relation.sortKey |> Array.map (fun name -> indexes.[name])
+        let keyIndexes = relation.primaryKey |> Array.map (fun name -> indexes.[name])
         let typed =
             rows |> Seq.map (fun (row: IDictionary<string,obj>) ->
                 relation.fields |> Array.map (fun field -> unbox<string> row.[field.name]))
-        let compareRows (left: string array) (right: string array) =
-            let mutable result, index = 0, 0
-            while result = 0 && index < keyIndexes.Length do
-                let field = keyIndexes.[index]
-                result <- StringComparer.Ordinal.Compare(left.[field], right.[field])
-                index <- index + 1
-            result
+        let key (row: string array) = keyIndexes |> Array.map (fun index -> row.[index]) |> String.concat "\u001f"
         let size (row: string array) =
             48L + int64 row.Length * 32L + (row |> Array.sumBy (fun value -> 2L * int64 value.Length))
         let encode (output: BinaryWriter) (row: string array) =
@@ -182,106 +176,8 @@ module PackageWriter =
         let columns (values: string array array) =
             relation.fields
             |> Array.mapi (fun index _ -> ColumnWriter.Text(values |> Array.map (fun row -> row.[index])))
-        RelationWriter.write path relation (256L * 1024L * 1024L) 1048576
-            (16L * 1024L * 1024L) 65536 CancellationToken.None progress size compareRows (=) encode decode columns typed
-
-    let private writeSelectedFieldProvenance progress (path: string) (relation: Schema.Relation) rows =
-        let mutable reclaimOperation = ""
-        let mutable nextReclaim = 200000L
-        let reclaimGate =
-            MemoryReclaimGate(3_000_000_000L, MemoryReclaim.DefaultMinimumGrowthBytes, reclaimManagedPhaseMemory)
-        let report operation count =
-            progress operation count
-            if operation <> reclaimOperation then
-                reclaimOperation <- operation
-                nextReclaim <- 200000L
-            if count >= nextReclaim then
-                while nextReclaim <= count do nextReclaim <- nextReclaim + 200000L
-                reclaimGate.Check() |> ignore
-        let indexes = relation.fields |> Array.mapi (fun index field -> field.name, index) |> dict
-        let objectTypeIndex, objectKeyIndex = indexes.["object_type"], indexes.["object_key"]
-        let keyIndexes = relation.sortKey |> Array.map (fun name -> indexes.[name])
-        let compareRows (left: string array) (right: string array) =
-            let mutable result, index = 0, 0
-            while result = 0 && index < keyIndexes.Length do
-                let field = keyIndexes.[index]
-                result <- StringComparer.Ordinal.Compare(left.[field], right.[field])
-                index <- index + 1
-            result
-        let size (row: string array) =
-            48L + int64 row.Length * 32L + (row |> Array.sumBy (fun value -> 2L * int64 value.Length))
-        let encode (output: BinaryWriter) (row: string array) = for value in row do output.Write(value)
-        let decode (input: BinaryReader) = Array.init relation.fields.Length (fun _ -> input.ReadString())
-        let columns (values: string array array) =
-            relation.fields |> Array.mapi (fun index _ -> ColumnWriter.Text(values |> Array.map (fun row -> row.[index])))
-        let typed = rows |> Seq.map (fun (row: IDictionary<string,obj>) -> relation.fields |> Array.map (fun field -> unbox<string> row.[field.name]))
-        let groupKey (row: string array) =
-            let key = row.[objectKeyIndex]
-            if row.[objectTypeIndex] = "call" then
-                let separator = key.LastIndexOf('/')
-                if separator < 0 then key else key.Substring(0, separator)
-            else key
-        let root = Path.Combine(Path.GetDirectoryName(path), ".selected-field-partitions-" + Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(root) |> ignore
-        try
-            let writers = Dictionary<string, BinaryWriter>(StringComparer.Ordinal)
-            let paths = Dictionary<string, string>(StringComparer.Ordinal)
-            let previousGroups = Dictionary<string, string>(StringComparer.Ordinal)
-            let monotonic = Dictionary<string, bool>(StringComparer.Ordinal)
-            try
-                let mutable count = 0L
-                for row in typed do
-                    let objectType = row.[objectTypeIndex]
-                    let writer =
-                        match writers.TryGetValue(objectType) with
-                        | true, writer -> writer
-                        | _ ->
-                            let file = Path.Combine(root, writers.Count.ToString(CultureInfo.InvariantCulture) + ".bin")
-                            let writer = new BinaryWriter(File.Create(file), Encoding.UTF8)
-                            writers.Add(objectType, writer); paths.Add(objectType, file); monotonic.Add(objectType, true)
-                            writer
-                    let group = groupKey row
-                    match previousGroups.TryGetValue(objectType) with
-                    | true, previous when StringComparer.Ordinal.Compare(previous, group) > 0 -> monotonic.[objectType] <- false
-                    | _ -> ()
-                    previousGroups.[objectType] <- group
-                    encode writer row
-                    count <- count + 1L
-                    if count % 100000L = 0L then
-                        report "partition-input" count
-            finally
-                for writer in writers.Values do writer.Dispose()
-            let ordered = seq {
-                for objectType in paths.Keys |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right)) do
-                    let fileRows = seq {
-                        use input = new BinaryReader(File.OpenRead(paths.[objectType]), Encoding.UTF8)
-                        while input.BaseStream.Position < input.BaseStream.Length do yield decode input
-                    }
-                    if monotonic.[objectType] then
-                        use input = fileRows.GetEnumerator()
-                        let mutable available = input.MoveNext()
-                        while available do
-                            let group = groupKey input.Current
-                            let buffer = ResizeArray<string array>()
-                            while available && groupKey input.Current = group do
-                                buffer.Add(input.Current)
-                                available <- input.MoveNext()
-                            let values = buffer.ToArray()
-                            Array.sortInPlaceWith compareRows values
-                            yield! values
-                    else
-                        yield! BinarySort.sort root (128L * 1024L * 1024L) 524288 CancellationToken.None
-                            (fun operation count -> report (objectType + "-" + operation) count)
-                            size compareRows encode decode fileRows
-                    let current = Process.GetCurrentProcess()
-                    current.Refresh()
-                    if current.PrivateMemorySize64 >= 3_250_000_000L then
-                        reclaimManagedPhaseMemory ()
-            }
-            RelationWriter.writeOrdered path relation (16L * 1024L * 1024L) 65536 CancellationToken.None
-                report size compareRows (=) columns ordered
-        finally
-            if Directory.Exists(root) then Directory.Delete(root, true)
+        RelationWriter.write path relation (256L * 1024L * 1024L)
+            (16L * 1024L * 1024L) 65536 CancellationToken.None progress size key encode decode columns typed
 
     let private csv path name =
         let file = Path.Combine(path, name)
@@ -562,21 +458,6 @@ module PackageWriter =
                         let projected = Identity.compositeKey [ target ] + suffix
                         if projected = key then row else setField "object_key" (box projected) row)
                 else Seq.singleton row)
-            let selected = direct "selected_field_provenance" |> Seq.collect (fun row ->
-                let kind = unbox<string> row.["object_type"]
-                let key = unbox<string> row.["object_key"]
-                if kind = "trip" then
-                    projectObjectTrip key |> Seq.map (fun struct(target, _) ->
-                        let projected = Identity.compositeKey [ target ]
-                        if projected = key then row else setField "object_key" (box projected) row)
-                elif kind = "call" then
-                    let separator = key.LastIndexOf('/')
-                    if separator < 0 then Seq.empty else
-                    let trip, suffix = key.Substring(0, separator), key.Substring(separator)
-                    projectObjectTrip trip |> Seq.map (fun struct(target, _) ->
-                        let projected = Identity.compositeKey [ target ] + suffix
-                        if projected = key then row else setField "object_key" (box projected) row)
-                else Seq.singleton row)
             Map [
                 "fare_system", direct "fare_system"
                 "fare_zone", direct "fare_zone"
@@ -588,52 +469,23 @@ module PackageWriter =
                 "travel_restriction_assignment", restrictions
                 "source_entity_map", entities
                 "road_route_key", routeKeys
-                "selected_field_provenance", selected
                 "object_origin", origins
                 "route_stop", routeStops
                 "route_stop_zone", routeStopZones
             ]
 
-    let private compareField (dataType: JrUtil.Serving.Schema.FieldType) (left: string) (right: string) =
-        if String.IsNullOrEmpty(left) || String.IsNullOrEmpty(right) then
-            if String.IsNullOrEmpty(left) then (if String.IsNullOrEmpty(right) then 0 else -1) else 1
-        else
-            match dataType with
-            | Schema.Text -> StringComparer.Ordinal.Compare(left, right)
-            | Schema.Int16 -> compare (int16 left) (int16 right)
-            | Schema.Int32 -> compare (integer left) (integer right)
-            | Schema.Int64 -> compare (integer64 left) (integer64 right)
-            | Schema.Float64 -> compare (number left) (number right)
-            | Schema.Boolean -> compare (Boolean.Parse left) (Boolean.Parse right)
-            | Schema.Date -> compare (date left) (date right)
-
-    let private externallySorted (storage: JrUtil.RegionalOverlay.Scratch.Storage)
-                                 (relation: JrUtil.Serving.Schema.Relation) (rows: seq<IDictionary<string, obj>>) =
-        let indexes = relation.fields |> Array.mapi (fun index (field: JrUtil.Serving.Schema.Field) -> field.name, (index, field)) |> dict
-        let compareRows (left: string array) (right: string array) =
-            let mutable result, index = 0, 0
-            while result = 0 && index < relation.sortKey.Length do
-                let fieldIndex, field = indexes.[relation.sortKey.[index]]
-                result <- compareField field.dataType left.[fieldIndex] right.[fieldIndex]
-                index <- index + 1
-            result
+    /// Deduplicate a generic relation by primary key without sorting it.
+    let private deduplicated (root: string) (relation: JrUtil.Serving.Schema.Relation) (rows: seq<IDictionary<string, obj>>) =
+        let indexes = relation.fields |> Array.mapi (fun index (field: JrUtil.Serving.Schema.Field) -> field.name, index) |> dict
+        let keyIndexes = relation.primaryKey |> Array.map (fun name -> indexes.[name])
         let serialized = rows |> Seq.map (fun row -> relation.fields |> Array.map (fun (field: JrUtil.Serving.Schema.Field) -> fieldText row.[field.name]))
-        let sortedRows = JrUtil.RegionalOverlay.Scratch.sortRows storage compareRows JrUtil.RegionalOverlay.Scratch.defaultBufferBytes serialized
-        seq {
-            let mutable previousKey: string array option = None
-            let mutable previousRow: string array option = None
-            for row in sortedRows do
-                let key = relation.primaryKey |> Array.map (fun name -> row.[fst indexes.[name]])
-                match previousKey, previousRow with
-                | Some priorKey, Some prior when priorKey = key ->
-                    if prior <> row then
-                        let keyText = String.concat "/" key
-                        invalidOp $"Relation {relation.name} contains conflicting rows for primary key {keyText}"
-                | _ ->
-                    previousKey <- Some key
-                    previousRow <- Some row
-                    yield objectRow (Array.map2 (fun (field: JrUtil.Serving.Schema.Field) value -> field.name, parseField field value) relation.fields row)
-        }
+        let size (row: string array) = 48L + int64 row.Length * 32L + (row |> Array.sumBy (fun value -> 2L * int64 value.Length))
+        let key (row: string array) = keyIndexes |> Array.map (fun index -> row.[index]) |> String.concat "\u001f"
+        let encode (output: BinaryWriter) (row: string array) = for value in row do output.Write(value)
+        let decode (input: BinaryReader) = Array.init relation.fields.Length (fun _ -> input.ReadString())
+        HashDedup.dedup root JrUtil.RegionalOverlay.Scratch.defaultBufferBytes CancellationToken.None (fun _ _ -> ())
+            relation.name size key encode decode serialized
+        |> Seq.map (fun row -> objectRow (Array.map2 (fun (field: JrUtil.Serving.Schema.Field) value -> field.name, parseField field value) relation.fields row))
 
     /// Serving mode for a basic or extended GTFS route type. Ranges follow the
     /// overlay's mode classes: coaches (200-209) are buses and urban rail
@@ -1060,10 +912,9 @@ module PackageWriter =
                ColumnWriter.Text(column _.shortName); ColumnWriter.Text(column _.blockKey)
                ColumnWriter.OptionalInt16(column _.wheelchair); ColumnWriter.OptionalInt16(column _.bikes)
                ColumnWriter.Text(column _.shapeId) |]
-        RelationWriter.write path schema (128L * 1024L * 1024L) 524288
+        RelationWriter.write path schema (128L * 1024L * 1024L)
             (16L * 1024L * 1024L) 65536 CancellationToken.None (fun _ count -> progress count)
-            size (fun left right -> StringComparer.Ordinal.Compare(left.tripId, right.tripId)) (=)
-            encode decode columns rows
+            size (fun row -> row.tripId) encode decode columns rows
 
     let private serviceBounds gtfs =
         let result = Dictionary<string, DateOnly * DateOnly>(StringComparer.Ordinal)
@@ -1464,46 +1315,6 @@ module PackageWriter =
                 "identifier_namespace", box binding.trip_namespace; "source_object_id", box binding.source_trip_id
                 "selection_rule", box (if binding.binding_status = "candidate" then "admissible_static_candidate" else "accepted_static_match") ])
             | _ -> None)
-        let selected = seq {
-            if File.Exists(Path.Combine(legacy, "provenance", "selected_fields.csv")) then
-                let routeIds = csv gtfs "routes.txt" |> Seq.map (value "route_id") |> Set.ofSeq
-                let tripIds = csv gtfs "trips.txt" |> Seq.map (value "trip_id") |> Set.ofSeq
-                let locationIds = csv gtfs "stops.txt" |> Seq.map (value "stop_id") |> Set.ofSeq
-                let sourceObjects = Dictionary<struct(string * string), string>()
-                let registerObjects file sourceColumn outputColumn =
-                    for row in csv (Path.Combine(legacy, "mappings")) file do
-                        sourceObjects.[struct(value "source_id" row, value outputColumn row)] <- value sourceColumn row
-                registerObjects "source_to_output_routes.csv" "source_route_id" "output_route_id"
-                registerObjects "source_to_output_stops.csv" "source_stop_id" "output_stop_id"
-                registerObjects "source_to_output_trips.csv" "source_trip_id" "output_trip_id"
-                for row in csv (Path.Combine(legacy, "mappings")) "source_to_output_calls.csv" do
-                    let outputObject = value "output_trip_id" row + "#" + value "output_call_ordinal" row
-                    sourceObjects.[struct(value "source_id" row, outputObject)] <-
-                        Identity.compositeKey [ value "source_trip_id" row; value "source_call_ordinal" row ]
-                yield!
-                    csv (Path.Combine(legacy, "provenance")) "selected_fields.csv"
-                    |> Seq.collect (fun row ->
-                        let sources = value "source_id" row |> fun value -> value.Split(';', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
-                        let outputObject = value "output_object_id" row
-                        let objectType, objectKey =
-                            let separator = outputObject.LastIndexOf('#')
-                            if separator > 0 then "call", Identity.compositeKey [ outputObject.Substring(0, separator); outputObject.Substring(separator + 1) ]
-                            elif routeIds.Contains(outputObject) then "route", Identity.compositeKey [ outputObject ]
-                            elif tripIds.Contains(outputObject) then "trip", Identity.compositeKey [ outputObject ]
-                            elif locationIds.Contains(outputObject) then "location", Identity.compositeKey [ outputObject ]
-                            else "compiler_object", Identity.compositeKey [ outputObject ]
-                        let fields =
-                            if value "field" row = "stop_lat,stop_lon" then [| "latitude"; "longitude" |]
-                            else [| value "field" row |]
-                        Seq.allPairs sources fields |> Seq.choose (fun (sourceId, fieldName) ->
-                            match snapshots.TryGetValue(sourceId) with
-                            | true, digest -> Some (objectRow [
-                                "object_type", box objectType; "object_key", box objectKey
-                                "field_name", box fieldName; "source_id", box sourceId; "source_snapshot_sha256", box digest
-                                "source_object_id", box (match sourceObjects.TryGetValue(struct(sourceId, outputObject)) with | true, sourceObject -> sourceObject | _ -> outputObject)
-                                "selection_rule", box (value "capability_mode" row) ])
-                            | _ -> None))
-        }
         let origins = seq {
             let rows kind namespaceName table idColumn =
                 csv gtfs table |> Seq.map (fun row ->
@@ -1530,7 +1341,6 @@ module PackageWriter =
             "road_trip_key", tripKeys "cis_trip_id" "road"
             "rail_trip_key", tripKeys "train_number" "rail"
             "binding_evidence", evidence
-            "selected_field_provenance", selected
             "object_origin", origins
         ]
 
@@ -1792,120 +1602,6 @@ module PackageWriter =
         writeCsvRow writer columns
         for row: string array in rows do writeCsvRow writer row
 
-    let private writeExtensions (compiled: Map<string, string * int>) legacy output =
-        let extensions = Path.Combine(legacy, "extensions")
-        let destination = Path.Combine(output, "extensions")
-        Directory.CreateDirectory(destination) |> ignore
-        let baseExtensions =
-            tryBasePackage legacy
-            |> Option.map (fun package -> Path.Combine(package, "extensions"))
-            |> Option.filter Directory.Exists
-        let baseRows name columns =
-            match baseExtensions with
-            | Some root when File.Exists(Path.Combine(root, name)) -> csvValues root name columns
-            | _ -> Seq.empty
-        let gtfs = Path.Combine(legacy, "gtfs-intermediate")
-        let targetTrips = HashSet<string>(csvValues gtfs "trips.txt" [| "trip_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
-        let targetRoutes = HashSet<string>(csvValues gtfs "routes.txt" [| "route_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
-        let targetStops = HashSet<string>(csvValues gtfs "stops.txt" [| "stop_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
-        let tripProjections =
-            let root = Path.Combine(legacy, "mappings")
-            let path = Path.Combine(root, "base_to_output_trips.csv")
-            if not (File.Exists(path)) then dict [] else
-            csvValues root "base_to_output_trips.csv" [| "base_trip_id"; "output_trip_id" |]
-            |> Seq.filter (fun row -> targetTrips.Contains(row.[1]))
-            |> Seq.groupBy (fun row -> row.[0])
-            |> Seq.map (fun (trip, rows) -> trip, rows |> Seq.map (fun row -> row.[1]) |> Seq.distinct |> Seq.toArray)
-            |> dict
-        let projectTrip trip =
-            if String.IsNullOrEmpty(trip) then Seq.singleton ""
-            else
-                match tripProjections.TryGetValue(trip) with
-                | true, values -> values :> seq<string>
-                | _ when targetTrips.Contains(trip) -> Seq.singleton trip
-                | _ -> Seq.empty
-        let stopZones = csv extensions "cz_stop_zones.txt"
-        let callZones = csv extensions "cz_trip_stop_zones.txt"
-        let regionalZoneRows =
-            Seq.append stopZones callZones
-            |> Seq.map (fun row -> [| value "zone_id" row; value "zone_code" row; value "ids_system_id" row; value "source_provenance" row; if String.IsNullOrEmpty(value "trip_id" row) then "route_stop" else "call" |])
-            |> Seq.filter (fun row -> not (String.IsNullOrEmpty row.[0]))
-        let zoneColumns = [| "zone_id"; "zone_code"; "fare_system_id"; "source_id"; "source_scope" |]
-        let zoneRows =
-            Seq.append (baseRows "cz_zones.txt" zoneColumns) regionalZoneRows
-            |> Seq.distinctBy (fun row -> row.[0]) |> Seq.sortBy (fun row -> row.[0])
-        writeCsv (Path.Combine(destination, "cz_zones.txt")) [| "zone_id"; "zone_code"; "fare_system_id"; "source_id"; "source_scope" |] zoneRows
-        let regionalRouteRows =
-            let callMetadata = Path.Combine(legacy, "source_call_metadata.parquet")
-            let zoneMetadata = Path.Combine(legacy, "source_route_stop_zone_metadata.parquet")
-            if compiled.ContainsKey("route_stop") && File.Exists(zoneMetadata) then
-                let locations =
-                    PackageReader.readTextRows (fst compiled.["route_stop"]) [| "route_id"; "route_stop_id"; "location_id" |]
-                    |> Seq.map (fun row -> struct(row.[0], row.[1]), row.[2]) |> dict
-                PackageReader.readTextRowsWithOptional [ "source_route_version" ] zoneMetadata [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order"; "source_route_version" |]
-                |> Seq.choose (fun row ->
-                    let routeStop = Identity.routeStopKey row.[0] row.[4] row.[1]
-                    match locations.TryGetValue(struct(row.[0], routeStop)) with
-                    | true, stop -> Some [| row.[0]; routeStop; stop; row.[2]; row.[3] |]
-                    | _ -> None)
-            elif File.Exists(callMetadata) && File.Exists(zoneMetadata) then
-                let routes = csv (Path.Combine(legacy, "gtfs-intermediate")) "trips.txt" |> Seq.map (fun row -> value "trip_id" row, value "route_id" row) |> dict
-                let locations =
-                    PackageReader.readTextRows callMetadata [| "gtfs_trip_id"; "gtfs_stop_id"; "source_route_stop_id" |]
-                    |> Seq.choose (fun row ->
-                        match routes.TryGetValue(row.[0]) with
-                        | true, route -> Some (struct(route, row.[2]), row.[1])
-                        | _ -> None) |> Seq.distinct |> dict
-                PackageReader.readTextRows zoneMetadata [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order" |]
-                |> Seq.choose (fun row ->
-                    match locations.TryGetValue(struct(row.[0], row.[1])) with
-                    | true, stop -> Some [| row.[0]; Identity.compositeKey [ row.[0]; row.[1] ]; stop; row.[2]; row.[3] |]
-                    | _ -> None)
-            else
-                stopZones |> Seq.mapi (fun index row ->
-                    let route, stop = value "route_id" row, value "stop_place_id" row
-                    [| route; Identity.compositeKey [ route; stop ]; stop; value "zone_id" row; string index |])
-        let routeColumns = [| "route_id"; "route_stop_id"; "stop_id"; "zone_id"; "source_order" |]
-        let routeRows =
-            Seq.append (baseRows "cz_route_stop_zones.txt" routeColumns) regionalRouteRows
-            |> Seq.filter (fun row -> targetRoutes.Contains(row.[0]) && targetStops.Contains(row.[2]))
-            |> Seq.distinct
-            |> Seq.sortBy (fun row -> row.[0], row.[1], row.[3], integer row.[4])
-        writeCsv (Path.Combine(destination, "cz_route_stop_zones.txt")) [| "route_id"; "route_stop_id"; "stop_id"; "zone_id"; "source_order" |] routeRows
-        let callColumns = [| "trip_id"; "stop_sequence"; "zone_id"; "source_order" |]
-        let baseCallRows =
-            baseRows "cz_call_zones.txt" callColumns
-            |> Seq.collect (fun row -> projectTrip row.[0] |> Seq.map (fun trip -> [| trip; row.[1]; row.[2]; row.[3] |]))
-        let regionalCallRows = callZones |> Seq.map (fun row -> [| value "trip_id" row; value "stop_sequence" row; value "zone_id" row; "0" |])
-        let callRows =
-            Seq.append baseCallRows regionalCallRows
-            |> Seq.filter (fun row -> targetTrips.Contains(row.[0]))
-            |> Seq.distinct
-            |> Seq.sortBy (fun row -> row.[0], integer row.[1], row.[2], integer row.[3])
-        writeCsv (Path.Combine(destination, "cz_call_zones.txt")) [| "trip_id"; "stop_sequence"; "zone_id"; "source_order" |] callRows
-        let regionalTransferRows = csv (Path.Combine(legacy, "gtfs-intermediate")) "transfers.txt" |> Seq.filter (fun row -> not (String.IsNullOrEmpty(value "max_waiting_time" row))) |> Seq.map (fun row ->
-            let columns = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" |]
-            let values = columns |> Array.map (fun name -> value name row)
-            Array.concat [ [| Identity.bindingId "transfer" (Array.zip columns values); |]; values; [| value "max_waiting_time" row |] ])
-        let transferColumns = [| "transfer_key"; "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "max_waiting_time" |]
-        let baseTransferRows =
-            baseRows "cz_transfer_constraints.txt" transferColumns
-            |> Seq.collect (fun row ->
-                Seq.allPairs (projectTrip row.[5]) (projectTrip row.[6])
-                |> Seq.map (fun (fromTrip, toTrip) ->
-                    let selectors = [| row.[1]; row.[2]; row.[3]; row.[4]; fromTrip; toTrip |]
-                    let names = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" |]
-                    Array.concat [ [| Identity.bindingId "transfer" (Array.zip names selectors) |]; selectors; [| row.[7] |] ]))
-        let transferRows =
-            Seq.append baseTransferRows regionalTransferRows
-            |> Seq.filter (fun row ->
-                targetStops.Contains(row.[1]) && targetStops.Contains(row.[2])
-                && (String.IsNullOrEmpty(row.[3]) || targetRoutes.Contains(row.[3]))
-                && (String.IsNullOrEmpty(row.[4]) || targetRoutes.Contains(row.[4])))
-            |> Seq.distinctBy (fun row -> row.[0])
-            |> Seq.sortBy (fun row -> row.[0])
-        writeCsv (Path.Combine(destination, "cz_transfer_constraints.txt")) [| "transfer_key"; "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "max_waiting_time" |] transferRows
-
     let private writeGtfsZip gtfs output =
         let zipPath = Path.Combine(output, "gtfs.zip")
         use stream = File.Open(zipPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)
@@ -1988,7 +1684,7 @@ module PackageWriter =
             dict [
                 "name", box relation.name; "path", box ("serving/" + relation.name + ".parquet")
                 "schema", box (relation.fields |> Array.map (fun field -> dict [ "name", box field.name; "type", box (fieldType field.dataType); "nullable", box field.nullable ]))
-                "primary_key", box relation.primaryKey; "sort_key", box relation.sortKey
+                "primary_key", box relation.primaryKey
                 "foreign_keys", box (relation.foreignKeys |> Array.map (fun key -> dict [ "fields", box key.fields; "relation", box key.relation; "target_fields", box key.targetFields ]))
                 "row_count", box relationCounts.[relation.name]
             ] :> obj)
@@ -1996,7 +1692,6 @@ module PackageWriter =
         manifest.["bundle_format"] <- box Schema.BundleFormat
         manifest.["bundle_version"] <- box Schema.BundleVersion
         manifest.["serving_schema_version"] <- box Schema.ServingSchemaVersion
-        manifest.["extension_schema_version"] <- box Schema.ExtensionSchemaVersion
         manifest.["diagnostics_schema_version"] <- box Schema.DiagnosticsSchemaVersion
         manifest.["identity_contract"] <- box "jrutil-identity-v1"
         let payloadIdentity =
@@ -2106,7 +1801,6 @@ module PackageWriter =
                         "Production package job complete: {Job}; elapsed_ms={ElapsedMs}",
                         name, int64 started.Elapsed.TotalMilliseconds))
             let gtfsZipJob = startJob "zip-gtfs" (fun () -> writeGtfsZip gtfs output)
-            let extensionsJob = startJob "write-public-extensions" (fun () -> writeExtensions compiled legacy output)
             let counts = Dictionary<string,int>()
             let bindingsState, suppliedState =
                 phase "prepare-serving-core"
@@ -2186,7 +1880,7 @@ module PackageWriter =
                     let relation = Schema.relations |> Array.find (fun relation -> relation.name = name)
                     let seen = HashSet<string>(StringComparer.Ordinal)
                     let key (row: IDictionary<string,obj>) =
-                        relation.sortKey |> Seq.map (fun field -> fieldText row.[field]) |> Identity.compositeKey
+                        relation.primaryKey |> Seq.map (fun field -> fieldText row.[field]) |> Identity.compositeKey
                     for row in baseRows do
                         if seen.Add(key row) then yield row
                     for row in currentRows do
@@ -2196,18 +1890,10 @@ module PackageWriter =
                     projectedBase
                     |> Map.fold (fun state name baseRows ->
                         let current = state |> Map.tryFind name |> Option.defaultValue Seq.empty
-                        // Every selected-field column participates in its sort
-                        // key, so the ordered writer can remove exact duplicate
-                        // rows without retaining a nationwide in-memory key set.
-                        // Other projected relations have narrower primary keys
-                        // and still need base-first precedence here.
-                        let combined =
-                            if name = "selected_field_provenance" then Seq.append baseRows current
-                            else preferBase name baseRows current
+                        let combined = preferBase name baseRows current
                         state |> Map.add name combined) generated
-                Task.WaitAll([| gtfsZipJob; extensionsJob |])
+                gtfsZipJob.Wait()
                 ref bindings, ref supplied
-            use sortStorage = new JrUtil.RegionalOverlay.Scratch.Storage(output)
             for relation in Schema.relations do
                 let target = Path.Combine(serving, relation.name + ".parquet")
                 if counts.ContainsKey(relation.name) then () else
@@ -2241,10 +1927,6 @@ module PackageWriter =
                         phase ("write-ordered-" + relation.name)
                         let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- writeParquet advance target relation rows
-                    | _ when relation.name = "selected_field_provenance" ->
-                        phase "grouped-selected_field_provenance"
-                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
-                        counts.[relation.name] <- writeSelectedFieldProvenance (fun _ count -> advance count) target relation rows
                     | _ when relation.name = "object_origin"
                              || relation.name = "binding_evidence"
                              || relation.name = "route_stop" ->
@@ -2252,10 +1934,10 @@ module PackageWriter =
                         let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- writeRequiredTextRelation (fun _ count -> advance count) target relation rows
                     | _ ->
-                        phase ("sort-" + relation.name)
+                        phase ("dedup-" + relation.name)
                         let sourceRows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         let mutable read = 0L
-                        let rows = externallySorted sortStorage relation (sourceRows |> Seq.map (fun row -> read <- read + 1L; advance read; row))
+                        let rows = deduplicated output relation (sourceRows |> Seq.map (fun row -> read <- read + 1L; advance read; row))
                         phase ("write-" + relation.name)
                         counts.[relation.name] <- writeParquet advance target relation rows
                 suppliedState.Value <- suppliedState.Value |> Map.remove relation.name

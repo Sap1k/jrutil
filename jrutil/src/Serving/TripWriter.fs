@@ -49,5 +49,5 @@ module TripWriter =
                ColumnWriter.OptionalInt16(column _.direction); optional _.headsign; optional _.shortName; optional _.block
                ColumnWriter.OptionalInt16(column _.wheelchair); ColumnWriter.OptionalInt16(column _.bikes); optional _.shape |]
         let schema = Schema.relations |> Array.find (fun relation -> relation.name = "trip")
-        RelationWriter.write path schema (16L * 1024L * 1024L) 32768 (4L * 1024L * 1024L) 8192 token progress
-            bytes (fun left right -> StringComparer.Ordinal.Compare(left.id, right.id)) (=) encode decode columns rows
+        RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token progress
+            bytes (fun row -> row.id) encode decode columns rows

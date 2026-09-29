@@ -53,7 +53,7 @@ type ServingContractTests() =
         let relation: JrUtil.Serving.Schema.Relation = {
             name = Path.GetFileNameWithoutExtension(path)
             fields = columns |> Array.map (fun name -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false })
-            primaryKey = [| columns.[0] |]; sortKey = [| columns.[0] |]; foreignKeys = [||] }
+            primaryKey = [| columns.[0] |]; foreignKeys = [||] }
         use writer = new JrUtil.Serving.ColumnWriter.Writer(path, relation, 1024, Threading.CancellationToken.None)
         writer.Append(columns |> Array.mapi (fun index _ -> JrUtil.Serving.ColumnWriter.Text(rows |> Array.map (fun row -> row.[index]))))
 
@@ -117,9 +117,9 @@ type ServingContractTests() =
             let routeStops = parquetStrings (Path.Combine(output, "serving", "route_stop.parquet")) "route_stop_id"
             CollectionAssert.Contains(routeStops, "jdf:route:000645:1/11")
             Assert.IsFalse(routeStops |> Array.exists (fun value -> value.Contains("%3A")))
-            let extension = File.ReadAllText(Path.Combine(output, "extensions", "cz_route_stop_zones.txt"))
-            StringAssert.Contains(extension, "jdf:route:000645:1/11")
-            Assert.IsFalse(extension.Contains("%3A"))
+            let zoneRouteStops = parquetStrings (Path.Combine(output, "serving", "route_stop_zone.parquet")) "route_stop_id"
+            CollectionAssert.Contains(zoneRouteStops, "jdf:route:000645:1/11")
+            Assert.IsFalse(zoneRouteStops |> Array.exists (fun value -> value.Contains("%3A")))
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -153,7 +153,7 @@ type ServingContractTests() =
                 for _ in 1 .. 20 do
                     for stop in ["3"; "1"; "2"] do writer.Append("r", stop, "location")
                 Assert.AreEqual(3, writer.Complete(fun _ _ -> ()))
-            CollectionAssert.AreEqual([| "1"; "2"; "3" |], parquetStrings output "route_stop_id")
+            CollectionAssert.AreEquivalent([| "1"; "2"; "3" |], parquetStrings output "route_stop_id")
             do
                 use writer = new JrUtil.Serving.RouteStopWriter.Writer(Path.Combine(root, "conflict.parquet"), Threading.CancellationToken.None, maximumBufferBytes = 200L)
                 writer.Append("r", "1", "first")
@@ -163,26 +163,37 @@ type ServingContractTests() =
         finally Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``Typed binary sort spills deterministically and cleans up on cancellation``() =
-        let root = Path.Combine(Path.GetTempPath(), "jrutil-binary-sort-" + Guid.NewGuid().ToString("N"))
+    member _.``Hash dedup collapses duplicates, rejects conflicts and cleans up after spilling``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-hash-dedup-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
-            let sort budget token rows =
-                JrUtil.Serving.BinarySort.sort root budget 7 token (fun _ _ -> ()) (fun (_: int) -> 16L) compare
-                    (fun writer value -> writer.Write(value: int)) (fun reader -> reader.ReadInt32()) rows
-            let input = [| 1000 .. -1 .. 0 |]
-            CollectionAssert.AreEqual(Array.sort input, sort 64L Threading.CancellationToken.None input |> Seq.toArray)
+            let dedup budget token (rows: seq<struct(int * string)>) =
+                JrUtil.Serving.HashDedup.dedup root budget token (fun _ _ -> ()) "fixture" (fun _ -> 16L)
+                    (fun struct(key, _) -> string key)
+                    (fun writer struct(key: int, value: string) -> writer.Write(key); writer.Write(value))
+                    (fun reader -> let key = reader.ReadInt32() in struct(key, reader.ReadString())) rows
+            let input = [| for key in 1000 .. -1 .. 0 do yield struct(key, string key); yield struct(key, string key) |]
+            let expected = [| for key in 1000 .. -1 .. 0 -> struct(key, string key) |]
+            // In memory the input order is kept; after a spill only the set is defined.
+            CollectionAssert.AreEqual(expected, dedup 1_000_000L Threading.CancellationToken.None input |> Seq.toArray)
+            let spilled = dedup 64L Threading.CancellationToken.None input |> Seq.toArray
+            CollectionAssert.AreEquivalent(expected, spilled)
+            CollectionAssert.AreEqual(spilled, dedup 64L Threading.CancellationToken.None input |> Seq.toArray)
+            Assert.AreEqual(0, Directory.GetDirectories(root).Length)
+            let conflicting = [| struct(1, "a"); struct(2, "b"); struct(1, "c") |]
+            Assert.ThrowsExactly<InvalidOperationException>(fun () ->
+                dedup 1_000_000L Threading.CancellationToken.None conflicting |> Seq.toArray |> ignore) |> ignore
+            Assert.ThrowsExactly<InvalidOperationException>(fun () ->
+                dedup 16L Threading.CancellationToken.None conflicting |> Seq.toArray |> ignore) |> ignore
             Assert.AreEqual(0, Directory.GetDirectories(root).Length)
             use cancellation = new Threading.CancellationTokenSource()
-            let interrupted = seq { yield 3; cancellation.Cancel(); yield 2 }
-            Assert.ThrowsExactly<OperationCanceledException>(fun () -> sort 64L cancellation.Token interrupted |> Seq.toArray |> ignore) |> ignore
-            Assert.AreEqual(0, Directory.GetDirectories(root).Length)
-            Assert.ThrowsExactly<InvalidOperationException>(fun () -> sort 8L Threading.CancellationToken.None [1] |> Seq.toArray |> ignore) |> ignore
+            let interrupted = seq { yield struct(3, "3"); cancellation.Cancel(); yield struct(2, "2") }
+            Assert.ThrowsExactly<OperationCanceledException>(fun () -> dedup 16L cancellation.Token interrupted |> Seq.toArray |> ignore) |> ignore
             Assert.AreEqual(0, Directory.GetDirectories(root).Length)
         finally Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``Native source calls preserve nullable times and lexicographic source sequences``() =
+    member _.``Native source calls preserve nullable times and source sequences``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-native-source-calls-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
@@ -197,11 +208,12 @@ type ServingContractTests() =
             let output = Path.Combine(root, "calls.parquet")
             Assert.AreEqual(3, JrUtil.Serving.SourceCallWriter.write output spool (dict ["trip", "binding"]) Threading.CancellationToken.None (fun _ _ -> ()))
             let rows = JrUtil.Serving.PackageReader.readTextRows output [| "source_sequence"; "call_sequence"; "source_stop_id"; "scheduled_arrival"; "scheduled_departure" |] |> Seq.toArray
-            Asserts.assertEqual [| [|"1"; "1"; "stop"; ""; "90000"|]; [|"10"; "10"; "stop"; ""; "90000"|]; [|"2"; "2"; "stop"; ""; "90000"|] |] rows
+            // Native calls stream in spool order; no ordering is implied by the contract.
+            Asserts.assertEqual [| [|"2"; "2"; "stop"; ""; "90000"|]; [|"10"; "10"; "stop"; ""; "90000"|]; [|"1"; "1"; "stop"; ""; "90000"|] |] rows
         finally Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``Native source call blocks reorder bindings and spill oversized trips``() =
+    member _.``Native source calls stream every trip under its binding``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-source-blocks-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
@@ -216,14 +228,12 @@ type ServingContractTests() =
                                         shapeDistTraveled = None; stopZoneIds = None })
                 writer.Complete()
             let output = Path.Combine(root, "calls.parquet")
-            let phases = Collections.Generic.HashSet<string>()
             Assert.AreEqual(20003, JrUtil.Serving.SourceCallWriter.write output spool (dict ["a", "z"; "b", "a"])
-                                      Threading.CancellationToken.None (fun phase _ -> phases.Add(phase) |> ignore))
-            Assert.IsTrue(phases.Contains("trip-calls-sort-run"))
+                                      Threading.CancellationToken.None (fun _ _ -> ()))
             let rows = JrUtil.Serving.PackageReader.readTextRows output [| "binding_id"; "source_sequence"; "source_stop_id"; "scheduled_arrival" |] |> Seq.toArray
-            let expected = [| for binding, trip, count in ["a", "b", 3; "z", "a", 20000] do
-                                 for sequence in [|1 .. count|] |> Array.map string |> Array.sortWith (fun left right -> StringComparer.Ordinal.Compare(left, right)) do
-                                     yield [|binding; sequence; trip; sequence|] |]
+            let expected = [| for binding, trip, count in ["z", "a", 20000; "a", "b", 3] do
+                                 for sequence in count .. -1 .. 1 do
+                                     yield [|binding; string sequence; trip; string sequence|] |]
             Asserts.assertEqual expected rows
             Assert.AreEqual(0, Directory.GetDirectories(root).Length)
         finally Directory.Delete(root, true)
@@ -317,7 +327,7 @@ type ServingContractTests() =
         let relation: JrUtil.Serving.Schema.Relation = {
             name = "bounded_text"
             fields = [| { name = "id"; dataType = JrUtil.Serving.Schema.Text; nullable = false } |]
-            primaryKey = [| "id" |]; sortKey = [| "id" |]; foreignKeys = [||] }
+            primaryKey = [| "id" |]; foreignKeys = [||] }
         let path = Path.Combine(root, "test.parquet")
         try
             use cancellation = new Threading.CancellationTokenSource()
@@ -339,7 +349,7 @@ type ServingContractTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``Validation rejects unordered keys across row groups with matching hashes``() =
+    member _.``Validation rejects duplicate keys across row groups with matching hashes``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-invalid-serving-order-" + Guid.NewGuid().ToString("N"))
         try
             let output = Path.Combine(root, "output")
@@ -349,7 +359,7 @@ type ServingContractTests() =
             let relation = JrUtil.Serving.Schema.relations |> Array.find (fun relation -> relation.name = "shape")
             do
                 use writer = new JrUtil.Serving.ColumnWriter.Writer(path, relation, 1, Threading.CancellationToken.None)
-                for key in ["z"; "a"] do
+                for key in ["z"; "z"] do
                     writer.Append [| JrUtil.Serving.ColumnWriter.Text [|key|]; JrUtil.Serving.ColumnWriter.Text [|"source"|] |]
             let manifestPath = Path.Combine(output, "manifest.json")
             let manifest = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(manifestPath))
@@ -364,7 +374,7 @@ type ServingContractTests() =
             File.WriteAllText(manifestPath, manifest.ToJsonString())
             let result = JrUtil.Serving.Validation.inspect output
             Assert.AreEqual(1, result.errors.Length, String.Join("; ", result.errors))
-            Assert.IsTrue(result.errors.[0].Contains("duplicate or unordered primary key"))
+            Assert.IsTrue(result.errors.[0].Contains("duplicate primary keys"), result.errors.[0])
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -376,16 +386,31 @@ type ServingContractTests() =
             JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage first
             JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage second
             let result = JrUtil.Serving.Validation.validatePackage first
-            Assert.AreEqual(37, result.relationCount)
-            Assert.AreEqual(44, result.fileCount)
+            Assert.AreEqual(36, result.relationCount)
+            Assert.AreEqual(39, result.fileCount)
             JrUtil.Serving.Validation.compareByteIdentical first second
             Assert.IsFalse(Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
-            Assert.IsFalse(File.Exists(Path.Combine(first, "extensions", "cz_trips.txt")))
+            Assert.IsFalse(Directory.Exists(Path.Combine(first, "extensions")))
             use zip = ZipFile.OpenRead(Path.Combine(first, "gtfs.zip"))
             use transfers = new StreamReader(zip.GetEntry("transfers.txt").Open())
             Assert.IsFalse(transfers.ReadLine().Contains("max_waiting_time"))
-            let extensionText = File.ReadAllText(Path.Combine(first, "extensions", "cz_transfer_constraints.txt"))
-            Assert.IsTrue(extensionText.Contains("300"))
+            let waits = (JrUtil.Serving.PackageReader.readTextRows (Path.Combine(first, "serving", "transfer.parquet")) [| "maximum_waiting_time" |] |> Seq.toArray)
+            Assert.IsTrue(waits |> Array.exists (fun row -> row.[0] = "300"))
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Compiler view restores transfer waiting times from serving relations``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-view-" + Guid.NewGuid().ToString("N"))
+        try
+            let package = Path.Combine(root, "package")
+            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) (staging root) package
+            use zip = ZipFile.OpenRead(Path.Combine(package, "gtfs.zip"))
+            use published = new StreamReader(zip.GetEntry("transfers.txt").Open())
+            Assert.IsFalse(published.ReadToEnd().Contains("max_waiting_time"))
+            let gtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView package (Path.Combine(root, "scratch"))
+            let lines = File.ReadAllLines(Path.Combine(gtfs, "transfers.txt"))
+            StringAssert.EndsWith(lines.[0], "max_waiting_time\"")
+            StringAssert.EndsWith(lines.[1], "\"300\"")
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -415,7 +440,7 @@ type ServingContractTests() =
             Assert.IsTrue(location.samples |> List.exists (fun sample -> sample.Contains("name: Two -> Deux")))
 
             let expectations =
-                JrUtil.Serving.Comparison.parseExpectations [ "# renamed stop"; "relation location"; "gtfs stop*.txt"; "manifest *"; "relation selected_field_provenance" ]
+                JrUtil.Serving.Comparison.parseExpectations [ "# renamed stop"; "relation location"; "gtfs stop*.txt"; "manifest *" ]
             let allowed = JrUtil.Serving.Comparison.comparePackages expectations first renamed
             Assert.IsTrue(allowed.unexpected |> List.forall (fun difference -> difference.subject <> "location" && difference.subject <> "stops.txt"))
         finally if Directory.Exists(root) then Directory.Delete(root, true)
@@ -448,24 +473,6 @@ type ServingContractTests() =
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``Selected call provenance keeps lexical multi-digit ordinal order``() =
-        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-selected-order-" + Guid.NewGuid().ToString("N"))
-        try
-            let stage = staging root
-            write (Path.Combine(stage, "gtfs-intermediate", "stop_times.txt"))
-                "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type,timepoint\nout,25:00:00,25:00:00,s1,1,0,0,1\nout,25:05:00,25:05:00,s1,2,0,0,1\nout,25:10:00,25:10:00,s2,10,0,0,1\n"
-            write (Path.Combine(stage, "provenance", "selected_fields.csv"))
-                "output_object_id,field,source_id,value,capability_mode\nout#1,stop_id,provider,s1,authoritative\nout#2,stop_id,provider,s1,authoritative\nout#10,stop_id,provider,s2,authoritative\n"
-            let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage output
-            let keys = parquetStrings (Path.Combine(output, "serving", "selected_field_provenance.parquet")) "object_key"
-            CollectionAssert.AreEqual(
-                [| JrUtil.Serving.Identity.compositeKey [ "out"; "1" ]
-                   JrUtil.Serving.Identity.compositeKey [ "out"; "10" ]
-                   JrUtil.Serving.Identity.compositeKey [ "out"; "2" ] |], keys)
-        finally if Directory.Exists(root) then Directory.Delete(root, true)
-
-    [<TestMethod>]
     member _.``Carried base calls require exact target sequence membership``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-call-gap-" + Guid.NewGuid().ToString("N"))
         try
@@ -489,7 +496,7 @@ type ServingContractTests() =
     [<TestMethod>]
     member _.``Contract files declare every serving relation``() =
         let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
-        use document = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "contracts", "serving-v2.json")))
+        use document = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "contracts", "serving-v3.json")))
         let names = document.RootElement.GetProperty("relations").EnumerateArray() |> Seq.map (fun item -> item.GetProperty("name").GetString()) |> Seq.toArray
         CollectionAssert.AreEqual(JrUtil.Serving.Schema.relationNames, names)
 
@@ -593,14 +600,10 @@ type ServingContractTests() =
             Assert.IsTrue(relation "route_stop" [| "route_stop_id" |] |> Array.forall (fun row -> not (row.[0].Contains("%3A"))))
             Assert.AreEqual(1, relation "route_stop_zone" [| "zone_id" |] |> Array.length)
             Assert.AreEqual(1, relation "location_feature" [| "location_id" |] |> Array.length)
-            let extensionLines name = File.ReadAllLines(Path.Combine(output, "extensions", name))
-            let zoneLines = extensionLines "cz_zones.txt"
-            Assert.IsTrue(zoneLines |> Array.exists (fun line -> line.Contains("\"call-zone\",\"CZ\"")))
-            Assert.IsTrue(extensionLines "cz_route_stop_zones.txt" |> Array.exists (fun line -> line.Contains("\"zone\"")))
-            Assert.IsTrue(extensionLines "cz_call_zones.txt" |> Array.exists (fun line -> line.Contains("\"replacement\",\"1\",\"call-zone\",\"0\"")))
-            Assert.IsFalse(extensionLines "cz_call_zones.txt" |> Array.exists (fun line -> line.StartsWith("\"out\",")))
-            Assert.IsTrue(extensionLines "cz_transfer_constraints.txt" |> Array.exists (fun line -> line.Contains("\"replacement\",\"replacement\",\"300\"")))
-            Assert.IsFalse(extensionLines "cz_transfer_constraints.txt" |> Array.exists (fun line -> line.Contains("\"out\",\"out\"")))
+            Assert.IsTrue(relation "fare_zone" [| "zone_id"; "zone_code" |] |> Array.exists (fun row -> row = [| "call-zone"; "CZ" |]))
+            Assert.IsTrue(relation "route_stop_zone" [| "zone_id" |] |> Array.exists (fun row -> row.[0] = "zone"))
+            Assert.IsFalse(relation "call_zone" [| "trip_id" |] |> Array.exists (fun row -> row.[0] = "out"))
+            Assert.IsFalse(relation "transfer" [| "from_trip_id" |] |> Array.exists (fun row -> row.[0] = "out"))
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output, "manifest.json")))
             let sourceIds = manifest.RootElement.GetProperty("sources").EnumerateArray() |> Seq.map (fun item -> item.GetProperty("source_id").GetString()) |> Seq.toArray
             CollectionAssert.AreEquivalent([| "provider"; "regional" |], sourceIds)

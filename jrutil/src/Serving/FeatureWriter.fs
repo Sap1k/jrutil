@@ -44,6 +44,5 @@ module FeatureWriter =
                ColumnWriter.OptionalInt32(column _.callSequence); ColumnWriter.Text(column (fun row -> normalize row.service))
                ColumnWriter.Text(column _.code); ColumnWriter.Text(column (fun row -> normalize row.note)); text sourceId; text digest
                ColumnWriter.Text(column _.sourceObject) |]
-        RelationWriter.write path schema (16L * 1024L * 1024L) 32768 (4L * 1024L * 1024L) 8192 token progress
-            size (fun struct(left, _) struct(right, _) -> StringComparer.Ordinal.Compare(left, right)) (=)
-            encode decode columns keyed
+        RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token progress
+            size (fun struct(key, _) -> key) encode decode columns keyed

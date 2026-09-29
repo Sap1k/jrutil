@@ -39,7 +39,8 @@ module Comparison =
     with member value.isEquivalent = List.isEmpty value.unexpected
 
     /// An expectation line is `<kind> <glob>`, e.g. `file extensions/*` or
-    /// `relation location`. `#` starts a comment.
+    /// `relation location`. `column <glob>` ignores matching serving columns
+    /// in every relation, including primary-key columns. `#` starts a comment.
     type Expectation = { kind: string; pattern: string }
 
     let parseExpectations (lines: string seq) =
@@ -173,7 +174,7 @@ module Comparison =
     /// Type-tagged cell text, so that e.g. a null and the string "∅" differ.
     let private cellToken (value: obj) =
         match value with
-        | null -> " "
+        | null -> "\u0000"
         | :? string as value -> "s" + value
         | value -> "v" + showCell value
 
@@ -183,12 +184,16 @@ module Comparison =
 
     /// Order-independent: rows are matched on a hash of their primary key, so
     /// packages whose relations are written in any order compare equal.
-    let private compareRelation (leftRoot: string) (rightRoot: string) (relation: Schema.Relation) =
+    let private compareRelation (ignoredColumn: string -> bool) (leftRoot: string) (rightRoot: string) (relation: Schema.Relation) =
         let path root = Path.Combine(root, "serving", relation.name + ".parquet")
         let columns = relation.fields |> Array.map (fun field -> field.name)
-        let keyIndexes = relation.primaryKey |> Array.map (fun key -> Array.IndexOf(columns, key))
-        let keyHash (row: obj array) = keyIndexes |> Array.map (fun index -> cellToken row.[index]) |> String.concat "" |> hash128
-        let rowHash (row: obj array) = row |> Array.map cellToken |> String.concat "" |> hash128
+        let keyIndexes =
+            relation.primaryKey
+            |> Array.map (fun key -> Array.IndexOf(columns, key))
+            |> Array.filter (fun index -> not (ignoredColumn columns.[index]))
+        let valueIndexes = [| 0 .. columns.Length - 1 |] |> Array.filter (fun index -> not (ignoredColumn columns.[index]))
+        let keyHash (row: obj array) = keyIndexes |> Array.map (fun index -> cellToken row.[index]) |> String.concat "\u001f" |> hash128
+        let rowHash (row: obj array) = valueIndexes |> Array.map (fun index -> cellToken row.[index]) |> String.concat "\u001f" |> hash128
         let showKey (row: obj array) = keyIndexes |> Array.map (fun index -> columns.[index] + "=" + showCell row.[index]) |> String.concat " "
         let sample (samples: ResizeArray<string>) text = if samples.Count < SampleLimit then samples.Add(text)
         let duplicates = ResizeArray<string>()
@@ -228,7 +233,7 @@ module Comparison =
                 match rightSamples.TryGetValue(key) with
                 | true, right ->
                     let fields =
-                        [ for index in 0 .. columns.Length - 1 do
+                        [ for index in valueIndexes do
                             if cellToken row.[index] <> cellToken right.[index] then
                                 yield $"{columns.[index]}: {showCell row.[index]} -> {showCell right.[index]}" ]
                         |> String.concat "; "
@@ -313,6 +318,8 @@ module Comparison =
 
     let comparePackages (expectations: Expectation list) (leftDirectory: string) (rightDirectory: string) =
         let leftRoot, rightRoot = Path.GetFullPath(leftDirectory), Path.GetFullPath(rightDirectory)
+        let ignoredColumn column =
+            expectations |> List.exists (fun expectation -> expectation.kind = "column" && globMatches expectation.pattern column)
         for root in [ leftRoot; rightRoot ] do
             if not (Directory.Exists(root)) then invalidArg "directory" $"Package directory does not exist: {root}"
         let differences = ResizeArray<Difference>()
@@ -339,7 +346,7 @@ module Comparison =
             let file = "serving/" + relation.name + ".parquet"
             if leftFiles.Contains file && rightFiles.Contains file then
                 compared.Add(file)
-                compareRelation leftRoot rightRoot relation |> Option.iter differences.Add
+                compareRelation ignoredColumn leftRoot rightRoot relation |> Option.iter differences.Add
 
         let leftZip, rightZip = Path.Combine(leftRoot, "gtfs.zip"), Path.Combine(rightRoot, "gtfs.zip")
         let leftTables, rightTables = gtfsEntries leftZip, gtfsEntries rightZip

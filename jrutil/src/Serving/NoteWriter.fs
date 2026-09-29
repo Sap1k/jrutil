@@ -41,10 +41,10 @@ module NoteWriter =
             let schema = Schema.relations |> Array.find (fun relation -> relation.name = name)
             let keyed = rows () |> Seq.map (fun row -> struct(key row, row))
             let count =
-                RelationWriter.write path schema (16L * 1024L * 1024L) 32768 (4L * 1024L * 1024L) 8192 token
+                RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token
                     (fun phase count -> progress (name + "-" + phase) count)
                     (fun struct((key: string), row) -> bytes row + 48L + int64 key.Length * 2L)
-                    (fun struct(left, _) struct(right, _) -> StringComparer.Ordinal.Compare(left, right)) (=)
+                    (fun struct(key, _) -> key)
                     (fun output struct(key, row) -> output.Write(key: string); encode output row)
                     (fun input -> let key = input.ReadString() in struct(key, decode input)) columns keyed
             name, (path, count)

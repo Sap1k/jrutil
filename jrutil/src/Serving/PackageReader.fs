@@ -96,6 +96,31 @@ module PackageReader =
             entry.ExtractToFile(Path.Combine(gtfs, entry.FullName), false)
 
         let serving relation = Path.Combine(packageDirectory, "serving", relation + ".parquet")
+
+        // gtfs.zip carries only standard transfer columns; the waiting-time
+        // constraint lives in serving `transfer`. Restore it so the compiler
+        // can carry base constraints into the overlay package.
+        let transfersPath = Path.Combine(gtfs, "transfers.txt")
+        if File.Exists(transfersPath) then
+            let selectors = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" |]
+            let waits =
+                readTextRows (serving "transfer") [| "from_location_id"; "to_location_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "maximum_waiting_time" |]
+                |> Seq.filter (fun row -> row.[6] <> "")
+                |> Seq.map (fun row -> String.Join("\u001f", row.[0..5]), row.[6])
+                |> dict
+            let rows = csvRows gtfs "transfers.txt" |> Seq.toArray
+            if rows.Length > 0 then
+                let columns =
+                    rows.[0].Keys |> Seq.filter ((<>) "max_waiting_time") |> Seq.toArray
+                    |> fun columns -> Array.append columns [| "max_waiting_time" |]
+                let field (row: Dictionary<string, string>) name =
+                    match row.TryGetValue(name) with | true, value -> value | _ -> ""
+                writeCsv transfersPath columns (rows |> Seq.map (fun row ->
+                    let key = String.Join("\u001f", selectors |> Array.map (field row))
+                    columns |> Array.map (fun name ->
+                        if name = "max_waiting_time" then (match waits.TryGetValue(key) with | true, value -> value | _ -> "")
+                        else row.[name])))
+
         let routeKeys = readTextRows (serving "road_route_key") [| "route_id"; "cis_line_id" |] |> Seq.distinct |> Seq.sortBy id
         let timetableKinds =
             readTextRowsWithOptional [ "timetable_kind" ] (serving "route") [| "route_id"; "timetable_kind" |]

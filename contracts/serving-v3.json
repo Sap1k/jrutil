@@ -1,16 +1,17 @@
 {
-  "serving_schema_version": 2,
+  "serving_schema_version": 3,
   "parquet_metadata": {
-    "obehy.schema_version": "2",
+    "obehy.schema_version": "3",
     "obehy.relation": "<relation name>",
     "jrutil.bundle_format": "jrutil-production"
   },
   "rules": {
     "dates": "date32, inclusive service dates",
     "times": "signed int32 seconds from service-day midnight; values above 86400 allowed",
-    "strings": "opaque case-sensitive UTF-8, sorted by ordinal UTF-8 bytes",
+    "strings": "opaque case-sensitive UTF-8",
     "lists": "repeated rows only",
-    "row_group_maximum": 65536
+    "row_group_maximum": 65536,
+    "row_order": "unspecified; primary keys are unique"
   },
   "relations": [
     {
@@ -58,9 +59,6 @@
         }
       ],
       "primary_key": [
-        "agency_id"
-      ],
-      "sort_key": [
         "agency_id"
       ]
     },
@@ -160,9 +158,6 @@
       ],
       "primary_key": [
         "location_id"
-      ],
-      "sort_key": [
-        "location_id"
       ]
     },
     {
@@ -231,9 +226,6 @@
       ],
       "primary_key": [
         "route_id"
-      ],
-      "sort_key": [
-        "route_id"
       ]
     },
     {
@@ -262,9 +254,6 @@
       ],
       "primary_key": [
         "service_id"
-      ],
-      "sort_key": [
-        "service_id"
       ]
     },
     {
@@ -289,10 +278,6 @@
       "primary_key": [
         "service_id",
         "service_date"
-      ],
-      "sort_key": [
-        "service_id",
-        "service_date"
       ]
     },
     {
@@ -310,9 +295,6 @@
         }
       ],
       "primary_key": [
-        "shape_id"
-      ],
-      "sort_key": [
         "shape_id"
       ]
     },
@@ -346,10 +328,6 @@
         }
       ],
       "primary_key": [
-        "shape_id",
-        "sequence"
-      ],
-      "sort_key": [
         "shape_id",
         "sequence"
       ]
@@ -409,9 +387,6 @@
         }
       ],
       "primary_key": [
-        "trip_id"
-      ],
-      "sort_key": [
         "trip_id"
       ]
     },
@@ -492,10 +467,6 @@
       "primary_key": [
         "trip_id",
         "sequence"
-      ],
-      "sort_key": [
-        "trip_id",
-        "sequence"
       ]
     },
     {
@@ -523,10 +494,6 @@
         }
       ],
       "primary_key": [
-        "trip_id",
-        "from_sequence"
-      ],
-      "sort_key": [
         "trip_id",
         "from_sequence"
       ]
@@ -587,9 +554,6 @@
       ],
       "primary_key": [
         "transfer_key"
-      ],
-      "sort_key": [
-        "transfer_key"
       ]
     },
     {
@@ -607,9 +571,6 @@
         }
       ],
       "primary_key": [
-        "fare_system_id"
-      ],
-      "sort_key": [
         "fare_system_id"
       ]
     },
@@ -649,9 +610,6 @@
       ],
       "primary_key": [
         "zone_id"
-      ],
-      "sort_key": [
-        "zone_id"
       ]
     },
     {
@@ -669,10 +627,6 @@
         }
       ],
       "primary_key": [
-        "location_id",
-        "zone_id"
-      ],
-      "sort_key": [
         "location_id",
         "zone_id"
       ]
@@ -702,11 +656,6 @@
         }
       ],
       "primary_key": [
-        "trip_id",
-        "sequence",
-        "zone_id"
-      ],
-      "sort_key": [
         "trip_id",
         "sequence",
         "zone_id"
@@ -768,9 +717,6 @@
       ],
       "primary_key": [
         "note_id"
-      ],
-      "sort_key": [
-        "note_id"
       ]
     },
     {
@@ -808,9 +754,6 @@
         }
       ],
       "primary_key": [
-        "assignment_id"
-      ],
-      "sort_key": [
         "assignment_id"
       ]
     },
@@ -880,9 +823,6 @@
       ],
       "primary_key": [
         "feature_id"
-      ],
-      "sort_key": [
-        "feature_id"
       ]
     },
     {
@@ -925,9 +865,6 @@
         }
       ],
       "primary_key": [
-        "feature_id"
-      ],
-      "sort_key": [
         "feature_id"
       ]
     },
@@ -1052,9 +989,6 @@
       ],
       "primary_key": [
         "connection_id"
-      ],
-      "sort_key": [
-        "connection_id"
       ]
     },
     {
@@ -1123,9 +1057,6 @@
       ],
       "primary_key": [
         "assignment_id"
-      ],
-      "sort_key": [
-        "assignment_id"
       ]
     },
     {
@@ -1190,10 +1121,6 @@
       "primary_key": [
         "source_id",
         "source_location_id"
-      ],
-      "sort_key": [
-        "source_id",
-        "source_location_id"
       ]
     },
     {
@@ -1226,10 +1153,6 @@
         }
       ],
       "primary_key": [
-        "source_id",
-        "source_journey_id"
-      ],
-      "sort_key": [
         "source_id",
         "source_journey_id"
       ]
@@ -1297,11 +1220,6 @@
         "source_id",
         "source_journey_id",
         "sequence"
-      ],
-      "sort_key": [
-        "source_id",
-        "source_journey_id",
-        "sequence"
       ]
     },
     {
@@ -1349,9 +1267,6 @@
         }
       ],
       "primary_key": [
-        "entity_binding_id"
-      ],
-      "sort_key": [
         "entity_binding_id"
       ]
     },
@@ -1461,9 +1376,6 @@
       ],
       "primary_key": [
         "binding_id"
-      ],
-      "sort_key": [
-        "binding_id"
       ]
     },
     {
@@ -1506,12 +1418,6 @@
         }
       ],
       "primary_key": [
-        "binding_id",
-        "call_namespace",
-        "source_sequence",
-        "call_sequence"
-      ],
-      "sort_key": [
         "binding_id",
         "call_namespace",
         "source_sequence",
@@ -1567,12 +1473,6 @@
         "coverage_id",
         "from_sequence",
         "to_sequence"
-      ],
-      "sort_key": [
-        "binding_id",
-        "coverage_id",
-        "from_sequence",
-        "to_sequence"
       ]
     },
     {
@@ -1619,12 +1519,6 @@
         "namespace",
         "observed_id",
         "valid_from"
-      ],
-      "sort_key": [
-        "source_id",
-        "namespace",
-        "observed_id",
-        "valid_from"
       ]
     },
     {
@@ -1657,10 +1551,6 @@
         }
       ],
       "primary_key": [
-        "entity_binding_id",
-        "cis_line_id"
-      ],
-      "sort_key": [
         "entity_binding_id",
         "cis_line_id"
       ]
@@ -1703,11 +1593,6 @@
         "binding_id",
         "cis_line_id",
         "cis_trip_id"
-      ],
-      "sort_key": [
-        "binding_id",
-        "cis_line_id",
-        "cis_trip_id"
       ]
     },
     {
@@ -1742,68 +1627,6 @@
       "primary_key": [
         "binding_id",
         "train_number"
-      ],
-      "sort_key": [
-        "binding_id",
-        "train_number"
-      ]
-    },
-    {
-      "name": "selected_field_provenance",
-      "fields": [
-        {
-          "name": "object_type",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "object_key",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "field_name",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_snapshot_sha256",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_object_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "selection_rule",
-          "type": "string",
-          "nullable": false
-        }
-      ],
-      "primary_key": [
-        "object_type",
-        "object_key",
-        "field_name",
-        "source_id",
-        "source_snapshot_sha256",
-        "source_object_id",
-        "selection_rule"
-      ],
-      "sort_key": [
-        "object_type",
-        "object_key",
-        "field_name",
-        "source_id",
-        "source_snapshot_sha256",
-        "source_object_id",
-        "selection_rule"
       ]
     },
     {
@@ -1846,10 +1669,6 @@
         }
       ],
       "primary_key": [
-        "object_type",
-        "object_key"
-      ],
-      "sort_key": [
         "object_type",
         "object_key"
       ]
@@ -1901,15 +1720,6 @@
         "identifier_namespace",
         "source_object_id",
         "selection_rule"
-      ],
-      "sort_key": [
-        "binding_kind",
-        "binding_id",
-        "evidence_source_id",
-        "source_snapshot_sha256",
-        "identifier_namespace",
-        "source_object_id",
-        "selection_rule"
       ]
     },
     {
@@ -1932,10 +1742,6 @@
         }
       ],
       "primary_key": [
-        "route_id",
-        "route_stop_id"
-      ],
-      "sort_key": [
         "route_id",
         "route_stop_id"
       ]
@@ -1965,11 +1771,6 @@
         }
       ],
       "primary_key": [
-        "route_id",
-        "route_stop_id",
-        "zone_id"
-      ],
-      "sort_key": [
         "route_id",
         "route_stop_id",
         "zone_id"

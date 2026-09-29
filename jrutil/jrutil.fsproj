@@ -46,7 +46,7 @@
     <Compile Include="src/Serving/PackageReader.fs" />
     <Compile Include="src/Serving/Comparison.fs" />
     <Compile Include="src/Serving/ColumnWriter.fs" />
-    <Compile Include="src/Serving/BinarySort.fs" />
+    <Compile Include="src/Serving/HashDedup.fs" />
     <Compile Include="src/Serving/RelationWriter.fs" />
     <Compile Include="src/Serving/TripCallWriter.fs" />
     <Compile Include="src/Serving/TripWriter.fs" />
@@ -113,6 +113,7 @@
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageReference Include="NodaTime" Version="3.3.2" />
     <PackageReference Include="Parquet.Net" Version="6.0.3" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.0" />
     <PackageReference Include="docopt.net" Version="0.8.3" />
   </ItemGroup>
 

@@ -13,7 +13,7 @@ output/
 │   ├── cz_call_zones.txt
 │   └── cz_transfer_constraints.txt
 ├── serving/
-│   └── <37 declared relations>.parquet
+│   └── <36 declared relations>.parquet
 ├── manifest.json
 └── diagnostics.json
 ```
