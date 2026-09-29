@@ -389,6 +389,38 @@ type ServingContractTests() =
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``Semantic comparison ignores physical layout and reports keyed differences``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-compare-" + Guid.NewGuid().ToString("N"))
+        try
+            let stage = staging root
+            let first, second, renamed = Path.Combine(root, "first"), Path.Combine(root, "second"), Path.Combine(root, "renamed")
+            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage first
+            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage second
+            let same = JrUtil.Serving.Comparison.comparePackages [] first second
+            Assert.IsTrue(same.isEquivalent)
+            Assert.AreEqual(0, same.differences.Length)
+            Assert.IsTrue(same.compared |> List.contains "serving/trip_call.parquet")
+            Assert.IsTrue(same.compared |> List.contains "gtfs.zip/stop_times.txt")
+
+            let stops = Path.Combine(stage, "gtfs-intermediate", "stops.txt")
+            File.WriteAllText(stops, File.ReadAllText(stops).Replace("s2,Two,", "s2,Deux,"))
+            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage renamed
+            let changed = JrUtil.Serving.Comparison.comparePackages [] first renamed
+            Assert.IsFalse(changed.isEquivalent)
+            let subjects = changed.unexpected |> List.map (fun difference -> difference.kind, difference.subject)
+            CollectionAssert.Contains(List.toArray subjects, ("relation", "location"))
+            CollectionAssert.Contains(List.toArray subjects, ("gtfs", "stops.txt"))
+            let location = changed.unexpected |> List.find (fun difference -> difference.subject = "location")
+            Assert.IsTrue(location.summary.StartsWith("0 removed, 0 added, 1 changed"), location.summary)
+            Assert.IsTrue(location.samples |> List.exists (fun sample -> sample.Contains("name: Two -> Deux")))
+
+            let expectations =
+                JrUtil.Serving.Comparison.parseExpectations [ "# renamed stop"; "relation location"; "gtfs stop*.txt"; "manifest *"; "relation selected_field_provenance" ]
+            let allowed = JrUtil.Serving.Comparison.comparePackages expectations first renamed
+            Assert.IsTrue(allowed.unexpected |> List.forall (fun difference -> difference.subject <> "location" && difference.subject <> "stops.txt"))
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Bindings normalize operational keys and preserve actual source sequence``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-identity-" + Guid.NewGuid().ToString("N"))
         try

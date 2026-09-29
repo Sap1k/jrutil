@@ -43,6 +43,7 @@
     <Compile Include="src/Serving/MemoryReclaim.fs" />
     <Compile Include="src/Serving/Validation.fs" />
     <Compile Include="src/Serving/PackageReader.fs" />
+    <Compile Include="src/Serving/Comparison.fs" />
     <Compile Include="src/Serving/ColumnWriter.fs" />
     <Compile Include="src/Serving/BinarySort.fs" />
     <Compile Include="src/Serving/RelationWriter.fs" />
