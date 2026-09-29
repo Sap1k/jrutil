@@ -6,6 +6,7 @@ module JrUtil.GeoData.Osm
 #nowarn "9"
 
 open System
+open JrUtil
 open System.Collections.Concurrent
 open System.Collections.Generic
 open System.IO
@@ -46,28 +47,6 @@ let featTagOpt name (feat: IFeature) =
     |> nullOpt
     |> Option.map unbox<string>
 
-let getCzRailStops pbfPath = cacheVoidFunc "cz-osm-rail-stops" <| fun () ->
-    use stream = File.OpenRead(pbfPath)
-    (new PBFOsmStreamSource(stream)
-     |> Seq.filter (fun node ->
-         node.Type = OsmGeoType.Node
-         && (node.Tags.Contains("railway", "halt")
-             || node.Tags.Contains("railway", "station"))
-         && not (node.Tags.ContainsKey("subway"))))
-     .ToFeatureSource()
-    |> Seq.map (fun feat -> {|
-        id = feat.Attributes.["id"] :?> int64
-        sr70 =
-            featTagOpt "ref:sr70" feat
-            |> Option.orElse (featTagOpt "railway:ref" feat)
-            |> Option.map normaliseSr70
-        name =
-            featTagOpt "name" feat
-            |> Option.orElse (featTagOpt "name:cs" feat)
-        point = wgs84Factory.CreateGeometry(feat.Geometry) :?> Point
-    |})
-    |> Seq.toArray
-
 let czOtherStopNameRegion =
     // Used for synonym matching
     let matcher = new StopMatcher<_>([||])
@@ -87,7 +66,7 @@ let czOtherStopNameRegion =
             then n, Some r
             else tn + "," + n, Some r
 
-let getCzOtherStops pbfPath = cacheVoidFunc "cz-osm-other-stops" <| fun () ->
+let getCzOtherStops pbfPath =
     use stream = File.OpenRead(pbfPath)
     (new PBFOsmStreamSource(stream)
      |> Seq.filter (fun node ->
@@ -1648,8 +1627,7 @@ type PackedRoutingGraph private
                     nodeValues <- ResizeArray<RoutingNodeBuild>()
                     outgoingDegrees <- Array.zeroCreate packedNodeCount
                     incomingDegrees <- Array.zeroCreate packedNodeCount
-                    GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-                    GC.Collect(2, GCCollectionMode.Forced, true, true)
+                    MemoryReclaim.compactOnce ()
                     nodeMap,nodes
             let addEdge (value: RoutingEdgeBuild) =
                 edgeWriter.Write(value.fromNode)
@@ -1816,8 +1794,7 @@ type PackedRoutingGraph private
             // edges, offsets and the snap index at the same time.
             nodeValues <- ResizeArray<RoutingNodeBuild>()
             offsetValues <- Array.empty
-            GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-            GC.Collect(2, GCCollectionMode.Forced, true, true)
+            MemoryReclaim.compactOnce ()
 
             let snapValues = ResizeArray<SnapBuild>()
             if buildGlobalSnaps then

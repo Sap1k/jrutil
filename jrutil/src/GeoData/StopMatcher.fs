@@ -74,17 +74,13 @@ let makeAnalyzer luceneVersion =
             tokenizer, synonymParser.Build(), true)
         TokenStreamComponents(tokenizer, synonymFilter))
 
-type StopMatcher<'d>(stops: StopToMatch<'d> array,
-                     ?file: string option) as this =
+type StopMatcher<'d>(stops: StopToMatch<'d> array) as this =
     let luceneVersion = LuceneVersion.LUCENE_48
-    let isExisting, directory =
-        match defaultArg file None with
-        | Some f -> Directory.Exists(f), FSDirectory.Open(f) :> Directory
-        | None -> false, new RAMDirectory()
+    let directory = new RAMDirectory()
     let indexAnalyzer = makeAnalyzer luceneVersion
     let queryAnalyzers = new ThreadLocal<Analyzer>((fun () -> makeAnalyzer luceneVersion), true)
     let cachedReader = lazy (DirectoryReader.Open(directory))
-    do if not isExisting then this.index()
+    do this.index()
 
     member this.index() =
         let config = IndexWriterConfig(luceneVersion, indexAnalyzer)

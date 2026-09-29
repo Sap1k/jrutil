@@ -3,6 +3,8 @@
 namespace JrUtil.Serving
 
 open System
+open JrUtil
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.Diagnostics
 open System.Globalization
@@ -59,11 +61,7 @@ module PackageWriter =
     /// otherwise remain committed while the next nationwide relation is
     /// sorted, even though they are no longer reachable.  This is a phase
     /// boundary reclamation, not a heap limit: live data is never rejected.
-    let private reclaimManagedPhaseMemory () =
-        GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
-        GC.WaitForPendingFinalizers()
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+    let private reclaimManagedPhaseMemory = MemoryReclaim.compactingCollection
 
     let private nullableString value =
         if String.IsNullOrWhiteSpace(value) then null else box value
@@ -371,10 +369,6 @@ module PackageWriter =
         |> Seq.choose (fun (source, digest) ->
             if isNull source || isNull digest then None else Some (source, digest))
         |> dict
-
-    let private sha256File path =
-        use stream = File.OpenRead(path)
-        SHA256.HashData(stream) |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
     let private callSequenceKey trip sequence = Identity.compositeKey [ trip; sequence ]
 
@@ -2179,9 +2173,6 @@ module PackageWriter =
                        || File.Exists(Path.Combine(legacy, "source_notice_metadata.parquet")) then
                         semanticRelations nativeSummaries legacy gtfs legacyManifest.RootElement
                     else Map.empty
-                let appendRows name rows state =
-                    let existing = state |> Map.tryFind name |> Option.defaultValue Seq.empty
-                    state |> Map.add name (Seq.append existing rows)
                 let generated =
                     identities |> Map.fold (fun state name rows -> state |> Map.add name rows) core
                     |> fun state -> semantics |> Map.fold (fun current name rows -> current |> Map.add name rows) state

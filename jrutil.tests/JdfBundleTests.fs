@@ -759,9 +759,6 @@ type JdfBundleTests() =
             Assert.AreNotEqual(fullManifest.packId,regionManifest.packId)
             Assert.IsTrue(regionManifest.contextCount>0L)
             Assert.IsTrue(regionManifest.contextCount<fullManifest.contextCount)
-            let report=Path.Combine(root,"region-replay")
-            JdfBundle.replayPostInferenceEvidence regionEvidence None None None None report
-            Assert.IsTrue(File.Exists(Path.Combine(report,"summary.json")))
             for evidence in [|regionEvidence;excludedEvidence|] do
                 let replayOptions={JdfBundle.defaultBundleExecutionOptions with
                                       postInferenceEvidencePath=Some evidence}
@@ -951,12 +948,6 @@ type JdfBundleTests() =
                           JdfPostEvidenceStore.noIdentityExpectation evidence
             let capturedStops=store.ReadStops() |> Seq.toArray
             Assert.IsTrue(capturedStops.Length>1)
-            let selectedStopsPath=Path.Combine(root,"selected-review-stops.txt")
-            File.WriteAllText(selectedStopsPath,string capturedStops.[0]+Environment.NewLine)
-            let selectedReplayReport=Path.Combine(root,"selected-replay-report")
-            JdfBundle.replayPostInferenceEvidence evidence None None None
-                (Some selectedStopsPath) selectedReplayReport
-            Assert.IsTrue(File.Exists(Path.Combine(selectedReplayReport,"summary.json")))
             use first=JdfPostInferenceEvaluator.evaluate store permissiveCoveragePolicy
             use second=JdfPostInferenceEvaluator.evaluate store permissiveCoveragePolicy
             JdfPostInferencePolicy.PostInferencePhaseProbe.reset()

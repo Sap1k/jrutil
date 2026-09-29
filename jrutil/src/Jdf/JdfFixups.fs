@@ -249,9 +249,7 @@ let eurTownNameMatcher =
                 |> Seq.map (fun r ->
                     { name = r.Name
                       data = r.CountryCode.ToUpper(), r.Lat, r.Lon })
-                |> Seq.toArray,
-                Utils.persistentCachePath
-                |> Option.map (fun d -> Path.Combine(d, "eur-town-matcher")))
+                |> Seq.toArray)
 
 let matchCzTownByNameRaw town =
     let town =
@@ -561,11 +559,6 @@ let fillStopRegionsFromPrevious
             augmentedStopIds |> Set.contains s.id |> not)
     ]
 
-/// Sort tripStops for one trip by call order
-let sortOneTripStops =
-    Array.sortBy (fun (ts: TripStop) ->
-        ts.routeStopId * if ts.tripId % 2L = 1L then 1L else -1L)
-
 // Takes trip stops and grous them twice: by direction and then by pattern,
 // creating two matrices of tripStops (row - one stop)
 let groupedTripsMatrices (routeStops: RouteStop array)
@@ -663,12 +656,6 @@ let addSecondaryMatches
         |> Array.filter (fun (s, _, _) ->
             augmentedStopIds |> Set.contains s.id |> not)
     ]
-
-let townNoPerfectMatch town =
-    not (matchesCzTownByName town)
-    &&
-    eurTownNameMatcher().matchStop(town)
-    |> Seq.forall (fun m -> m.score < 1f)
 
 // The CIS JŘ exports sometimes don't even have one consistent town for one
 // timetable. Thankfully it seems rare, so we fix it manually.

@@ -58,8 +58,7 @@ let sortRows (storage: Storage) (compareRows: string array -> string array -> in
         let current = Process.GetCurrentProcess()
         current.Refresh()
         if current.PrivateMemorySize64 >= 3_250_000_000L then
-            GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+            JrUtil.MemoryReclaim.compactOnce ()
     let spill (values: ResizeArray<int64 * string array>) =
         let ordered = values.ToArray()
         Array.sortInPlaceWith (fun (ai, a) (bi, b) ->

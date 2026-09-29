@@ -3,6 +3,7 @@
 module internal JrUtil.RegionalOverlay.Projection
 
 open System
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.Globalization
 open System.IO

@@ -3,6 +3,7 @@
 module JrUtil.JdfPostEvidenceStore
 
 open System
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.IO
 open System.Security.Cryptography
@@ -137,10 +138,6 @@ let private schemas = Map [
         expected "invariant_failure_reason" typeof<string> true |]
 ]
 
-let private sha256File path =
-    use stream=File.OpenRead(path)
-    SHA256.HashData(stream) |> Convert.ToHexString |> _.ToLowerInvariant()
-
 let private schemaFingerprint (fields:DataField array) =
     fields |> Array.map(fun field -> $"{field.Name}:{field.ClrType.FullName}:{field.IsNullable}")
     |> String.concat "|" |> Encoding.UTF8.GetBytes |> SHA256.HashData
@@ -245,8 +242,6 @@ let private validateSemantics directory
              .AsTask().GetAwaiter().GetResult()
         values
     let optionString (values:string array) index=Option.ofObj values.[index]
-    let optionDouble (values:Nullable<float> array) index =
-        if values.[index].HasValue then Some values.[index].Value else None
     let finite value=Double.IsFinite value
 
     let observations=Dictionary<struct(int64*string),string>()

@@ -5,9 +5,7 @@ open System
 open System.Collections.Generic
 open System.IO
 open System.IO.Compression
-open System.Text.RegularExpressions
 open System.Text.Json
-open FSharp.Data
 open Serilog
 open Serilog.Context
 
@@ -20,34 +18,24 @@ let docstring = (fun (s: string) -> s.Trim()) """
 jrutil, a tool for working with czech public transport data
 
 Usage:
-    jrutil-multitool.exe jdf-to-gtfs [options] <JDF-in-dir> <GTFS-out-dir>
     jrutil-multitool.exe jdf-to-bundle [options] [--gvd-year=YEAR] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
-    jrutil-multitool.exe jdf-validate-post-inference --evidence=DIR
-    jrutil-multitool.exe jdf-replay-post-inference [options] [--policy=FILE] --evidence=DIR --output=DIR
     jrutil-multitool.exe jdf-export-post-features [options] [--policy=FILE] --evidence=DIR --output=DIR
-    jrutil-multitool.exe czptt-to-gtfs [options] <CzPtt-in-file> <GTFS-out-dir>
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
     jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
-    jrutil-multitool.exe regional-gtfs-overlay-all [options]
     jrutil-multitool.exe validate-package <package-dir>
-    jrutil-multitool.exe compare-packages (--byte-identical | --semantic | --migration-audit) [--expect=FILE] <left-package> <right-package>
+    jrutil-multitool.exe compare-packages (--byte-identical | --semantic) [--expect=FILE] <left-package> <right-package>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] --gvd-year=YEAR --reference-date=DATE <JDF-out-dir> <JDF-in-dir>...
     jrutil-multitool.exe --help
 
 Options:
-    -C --stop-coords-by-id=FILE  CSV file assigning coordinates to stops by ID
     -g --ext-geodata=PATH        CSV file or directory with stop positions
     -o --cz-pbf=PATH             OSM data for Czech Republic
     -l --logfile=FILE            Logfile
-    -c --cache=DIR               Persistent cache directory
-    -i --by-id                   Merge stops by numeric ID
     -s --strict                  Fail instead of skipping a malformed batch
-    --stop-ids-cis               Treat JDF stop numbers as authoritative CIS IDs
     --snapshot-descriptor=FILE    Retrieval provenance and input checksum JSON
     --converter-version=VALUE     Exact JrUtil fork version or commit for provenance
     --international-route-policy=VALUE  keep-all (default) or regional-adjacent
-    --international-route-overrides=FILE  Optional route keep/drop override CSV
     --transport-mode-rules=FILE  Reviewed JDF effective transport-mode rule CSV
     --no-estimated-posts         Disable candidate-based internal post inference
     --routing-osm-pbf=FILE       Osmium demand-clipped road/tram PBF for routed inference
@@ -65,7 +53,6 @@ Options:
     --policy=FILE                          Policy JSON for policy replay
     --gvd-year=YEAR                       GVD year: overlay window, merge-jdf validity bound, jdf-to-bundle manifest
     --reference-date=DATE                 merge-jdf: drop timetables expired before YYYY-MM-DD
-    --audit-date=DATE                     Coverage audit date YYYY-MM-DD (default: CIS snapshot Prague date)
     --source=BINDING                      Overlay source binding SOURCE_ID=GTFS.zip
     --source-descriptor=BINDING           Source checksum binding SOURCE_ID=descriptor.json
     --diagnostics-out=DIR                 Optional separate detailed diagnostics artifact
@@ -73,70 +60,18 @@ Options:
     --byte-identical                      Require every production byte to match
     --semantic                            Compare relations by key, GTFS as row multisets, JSON canonically
     --expect=FILE                         Allow-list of intended semantic differences (`<kind> <glob>` lines)
-    --migration-audit                     Validate an explicit legacy-to-production migration
-    --policy-grid=FILE                     Deterministic policy variants for replay
-    --expectations=FILE                    Labelled routed-post expectation TSV
-    --review-stops=FILE                    Stop selectors for replay diagnostics
     --output=DIR                           Replay report output directory
     -j --jobs=VALUE             Worker count or auto (default: auto)
     --memory-budget=VALUE       RAM budget such as 10GiB or auto (default: auto)
     --batch-output=VALUE        fix-jdf output: directory or zip (default: directory)
     --catalog-snapshot=FILE     Offline KADR catalog snapshot JSON for CZPTT
     --operational-points=VALUE  CZPTT internal points: gtfs (default) or sidecar
-    --block-mode=VALUE         CZPTT trip grouping: blocks (default) or none
     --sr70=FILE                 SR70 CSV snapshot for CZPTT point names and coordinates
     --sr70-name20=FILE          Companion SR70 Název20 CSV for fallback route names
     --osm-pbf=FILE              Shared regional OSM PBF for CZPTT coordinate gaps
     --osm-aliases=FILE          Reviewed CZPTT identity-to-OSM-object aliases
     --progress-events           Emit versioned JRUTIL_PROGRESS JSON lines
-
-Passing - to an input path parameter will make most jrutil commands read
-input filenames from stdin. Each result will be output into a sequentially
-numbered directory.
 """
-
-type StopCoordsById = CsvProvider<
-    HasHeaders = false,
-    Schema = "id(string), lat(decimal), lon(decimal)">
-
-let stdinLinesSeq () =
-    Seq.initInfinite (fun _ -> stdin.ReadLine())
-    |> Seq.takeWhile (fun l -> l <> null)
-
-let inOutFiles inpath outpath =
-    if inpath = "-" then
-        stdinLinesSeq ()
-        |> Seq.mapi (fun i l -> (l, Path.Combine(outpath, string i)))
-    else
-        seq [(inpath, outpath)]
-
-let gtfsWithCoords stopCoordsByIdPath (gtfs: GtfsModel.GtfsFeed) =
-    // Allow specific platforms to get fallback positions for stations
-    let sr70sRegex = new Regex("^-SR70S-CZ-(\\d+)")
-    let idsToMatch id =
-        let m = sr70sRegex.Match(id)
-        if m.Success then [id; sprintf "-SR70ST-CZ-" + m.Groups.[1].Value]
-        else [id]
-
-    match stopCoordsByIdPath with
-    | Some p ->
-        let coords =
-            StopCoordsById.Load(Path.GetFullPath(p)).Rows
-            |> Seq.map (fun r -> r.Id, (r.Lat, r.Lon))
-            |> Map
-        { gtfs with
-            stops =
-                gtfs.stops
-                |> Array.map (fun s ->
-                    match idsToMatch s.id
-                          |> Seq.choose (fun id -> coords |> Map.tryFind id)
-                          |> Seq.tryHead with
-                    | Some (lat, lon) -> { s with
-                                             lat = Some lat
-                                             lon = Some lon }
-                    | None -> s)
-        }
-    | _ -> gtfs
 
 let emitProgressEvent enabled eventName (fields: (string * obj) list) =
     if enabled then
@@ -150,31 +85,6 @@ let emitProgressEvent enabled eventName (fields: (string * obj) list) =
         // under the same lock used for human-readable Serilog output.
         Log.ForContext("JrUtilProgressEvent", line)
            .Information("{ProgressEvent:l}", line)
-
-let private parseOverlayArguments args =
-    let parseBinding argumentName (value: string) =
-        let separator = value.IndexOf('=')
-        if separator <= 0 || separator = value.Length - 1 then
-            invalidArg argumentName $"Expected SOURCE_ID=PATH, got {value}"
-        value.Substring(0, separator), value.Substring(separator + 1)
-    let sourceId, sourcePath = parseBinding "--source" (argValue args "--source")
-    let descriptorSourceId, descriptorPath =
-        parseBinding "--source-descriptor" (argValue args "--source-descriptor")
-    if sourceId <> descriptorSourceId then
-        invalidArg "--source-descriptor" "Source and descriptor bindings must use the same source ID"
-    let mutable gvdYear = 0
-    if not (Int32.TryParse(argValue args "--gvd-year", &gvdYear)) then
-        invalidArg "--gvd-year" "Expected a four-digit year"
-    let sourceBinding: SourceBinding = {
-        sourceId = sourceId
-        payloadPath = sourcePath
-        descriptorPath = descriptorPath
-    }
-    let auditDate =
-        optArgValue args "--audit-date"
-        |> Option.filter (String.IsNullOrWhiteSpace >> not)
-        |> Option.map (fun value -> NodaTime.Text.LocalDatePattern.Iso.Parse(value).Value)
-    gvdYear, sourceBinding, auditDate
 
 let private parseOverlayBindingsArguments args =
     let parseBinding argumentName (value: string) =
@@ -197,17 +107,12 @@ let private parseOverlayBindingsArguments args =
             | _ -> invalidArg "--source-descriptor" $"Missing descriptor for source {sourceId}")
     let mutable gvdYear = 0
     if not (Int32.TryParse(argValue args "--gvd-year", &gvdYear)) then invalidArg "--gvd-year" "Expected a four-digit year"
-    let auditDate =
-        optArgValue args "--audit-date"
-        |> Option.filter (String.IsNullOrWhiteSpace >> not)
-        |> Option.map (fun value -> NodaTime.Text.LocalDatePattern.Iso.Parse(value).Value)
-    gvdYear, bindings, auditDate
+    gvdYear, bindings
 
 [<EntryPoint>]
 let main (args: string array) =
     withProcessedArgs docstring args (fun args ->
         setupLogging (optArgValue args "--logfile") ()
-        Utils.persistentCachePath <- optArgValue args "--cache"
         let progressEvents = argFlagSet args "--progress-events"
 
         let memoryRequest =
@@ -389,7 +294,6 @@ let main (args: string array) =
             |> Array.filter (fun tripStop ->
                 (tripStop.routeId, tripStop.tripId) = selected)
 
-        let stopCoordsByIdPath = optArgValue args "--stop-coords-by-id"
         let sr70Path = optArgValue args "--sr70"
         let osmPath = optArgValue args "--osm-pbf"
         let osmAliasesPath = optArgValue args "--osm-aliases"
@@ -422,10 +326,7 @@ let main (args: string array) =
             optArgValue args "--international-route-policy"
             |> Option.defaultValue "keep-all"
             |> JdfToGtfs.parseInternationalRoutePolicy
-        let internationalRouteOverrides =
-            optArgValue args "--international-route-overrides"
-            |> Option.map JdfToGtfs.loadInternationalRouteOverrides
-            |> Option.defaultValue [||]
+        let internationalRouteOverrides: JdfToGtfs.InternationalRouteOverride array = [||]
         let transportModeRules =
             optArgValue args "--transport-mode-rules"
             |> Option.map JdfToGtfs.loadTransportModeRules
@@ -442,22 +343,15 @@ let main (args: string array) =
                 (routingPbf.IsSome || postInferenceEvidence.IsSome)
         let collectEstimatedPostEvidence = estimatedPostActivation.collectEvidence
         let routedPostInference = estimatedPostActivation.runRoutedInference
-        if internationalRoutePolicy = JdfToGtfs.KeepAll
-           && internationalRouteOverrides.Length > 0 then
-            invalidArg "--international-route-overrides"
-                "International route overrides require --international-route-policy=regional-adjacent"
         let mutable exitCode = 0
-        if args.ContainsKey("regional-gtfs-overlay-all") && argFlagSet args "regional-gtfs-overlay-all" then
-            exitCode <- 2
-            Log.Error("regional-gtfs-overlay-all was removed; use regional-gtfs-overlay with repeated --source and --source-descriptor options")
-        else if argFlagSet args "regional-gtfs-overlay" then
+        if argFlagSet args "regional-gtfs-overlay" then
             try
-                let gvdYear, sourceBindings, auditDate = parseOverlayBindingsArguments args
+                let gvdYear, sourceBindings = parseOverlayBindingsArguments args
                 let baseBundle = argValue args "<base-bundle>"
                 JrUtil.Serving.Validation.validatePackage baseBundle |> ignore
                 let result =
                     RegionalGtfsOverlay.compile {
-                        auditDate = auditDate
+                        auditDate = None
                         policyPath = argValue args "--policy"
                         gvdYear = gvdYear
                         bindings = sourceBindings
@@ -485,7 +379,7 @@ let main (args: string array) =
                 if argFlagSet args "--byte-identical" then
                     JrUtil.Serving.Validation.compareByteIdentical left right
                     Log.Information("Production packages are byte-identical")
-                elif argFlagSet args "--semantic" then
+                else
                     let expectations =
                         optArgValue args "--expect"
                         |> Option.map (File.ReadAllLines >> JrUtil.Serving.Comparison.parseExpectations)
@@ -500,9 +394,6 @@ let main (args: string array) =
                     Log.Information("Compared {Count} package parts; {Differences} differences, {Unexpected} unexpected",
                                     report.compared.Length, report.differences.Length, report.unexpected.Length)
                     if not report.isEquivalent then exitCode <- 1
-                else
-                    JrUtil.Serving.Validation.migrationAudit left right
-                    Log.Information("Production migration structure is valid")
             with error ->
                 exitCode <- 1
                 Log.Error(error, "Package comparison failed")
@@ -559,7 +450,7 @@ let main (args: string array) =
                     JdfBundle.executeBundleWithRoutedPostInferenceOptions
                         (argValue args "--snapshot-descriptor")
                         (argValue args "--converter-version")
-                        (argFlagSet args "--stop-ids-cis")
+                        false
                         internationalRoutePolicy
                         internationalRouteOverrides
                         transportModeRules
@@ -592,19 +483,6 @@ let main (args: string array) =
             with e ->
                 exitCode <- 1
                 Log.Error(e, "JDF bundle conversion failed")
-        else if argFlagSet args "jdf-validate-post-inference" then
-            try
-                use store=JdfPostEvidenceStore.openValidatedStore
-                              JdfPostEvidenceStore.noIdentityExpectation
-                              (argValue args "--evidence")
-                Log.Information(
-                    "Post-inference evidence is valid: pack_id={PackId}; contexts={Contexts}; rows={Rows}",
-                    store.Manifest.packId,store.Manifest.contextCount,
-                    store.Manifest.routePointEvidenceCount)
-                Log.Information("Finished!")
-            with e ->
-                exitCode <- 1
-                Log.Error(e,"JDF post-inference evidence validation failed")
         else if argFlagSet args "jdf-export-post-features" then
             try
                 JdfBundle.exportPostInferenceFeatures
@@ -615,78 +493,6 @@ let main (args: string array) =
             with e ->
                 exitCode <- 1
                 Log.Error(e,"JDF post-inference feature export failed")
-        else if argFlagSet args "jdf-replay-post-inference" then
-            try
-                JdfBundle.replayPostInferenceEvidence
-                    (argValue args "--evidence")
-                    (optArgValue args "--policy")
-                    (optArgValue args "--policy-grid")
-                    (optArgValue args "--expectations")
-                    (optArgValue args "--review-stops")
-                    (argValue args "--output")
-                Log.Information("Finished!")
-            with e ->
-                exitCode <- 1
-                Log.Error(e,"JDF post-inference replay failed")
-        else if argFlagSet args "jdf-to-gtfs" then
-            let stopIdsCis = argFlagSet args "--stop-ids-cis"
-            inOutFiles (argValues args "<JDF-in-dir>" |> Seq.head)
-                       (argValue args "<GTFS-out-dir>")
-            |> Seq.iter (fun (inpath, out) ->
-                Log.Information("Processing {Batch}", inpath)
-                try
-                    Log.Information("Reading JDF")
-                    use calls = new JdfCallStore.Store(Path.GetDirectoryName(Path.GetFullPath(out)), Threading.CancellationToken.None)
-                    let jdf = Jdf.jdfCompilationParser calls (fun count -> Log.Information("Parsed {Calls} JDF calls", count)) (Jdf.FsPath inpath)
-                    let routeKeys =
-                        jdf.routes
-                        |> Seq.map (fun route -> route.id, route.idDistinction)
-                        |> Set
-                    JdfToGtfs.validateInternationalRouteOverrides
-                        routeKeys internationalRouteOverrides
-                    let filterResult =
-                        JdfToGtfs.applyInternationalRoutePolicy
-                            internationalRoutePolicy internationalRouteOverrides jdf
-                    JdfToGtfs.logInternationalRouteDecisions
-                        internationalRoutePolicy filterResult.decisions
-                    Log.Information("Converting to GTFS")
-                    let correctedBatch, transportModeDecisions =
-                        JdfToGtfs.applyTransportModeRules transportModeRules filterResult.batch
-                    let effectiveBatch =
-                        if routedPostInference then correctedBatch
-                        else { correctedBatch with
-                                   postCandidateEvidence = [||] }
-                    transportModeDecisions
-                    |> Array.iter (fun decision ->
-                        if decision.corrected then
-                            Log.Information("Corrected JDF route {Route}/{Distinction} transport mode: {Reason}",
-                                            decision.routeId, decision.routeDistinction, decision.message)
-                        else
-                            Log.Warning("JDF route {Route}/{Distinction} transport-mode rule mismatch",
-                                        decision.routeId, decision.routeDistinction))
-                    let preparation =
-                        JdfToGtfs.prepareGtfsFeedForStreaming true stopIdsCis effectiveBatch
-                    let referencedStopIds = HashSet<string>(StringComparer.Ordinal)
-                    let stopTimes =
-                        JdfToGtfs.getStreamingBundleStopTimes preparation
-                        |> Seq.map (fun stopTime ->
-                            referencedStopIds.Add(stopTime.stopId) |> ignore
-                            stopTime)
-                    Gtfs.gtfsStopTimesToFolder () out stopTimes
-                    let gtfs =
-                        JdfToGtfs.finishStreamingFeedWithUniqueCalendars
-                            preparation (referencedStopIds |> Set.ofSeq)
-                        |> gtfsWithCoords stopCoordsByIdPath
-
-                    Log.Information("Writing GTFS")
-                    let completeFeed = gtfs |> Gtfs.fillStandardRequiredFields
-                    Gtfs.gtfsStandardTablesExceptStopTimesToFolder () out completeFeed
-                    Gtfs.gtfsExtensionsToFolder () out completeFeed
-                    resourceUsage "jdf-to-gtfs" "write-gtfs" 0L
-                    Log.Information("Finished!")
-                with e ->
-                    Log.Error(e, "Error while processing {Batch}", inpath)
-            )
         else if argFlagSet args "czptt-to-bundle" then
             let mutable temporaryOutput: string option = None
             try
@@ -701,14 +507,7 @@ let main (args: string array) =
                     | value ->
                         invalidArg "--operational-points"
                             $"Expected gtfs or sidecar, got {value}"
-                let blockMode =
-                    match optArgValue args "--block-mode"
-                          |> Option.defaultValue "blocks" with
-                    | "blocks" -> CzPttToGtfs.Blocks
-                    | "none" -> CzPttToGtfs.NoBlocks
-                    | value ->
-                        invalidArg "--block-mode"
-                            $"Expected blocks or none, got {value}"
+                let blockMode = CzPttToGtfs.Blocks
                 let conversionOptions: CzPttToGtfs.ConversionOptions = {
                     operationalPointMode = operationalPointMode
                     blockMode = blockMode
@@ -798,43 +597,6 @@ let main (args: string array) =
                     if Directory.Exists(path) then Directory.Delete(path, true))
                 exitCode <- 1
                 Log.Error(e, "CZPTT bundle conversion failed")
-        else if argFlagSet args "czptt-to-gtfs" then
-            let gtfsSer = Gtfs.gtfsFeedToFolder ()
-            try
-                let catalog =
-                    optArgValue args "--catalog-snapshot"
-                    |> Option.map CzPttToGtfs.loadCatalogSnapshot
-                    |> Option.defaultValue CzPttToGtfs.emptyCatalog
-                let operationalPointMode =
-                    match optArgValue args "--operational-points"
-                          |> Option.defaultValue "gtfs" with
-                    | "gtfs" -> CzPttToGtfs.Gtfs
-                    | "sidecar" -> CzPttToGtfs.Sidecar
-                    | value ->
-                        invalidArg "--operational-points"
-                            $"Expected gtfs or sidecar, got {value}"
-                let blockMode =
-                    match optArgValue args "--block-mode"
-                          |> Option.defaultValue "blocks" with
-                    | "blocks" -> CzPttToGtfs.Blocks
-                    | "none" -> CzPttToGtfs.NoBlocks
-                    | value ->
-                        invalidArg "--block-mode"
-                            $"Expected blocks or none, got {value}"
-                CzPtt.parseAll (argValue args "<CzPtt-in-file>")
-                |> CzPttToGtfs.gtfsFeedMergedWithConversionOptions
-                    catalog {
-                        operationalPointMode = operationalPointMode
-                        blockMode = blockMode
-                    }
-                |> Gtfs.deduplicateCalendar
-                |> gtfsWithCoords stopCoordsByIdPath
-                |> Gtfs.fillStandardRequiredFields
-                |> gtfsSer (argValue args "<GTFS-out-dir>")
-                Log.Information("Finished!")
-            with e ->
-                exitCode <- 1
-                Log.Error(e, "Error while processing CzPtt")
         else if argFlagSet args "fix-jdf" then
             let inDir = argValues args "<JDF-in-dir>" |> Seq.head
             let outDir = argValue args "<JDF-out-dir>"
@@ -862,15 +624,13 @@ let main (args: string array) =
                 czPbf
                 |> Option.map (fun pbf ->
                     Utils.logWrappedOp "Reading OSM stops" <| fun () ->
-                        Osm.getCzOtherStops pbf ()
+                        Osm.getCzOtherStops pbf
                         |> Osm.czOtherStopsForJdfMatch)
                 |> Option.defaultValue [||]
             phase "fix-jdf" "read-osm-stops" "completed"
             resourceUsage "fix-jdf" "read-osm-stops" 0L
             use stopMatcher = new StopMatcher.StopMatcher<_>(
-                Array.concat [ extStopsToMatch; osmStopsToMatch ],
-                Utils.persistentCachePath
-                |> Option.map (fun d -> Path.Combine(d, "cz-stop-matcher")))
+                Array.concat [ extStopsToMatch; osmStopsToMatch ])
 
             // The transit-geometry index is a persistent part of this stage's
             // working set. Snapshot memory only after it (and the stop matcher)
@@ -987,7 +747,6 @@ let main (args: string array) =
             Log.Information("Finished!")
         else if argFlagSet args "merge-jdf" then
             let outDir = argValue args "<JDF-out-dir>"
-            let mergeById = argFlagSet args "--by-id"
             let strict = argFlagSet args "--strict"
             let mergePlan = jobsFor "merge-jdf" Execution.MergeParsing (4L * Execution.GiB)
             let mutable gvdYear = 0
@@ -1011,8 +770,7 @@ let main (args: string array) =
 
             use merger =
                 new JdfMerger.JdfMerger(
-                    (if mergeById then JdfMerger.MergeStopsById
-                     else JdfMerger.MergeStopsByName),
+                    JdfMerger.MergeStopsByName,
                     spillPath,
                     mergePlan.maximumWorkers)
             let jdfPar = Jdf.jdfBatchDirParser ()

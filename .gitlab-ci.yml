@@ -6,8 +6,6 @@ variables:
   NUGET_PACKAGES_DIRECTORY: .nuget
 
 before_script:
-  - apt-get update
-  - apt-get -y install sassc
   - dotnet restore --packages $NUGET_PACKAGES_DIRECTORY
 
 cache:

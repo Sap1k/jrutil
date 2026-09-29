@@ -7,12 +7,7 @@ open System.Security.Cryptography
 open System.Text
 
 module Identity =
-    let sha256 (value: string) =
-        value
-        |> Encoding.UTF8.GetBytes
-        |> SHA256.HashData
-        |> Convert.ToHexString
-        |> fun digest -> digest.ToLowerInvariant()
+    let sha256 (value: string) = JrUtil.Hashing.sha256Text value
 
     /// RFC 3986 unreserved bytes are left readable. Everything else is encoded
     /// from UTF-8 bytes, making composite provider keys reversible and stable.

@@ -1011,9 +1011,6 @@ let internal getGtfsStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
     Array.concat [ gtfsStops; gtfsUnspecifiedStops
                    gtfsStopPosts; gtfsNumberedStopPosts; inferredPosts ]
 
-let getGtfsStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
-    getGtfsStopsWithPlan stopIdsCis (buildPostEstimationPlan jdfBatch) jdfBatch
-
 let getGtfsRoutesWithPublicLines
         (publicLineNumbers: Map<string * int, string option>)
                                 (jdfBatch: JdfModel.JdfBatch) =
@@ -1680,15 +1677,6 @@ let applyInternationalRoutePolicyWithCalendar
         (batch: JdfModel.JdfBatch) =
     applyInternationalRoutePolicyInternal 1 (fun _ _ _ -> ()) calendar.tripsToDelete policy overrides batch
 
-let applyInternationalRoutePolicyWithCalendarAndWorkers
-        maximumWorkers
-        (policy: InternationalRoutePolicy)
-        (overrides: InternationalRouteOverride array)
-        (calendar: CalendarPreparation)
-        (batch: JdfModel.JdfBatch) =
-    if maximumWorkers <= 0 then invalidArg "maximumWorkers" "Worker count must be positive"
-    applyInternationalRoutePolicyInternal maximumWorkers (fun _ _ _ -> ()) calendar.tripsToDelete policy overrides batch
-
 let applyInternationalRoutePolicyWithCalendarWorkersAndProgress
         maximumWorkers
         (progress: string -> int64 -> int64 option -> unit)
@@ -1761,8 +1749,6 @@ let private getGtfsTripsWithEndpoints (endpoints: IDictionary<struct(string * in
                       then GtfsModel.OneOrMore
                       else GtfsModel.NoBicycles)
         }: GtfsModel.Trip))
-
-let getGtfsTrips batch = getGtfsTripsWithEndpoints None batch
 
 [<Flags>]
 type private StopTimeAttributeFlags =
@@ -2204,9 +2190,6 @@ let private getCzStopsWithPlan stopIdsCis (plan: PostEstimationPlan)
         |> Seq.toArray
     Array.concat [stops; unspecifiedStops; stopPosts; numberedStopPosts; inferredPosts]
 
-let getCzStops stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
-    getCzStopsWithPlan stopIdsCis (buildPostEstimationPlan jdfBatch) jdfBatch
-
 let getCzStopZones stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
     jdfBatch.routeStops
     |> Seq.collect (fun routeStop ->
@@ -2346,9 +2329,6 @@ let private prepareGtfsFeedForStreamingInternal
 let prepareGtfsFeedForStreaming warnUnhandledNotes stopIdsCis batch =
     prepareGtfsFeedForStreamingInternal warnUnhandledNotes false stopIdsCis None batch
 
-let prepareGtfsFeedForStreamingBundle stopIdsCis batch =
-    prepareGtfsFeedForStreamingInternal false true stopIdsCis None batch
-
 let prepareGtfsFeedForStreamingBundleWithCalendar stopIdsCis calendar batch =
     prepareGtfsFeedForStreamingInternal false true stopIdsCis (Some calendar) batch
 
@@ -2406,5 +2386,3 @@ let getGtfsFeed stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
 
 // Bundle sidecars retain otherwise-unhandled textual service notes, so the
 // standalone conversion warning would be misleading while building a bundle.
-let getGtfsFeedForBundle stopIdsCis (jdfBatch: JdfModel.JdfBatch) =
-    getGtfsFeedInternal false true stopIdsCis jdfBatch

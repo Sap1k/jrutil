@@ -3,6 +3,7 @@
 module JrUtil.JdfBundle
 
 open System
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.Diagnostics
 open System.Globalization
@@ -280,13 +281,6 @@ let loadSnapshotDescriptor path =
         payloadBytes = payloadBytes.GetInt64()
     }
 
-let private sha256Stream (stream: Stream) =
-    SHA256.HashData(stream) |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
-
-let private fileSha256 path =
-    use stream = File.OpenRead(path)
-    sha256Stream stream
-
 let directoryTreeIdentity path =
     let files =
         Directory.GetFiles(path, "*", SearchOption.AllDirectories)
@@ -311,7 +305,7 @@ let private validateSnapshot descriptor inputPath =
             let hash, bytes = directoryTreeIdentity inputPath
             "directory-tree", hash, bytes
         elif File.Exists(inputPath) && Path.GetExtension(inputPath).Equals(".zip", StringComparison.OrdinalIgnoreCase) then
-            "zip", fileSha256 inputPath, FileInfo(inputPath).Length
+            "zip", sha256File inputPath, FileInfo(inputPath).Length
         else invalidArg "inputPath" "JDF input must be a directory or ZIP file"
     if descriptor.payloadKind <> actualKind then
         invalidArg "snapshotDescriptor" $"payload_kind is {descriptor.payloadKind}, input is {actualKind}"
@@ -1245,7 +1239,7 @@ let private evidenceFileEntry directory fileName rows : JdfPostInference.Evidenc
     let path=Path.Combine(directory,fileName)
     let info=FileInfo(path)
     { path=fileName
-      sha256=fileSha256 path
+      sha256=sha256File path
       bytes=info.Length
       rows=rows
       schemaFingerprint=parquetSchemaFingerprint path }
@@ -1639,14 +1633,6 @@ let writePostEvidenceStore descriptor captureToolVersion stopIdsCis evidencePath
     finally
         if not activated && Directory.Exists(temp) then Directory.Delete(temp,true)
 
-let replayPostInferenceEvidence evidencePath policyPath policyGridPath expectationsPath reviewStopsPath outputPath =
-    let evidenceFull=Path.GetFullPath(evidencePath)
-    if not(Directory.Exists evidenceFull) then
-        invalidArg "evidencePath" $"Evidence directory does not exist: {evidenceFull}"
-    use evidenceStore=JdfPostEvidenceStore.openValidatedStore
-                          JdfPostEvidenceStore.noIdentityExpectation evidenceFull
-    JdfPostInferenceEvaluator.writeReplayReport evidenceStore policyPath policyGridPath
-        expectationsPath reviewStopsPath outputPath
 let private writeFeatureParquet (manifest:JdfPostInference.PostInferenceEvidenceManifest)
                                 policyId relationName path
                                 (fields:DataField array) (rows:seq<'T>)
@@ -1968,7 +1954,7 @@ let private fileEntries maximumWorkers progress root parquetRows =
             | Some count -> Some count
             | None when Path.GetExtension(path).Equals(".txt", StringComparison.OrdinalIgnoreCase) -> Some (countTextRows path)
             | _ -> None
-        results.[index] <- { path = relative; sha256 = fileSha256 path; bytes = FileInfo(path).Length; rows = rows }
+        results.[index] <- { path = relative; sha256 = sha256File path; bytes = FileInfo(path).Length; rows = rows }
         let count=Interlocked.Increment(&completed)
         lock progressLock (fun () -> progress count (Some(int64 paths.Length)))
     if maximumWorkers<=1 || paths.Length<=1 then
@@ -2085,8 +2071,8 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteBoolean("diagnostic_labels", diagnosticPostLabels)
     match routingPbfPath with
     | Some value ->
-        writer.WriteString("routing_pbf_sha256", fileSha256 value)
-        writer.WriteString("routing_manifest_sha256", fileSha256 (value + ".manifest.json"))
+        writer.WriteString("routing_pbf_sha256", sha256File value)
+        writer.WriteString("routing_manifest_sha256", sha256File (value + ".manifest.json"))
     | None ->
         writer.WriteNull("routing_pbf_sha256")
         writer.WriteNull("routing_manifest_sha256")
@@ -2095,9 +2081,9 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
         let full=Path.GetFullPath(value)
         let evidenceManifest=JdfPostInference.loadEvidenceManifest full
         writer.WriteString("evidence_format",evidenceManifest.evidenceFormat)
-        writer.WriteString("evidence_manifest_sha256",fileSha256(Path.Combine(full,"manifest.json")))
+        writer.WriteString("evidence_manifest_sha256",sha256File(Path.Combine(full,"manifest.json")))
         writer.WriteString("routing_evidence_sha256",
-            fileSha256(Path.Combine(full,"route_point_evidence.parquet")))
+            sha256File(Path.Combine(full,"route_point_evidence.parquet")))
     | None ->
         writer.WriteNull("evidence_format")
         writer.WriteNull("evidence_manifest_sha256")
@@ -2448,7 +2434,7 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
         progress "capture-post-inference-evidence" "started" 0L None "rows" None 0
         writePostEvidenceStore descriptor captureToolVersion stopIdsCis evidencePath routingPbfPath captured
             (fun phase count total -> progress phase "running" count total "rows" None 1)
-        let routingHash=fileSha256 routingPbfPath
+        let routingHash=sha256File routingPbfPath
         use store=JdfPostEvidenceStore.openValidatedStore
                       { mergedJdfSha256=Some descriptor.payloadSha256
                         routingPbfSha256=Some routingHash
@@ -2708,7 +2694,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                             liveEvidenceTemporaryDirectory<-Some path
                             path
                     let routingPath=routingPbfPath.Value
-                    let routingHash=fileSha256 routingPath
+                    let routingHash=sha256File routingPath
                     started "capture-post-inference-evidence" None "rows"
                     writePostEvidenceStore descriptor converterVersion stopIdsCis evidencePath routingPath evidenceStore
                         (fun phase count total ->
@@ -2856,7 +2842,6 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             Gtfs.gtfsStandardTablesExceptStopTimesToFolder () gtfsPath feed
             Log.Information("Bundle phase: writing GTFS extension tables")
             Gtfs.gtfsExtensionsToFolder () extensionsPath feed
-            let retainedTrips = HashSet<string>(feed.trips |> Seq.map (fun trip -> trip.id))
             Log.Information("Bundle phase: preparing Parquet relations")
             let tables, assignmentCount, assignmentRows, nativeNotes, nativeFeatures =
                 getTableProducers stopIdsCis sourceTransportModes batch feed preparation.postPlan callFacts
@@ -3039,21 +3024,6 @@ let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
                               internationalPolicy internationalOverrides JdfToGtfs.emptyTransportModeRules
                               true None false defaultBundleExecutionOptions
                               inputPath outputPath |> ignore
-
-let writeBundleWithPolicyAndRules snapshotDescriptorPath converterVersion stopIdsCis
-                                  internationalPolicy internationalOverrides transportModeRules
-                                  inputPath outputPath =
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides transportModeRules
-                              true None false defaultBundleExecutionOptions
-                              inputPath outputPath |> ignore
-
-let writeBundleWithPolicyAndRulesEstimatedPosts snapshotDescriptorPath converterVersion stopIdsCis
-                                                internationalPolicy internationalOverrides transportModeRules
-                                                estimatedPosts inputPath outputPath =
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides transportModeRules
-                              estimatedPosts None false defaultBundleExecutionOptions inputPath outputPath |> ignore
 
 let writeBundleWithRoutedPostInference snapshotDescriptorPath converterVersion stopIdsCis
                                        internationalPolicy internationalOverrides transportModeRules

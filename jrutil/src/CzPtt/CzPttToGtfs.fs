@@ -30,11 +30,6 @@ type ConversionOptions = {
     blockMode: BlockMode
 }
 
-let defaultConversionOptions = {
-    operationalPointMode = Gtfs
-    blockMode = Blocks
-}
-
 type CatalogLine = {
     code: string
     mark: string
@@ -717,9 +712,6 @@ let private chronologyError (message: CzPttXml.CzpttcisMessage)
                     }
                 | _ -> previous <- last |> Option.orElse previous
     error
-
-let hasPublicLocations (message: CzPttXml.CzpttcisMessage) =
-    message.CzpttInformation.CzpttLocation |> Array.exists isPublicLocation
 
 let private distinctInOrder values =
     let seen = Collections.Generic.HashSet<_>()
@@ -2351,27 +2343,3 @@ let convert catalog mode messages =
         blockMode = Blocks
     } messages
 
-let gtfsFeedWithOptions catalog mode messages =
-    (convert catalog mode messages).feed
-
-let gtfsFeed messages = gtfsFeedWithOptions emptyCatalog Gtfs messages
-
-let gtfsFeedMergedWithOptions catalog mode (messages: (string * CzpttMessage) seq) =
-    let merger = CzPttMerger()
-    merger.ProcessAll(messages)
-    gtfsFeedWithOptions catalog mode merger.Messages.Values
-
-let gtfsFeedMergedWithConversionOptions
-        catalog options (messages: (string * CzpttMessage) seq) =
-    let merger = CzPttMerger()
-    merger.ProcessAll(messages)
-    (convertWithOptions catalog options merger.Messages.Values).feed
-
-let gtfsFeedMergedWithOptionsAndPointNames
-        catalog mode pointNames (messages: (string * CzpttMessage) seq) =
-    let merger = CzPttMerger()
-    merger.ProcessAll(messages)
-    (convertWithPointNames catalog mode pointNames merger.Messages.Values).feed
-
-let gtfsFeedMerged messages =
-    gtfsFeedMergedWithOptions emptyCatalog Gtfs messages

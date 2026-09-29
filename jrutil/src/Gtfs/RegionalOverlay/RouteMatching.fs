@@ -94,7 +94,6 @@ let buildCandidates ({
     for sourceRoute in sourceRouteRows do
         let sourceRouteId = rowValue sourceRoute "route_id"
         let sourceTrips = match sourceTripsByRoute.TryGetValue(sourceRouteId) with | true, rows -> rows | _ -> [||]
-        let assertedCis = sourceTrips |> Array.choose cisForSourceTrip |> Array.distinct
         let direct = sourceTrips |> Array.collect directBaseRoutesForSourceTrip |> Array.distinct
         let reviewed =
             match routeOverridesBySource.TryGetValue(sourceRouteId) with
