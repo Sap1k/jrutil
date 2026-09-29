@@ -75,13 +75,6 @@ let estimatePostEvidenceOutputBytes
     + bounds.corridorVariantCount*512L
     + bounds.routePointEvidenceCount*384L
 
-type private FileEntry = {
-    path: string
-    sha256: string
-    bytes: int64
-    rows: int option
-}
-
 type private ParquetTable = {
     fields: DataField array
     rows: IReadOnlyCollection<IDictionary<string, obj>>
@@ -1911,8 +1904,7 @@ let private diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
     |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
     |> Seq.toArray
 
-let private writeDiagnostics path diagnostics =
-    use stream = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)
+let private writeDiagnostics (stream: Stream) diagnostics =
     use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
     writer.WriteStartObject()
     writer.WriteNumber("schema_version", 1)
@@ -1927,9 +1919,6 @@ let private writeDiagnostics path diagnostics =
     writer.WriteEndArray()
     writer.WriteEndObject()
 
-let private countTextRows path =
-    File.ReadLines(path) |> Seq.skip 1 |> Seq.filter (fun line -> line <> "") |> Seq.length
-
 let private validateStopCoordinates (feed: GtfsModel.GtfsFeed) =
     feed.stops
     |> Seq.iter (fun stop ->
@@ -1938,44 +1927,30 @@ let private validateStopCoordinates (feed: GtfsModel.GtfsFeed) =
             when lat >= -90m && lat <= 90m && lon >= -180m && lon <= 180m -> ()
         | _ -> invalidArg "feed" $"Stop {stop.id} has missing or out-of-range coordinates")
 
-let private fileEntries maximumWorkers progress root parquetRows =
-    let paths =
-        Directory.GetFiles(root, "*", SearchOption.AllDirectories)
-        |> Array.filter (fun path -> not (Path.GetFileName(path).Equals("manifest.json", StringComparison.Ordinal)))
-        |> Array.sortBy (fun path -> Path.GetRelativePath(root,path))
-    let results = Array.zeroCreate<FileEntry> paths.Length
-    let mutable completed=0L
-    let progressLock=obj()
-    let calculate index =
-        let path=paths.[index]
-        let relative = Path.GetRelativePath(root, path).Replace('\\', '/')
-        let rows =
-            match parquetRows |> Map.tryFind relative with
-            | Some count -> Some count
-            | None when Path.GetExtension(path).Equals(".txt", StringComparison.OrdinalIgnoreCase) -> Some (countTextRows path)
-            | _ -> None
-        results.[index] <- { path = relative; sha256 = sha256File path; bytes = FileInfo(path).Length; rows = rows }
-        let count=Interlocked.Increment(&completed)
-        lock progressLock (fun () -> progress count (Some(int64 paths.Length)))
-    if maximumWorkers<=1 || paths.Length<=1 then
-        for index=0 to paths.Length-1 do calculate index
-    else
-        Parallel.For(0,paths.Length,ParallelOptions(MaxDegreeOfParallelism=min 2 maximumWorkers),calculate) |> ignore
-    results |> Array.sortBy (fun entry -> entry.path)
-
 /// Record the bundle's GVD, which the serving manifest exposes as service_horizon.
-let private recordManifestGvd path (gvdYear: int option) =
-    gvdYear |> Option.iter (fun year ->
+let private recordManifestGvd (text: string) (gvdYear: int option) =
+    match gvdYear with
+    | None -> text
+    | Some year ->
         let startDate, endDate = Utils.gvdBounds year
-        let manifest = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path)).AsObject()
+        let manifest = System.Text.Json.Nodes.JsonNode.Parse(text).AsObject()
         let gvd = System.Text.Json.Nodes.JsonObject()
         gvd.["year"] <- System.Text.Json.Nodes.JsonValue.Create(year)
         gvd.["start_date"] <- System.Text.Json.Nodes.JsonValue.Create(startDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
         gvd.["end_date"] <- System.Text.Json.Nodes.JsonValue.Create(endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture))
         manifest.["gvd"] <- gvd
-        File.WriteAllText(path, manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true))))
+        manifest.ToJsonString(JsonSerializerOptions(WriteIndented = true))
 
-let private writeManifest path descriptor (converterVersion: string) stopIdsCis
+let private jsonElement (text: string) =
+    use document = JsonDocument.Parse(text)
+    document.RootElement.Clone()
+
+let private serializeJson (write: Stream -> unit) =
+    use stream = new MemoryStream()
+    write stream
+    Text.Encoding.UTF8.GetString(stream.ToArray())
+
+let private writeManifest (stream: Stream) descriptor (converterVersion: string) stopIdsCis
                           (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
                           (internationalDecisions: JdfToGtfs.InternationalRouteDecision array)
                           (transportModeRules: JdfToGtfs.TransportModeRuleSet)
@@ -1985,8 +1960,7 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
                           (postInferenceEvidencePath:string option)
                           (postInferencePolicyPath:string option)
                           diagnosticPostLabels
-                          (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) files =
-    use stream = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)
+                          (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
     use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
     writer.WriteStartObject()
     writer.WriteString("bundle_format", "obehy-jrutil-jdf")
@@ -2118,15 +2092,6 @@ let private writeManifest path descriptor (converterVersion: string) stopIdsCis
     writer.WriteNumber("unresolved_block_edges", postPlan.unresolvedBlockEdges)
     writer.WriteEndObject()
     writer.WriteEndObject()
-    writer.WriteStartArray("files")
-    for file in files do
-        writer.WriteStartObject()
-        writer.WriteString("path", file.path)
-        writer.WriteString("sha256", file.sha256)
-        writer.WriteNumber("bytes", file.bytes)
-        match file.rows with Some rows -> writer.WriteNumber("rows", rows) | None -> writer.WriteNull("rows")
-        writer.WriteEndObject()
-    writer.WriteEndArray()
     writer.WriteEndObject()
 
 [<Literal>]
@@ -2551,8 +2516,12 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
     if String.IsNullOrEmpty(parent) then invalidArg "outputPath" "Bundle output requires a parent directory"
     Directory.CreateDirectory(parent) |> ignore
     let temp = Path.Combine(parent, $".{Path.GetFileName(outputFull)}.tmp-{Guid.NewGuid():N}")
-    JdfPostInferencePolicy.PostInferencePhaseProbe.record "bundle-staging"
+    JdfPostInferencePolicy.PostInferencePhaseProbe.record "bundle-output"
     Directory.CreateDirectory(temp) |> ignore
+    // Tables and files only the optional diagnostics artifact needs.
+    let diagnosticScratch = Path.Combine(temp, "diagnostics")
+    let writeDiagnosticTables = executionOptions.diagnosticsOutput.IsSome
+    let mutable packageInput: Serving.CompilerOutput.Output option = None
     let mutable completed = false
     let mutable liveEvidenceTemporaryDirectory:string option=None
     let nativeCallPath = temp + ".trip_call.parquet"
@@ -2733,7 +2702,8 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 if not (File.Exists(reviewStopsPath)) then
                     invalidArg "reviewStopsPath" $"Post review stop file does not exist: {reviewStopsPath}"
                 started "write-post-review" (Some 1L) "files"
-                writePostReviewGeoJson (Path.Combine(temp, "post-review.geojson"))
+                Directory.CreateDirectory(diagnosticScratch) |> ignore
+                writePostReviewGeoJson (Path.Combine(diagnosticScratch, "post-review.geojson"))
                                        reviewStopsPath stopIdsCis batch preparation.postPlan
                 progressCompleted "write-post-review" 1L (Some 1L) "files"
             | Some _ -> Log.Warning("Ignoring --post-review-stops because estimated posts are disabled")
@@ -2805,11 +2775,10 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                                        (int64 stopTimeCount) (Some callFacts.emittedCallCount)
                                        "rows" None (1 + nativeCalls.ActiveCompressionWorkers)
                     stopTime)
-            let gtfsPath = Path.Combine(temp, "gtfs-intermediate")
-            let extensionsPath = Path.Combine(temp, "extensions")
             Log.Information("Bundle phase: streaming GTFS stop times")
             started "stream-stop-times" (Some callFacts.emittedCallCount) "calls"
-            Gtfs.gtfsStopTimesToFolder () gtfsPath stopTimes
+            // stop_times is spooled once as canonical CSV and copied into gtfs.zip.
+            Gtfs.gtfsStopTimesToFolder () temp stopTimes
             nativeCallCount <- nativeCalls.Complete()
             nativeSummaries.Complete()
             nativeSourceCalls.Complete()
@@ -2837,11 +2806,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     (fun phase count -> reportProgress executionOptions phaseTimer ("trips-" + phase) "running" count None "rows" None 1)
                     feed.trips
             nativeRelations <- nativeRelations |> Map.add "trip" (nativeTripPath, nativeTripCount)
-            Log.Information("Bundle phase: writing remaining GTFS tables")
             started "write-relations" None "tables"
-            Gtfs.gtfsStandardTablesExceptStopTimesToFolder () gtfsPath feed
-            Log.Information("Bundle phase: writing GTFS extension tables")
-            Gtfs.gtfsExtensionsToFolder () extensionsPath feed
             Log.Information("Bundle phase: preparing Parquet relations")
             let tables, assignmentCount, assignmentRows, nativeNotes, nativeFeatures =
                 getTableProducers stopIdsCis sourceTransportModes batch feed preparation.postPlan callFacts
@@ -2860,8 +2825,16 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     (fun phase count -> reportProgress executionOptions phaseTimer ("service-features-" + phase) "running" count None "rows" None 1)
                     (nativeFeatures ())
             nativeRelations <- nativeRelations |> Map.add "service_feature_assignment" (featurePath, featureCount)
-            let totalParquetTables=tables.Length+1
-            let mutable parquetRows = Map.empty
+            // Source metadata tables feed the package writer; post-inference
+            // tables are diagnostics and are only produced for the artifact.
+            let tables =
+                tables |> Array.filter (fun (name, _) ->
+                    name.StartsWith("source_", StringComparison.Ordinal) || writeDiagnosticTables)
+            if writeDiagnosticTables then Directory.CreateDirectory(diagnosticScratch) |> ignore
+            let tablePath (name: string) =
+                if name.StartsWith("source_", StringComparison.Ordinal) then Path.Combine(temp, name)
+                else Path.Combine(diagnosticScratch, name)
+            let totalParquetTables = tables.Length + (if writeDiagnosticTables then 2 else 0)
             for index, (name, produceTable) in tables |> Array.indexed do
                 reportProgress executionOptions phaseTimer "write-parquet" "running"
                                (int64 index) (Some (int64 totalParquetTables)) "tables" (Some name) 1
@@ -2869,44 +2842,33 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 Log.Information(
                     "Bundle phase: writing Parquet table {Index}/{Total}: {Table} ({Rows} rows)",
                     index + 1, totalParquetTables, name, parquetTable.rows.Count)
-                writeParquet descriptor (Path.Combine(temp, name)) parquetTable
-                parquetRows <- parquetRows |> Map.add name parquetTable.rows.Count
+                writeParquet descriptor (tablePath name) parquetTable
                 reportProgress executionOptions phaseTimer "write-parquet" "running"
                                (int64 (index+1)) (Some (int64 totalParquetTables)) "tables" (Some name) 1
-            let assignmentTableName="derived_post_assignments.parquet"
-            reportProgress executionOptions phaseTimer "write-parquet" "running"
-                           (int64 tables.Length) (Some (int64 totalParquetTables))
-                           "tables" (Some assignmentTableName) 1
-            Log.Information(
-                "Bundle phase: streaming Parquet table {Index}/{Total}: {Table} ({Rows} rows)",
-                tables.Length+1,totalParquetTables,assignmentTableName,assignmentCount)
-            let assignmentRowsWritten =
-                writeDerivedPostAssignmentsParquet descriptor (Path.Combine(temp,assignmentTableName))
-                    assignmentCount assignmentRows
-                    (fun count total ->
-                        reportProgress executionOptions phaseTimer "stream-derived-post-assignments" "running"
-                                       count total "rows" None 1)
-            parquetRows <- parquetRows |> Map.add assignmentTableName assignmentRowsWritten
-            let scoreTableName="derived_post_scores.parquet"
-            reportProgress executionOptions phaseTimer "write-parquet" "running"
-                           (int64 (tables.Length+1)) (Some (int64 totalParquetTables))
-                           "tables" (Some scoreTableName) 1
-            Log.Information(
-                "Bundle phase: streaming Parquet table {Index}/{Total}: {Table} ({Rows} rows)",
-                totalParquetTables,totalParquetTables,scoreTableName,preparation.postPlan.scoreCount)
-            let scoreRows =
-                try
-                    writeDerivedPostScoresParquet descriptor stopIdsCis (Path.Combine(temp,scoreTableName))
+            try
+                if writeDiagnosticTables then
+                    let assignmentTableName="derived_post_assignments.parquet"
+                    Log.Information(
+                        "Bundle phase: streaming Parquet table {Table} ({Rows} rows)",
+                        assignmentTableName,assignmentCount)
+                    writeDerivedPostAssignmentsParquet descriptor (Path.Combine(diagnosticScratch,assignmentTableName))
+                        assignmentCount assignmentRows
+                        (fun count total ->
+                            reportProgress executionOptions phaseTimer "stream-derived-post-assignments" "running"
+                                           count total "rows" None 1)
+                    |> ignore
+                    let scoreTableName="derived_post_scores.parquet"
+                    Log.Information(
+                        "Bundle phase: streaming Parquet table {Table} ({Rows} rows)",
+                        scoreTableName,preparation.postPlan.scoreCount)
+                    writeDerivedPostScoresParquet descriptor stopIdsCis (Path.Combine(diagnosticScratch,scoreTableName))
                         preparation.postPlan
                         (fun count total ->
                             reportProgress executionOptions phaseTimer "stream-derived-post-scores" "running"
                                            count total "rows" None 1)
-                finally
-                    preparation.postPlan.cleanupScoreRows()
-            parquetRows <- parquetRows |> Map.add scoreTableName scoreRows
-            reportProgress executionOptions phaseTimer "write-parquet" "running"
-                           (int64 totalParquetTables) (Some (int64 totalParquetTables))
-                           "tables" (Some scoreTableName) 1
+                    |> ignore
+            finally
+                preparation.postPlan.cleanupScoreRows()
             logPhaseResources "stream-parquet" phaseTimer
             progressCompleted "write-relations" (int64 totalParquetTables)
                               (Some (int64 totalParquetTables)) "tables"
@@ -2949,39 +2911,59 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             if missingCoordinateCount > 0 then
                 Log.Warning("{MissingCoordinateCount} referenced stop places have unresolved coordinates and were serialized as 0,0",
                             missingCoordinateCount)
-            writeDiagnostics (Path.Combine(temp, "diagnostics.json")) bundleDiagnostics
+            let diagnosticsText = serializeJson (fun stream -> writeDiagnostics stream bundleDiagnostics)
             progressCompleted "write-diagnostics" 1L (Some 1L) "files"
-            Log.Information("Bundle phase: hashing payloads and creating manifest")
-            started "hash-payloads" None "files"
-            let files =
-                fileEntries executionOptions.maximumWorkers
-                            (fun count total ->
-                                reportProgress executionOptions phaseTimer "hash-payloads" "running"
-                                               count total "files" None (min 2 executionOptions.maximumWorkers))
-                            temp parquetRows
-            progressCompleted "hash-payloads" (int64 files.Length) (Some(int64 files.Length)) "files"
-            writeManifest (Path.Combine(temp, "manifest.json")) descriptor converterVersion stopIdsCis
-                          internationalPolicy filterResult.decisions transportModeRules
-                          transportModeDecisions preparation.postPlan routingPbfPath
-                          (executionOptions.postInferenceEvidencePath |> Option.orElse liveEvidenceTemporaryDirectory)
-                          executionOptions.postInferencePolicyPath
-                          diagnosticPostLabels batch feed files
-            recordManifestGvd (Path.Combine(temp, "manifest.json")) executionOptions.gvdYear)
+            Log.Information("Bundle phase: creating manifest")
+            let manifestText =
+                serializeJson (fun stream ->
+                    writeManifest stream descriptor converterVersion stopIdsCis
+                                  internationalPolicy filterResult.decisions transportModeRules
+                                  transportModeDecisions preparation.postPlan routingPbfPath
+                                  (executionOptions.postInferenceEvidencePath |> Option.orElse liveEvidenceTemporaryDirectory)
+                                  executionOptions.postInferencePolicyPath
+                                  diagnosticPostLabels batch feed)
+                |> fun text -> recordManifestGvd text executionOptions.gvdYear
+            let memoryTables entries =
+                entries
+                |> Seq.map (fun (name, header, rows) -> name, Serving.CompilerOutput.memoryTable header rows)
+            let standard, czech = Gtfs.feedTables feed
+            let diagnosticFiles = Dictionary<string, string>(StringComparer.Ordinal)
+            if Directory.Exists(diagnosticScratch) then
+                for path in Directory.EnumerateFiles(diagnosticScratch) do
+                    diagnosticFiles.["post-inference/" + Path.GetFileName(path)] <- path
+            packageInput <- Some {
+                gtfs =
+                    Seq.append
+                        (standard |> Seq.filter (fun (name, _, _) -> name <> "stop_times.txt") |> memoryTables)
+                        [ "stop_times.txt", Serving.CompilerOutput.csvFileTable (Path.Combine(temp, "stop_times.txt")) ]
+                    |> Serving.CompilerOutput.tables
+                czech = czech |> memoryTables |> Serving.CompilerOutput.tables
+                mappings = Serving.CompilerOutput.noTables
+                reports = Serving.CompilerOutput.noTables
+                sidecars =
+                    Directory.EnumerateFiles(temp, "*.parquet")
+                    |> Seq.map (fun path -> Path.GetFileNameWithoutExtension(path), Serving.CompilerOutput.parquetFileTable path)
+                    |> Serving.CompilerOutput.tables
+                manifest = jsonElement manifestText
+                diagnostics = Some (jsonElement diagnosticsText)
+                basePackage = None
+                diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> })
         Log.Information("Bundle phase: activating completed bundle")
         JdfPostInferencePolicy.PostInferencePhaseProbe.record "activation"
         let productionTemp = temp + ".production"
-        JrUtil.Serving.PackageWriter.finalizeLegacyStaging (nativeRelations |> Map.add "trip_call" (nativeCallPath, int nativeCallCount))
+        let input = packageInput.Value
+        JrUtil.Serving.PackageWriter.writePackage (nativeRelations |> Map.add "trip_call" (nativeCallPath, int nativeCallCount))
             (Some { summaries = nativeSummaryPath; sourceCalls = nativeSourceCallsPath
                     tripFacts = nativeTripFactsPath; transferSequences = nativeTransferSequences })
             (fun phase count -> reportProgress executionOptions phaseTimer phase "running" count None "items" None 1)
-            temp productionTemp
+            input productionTemp
         File.Delete(nativeSummaryPath)
         File.Delete(nativeSourceCallsPath)
         File.Delete(nativeSourceCallsPath + ".index")
         File.Delete(nativeTripFactsPath)
         executionOptions.diagnosticsOutput
         |> Option.iter (fun output ->
-            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact temp output executionOptions.diagnosticTraces)
+            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact input output executionOptions.diagnosticTraces)
         Directory.Delete(temp, true)
         Directory.Move(productionTemp, outputFull)
         completed <- true
@@ -2998,7 +2980,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 |> Option.iter (fun graph -> (graph :> IDisposable).Dispose())
             with _ -> ()
         if not completed && Directory.Exists(temp) then
-            Log.Error("JDF compilation failed; diagnostic staging retained at {StagingPath}", temp)
+            Log.Error("JDF compilation failed; scratch retained at {ScratchPath}", temp)
         liveEvidenceTemporaryDirectory
         |> Option.iter(fun path ->
             if completed && Directory.Exists(path) then Directory.Delete(path,true)

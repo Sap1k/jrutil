@@ -32,7 +32,7 @@ type Input = {
 
 /// Stream the resolved bundle, write reports and atomically activate the output.
 [<MethodImpl(MethodImplOptions.NoInlining)>]
-let private writeLegacy ({
+let private compile ({
     prepared = prepared
     projection = projection
     source = source
@@ -697,27 +697,9 @@ let private writeLegacy ({
         outputCzStopRows.Clear()
         logProgress "compact-before-evidence" 1L (Some 1L)
 
-        let baseEvidence = Path.Combine(temporary, "base-evidence")
-        Directory.CreateDirectory(baseEvidence) |> ignore
-        logProgress "copy-base-evidence" 0L None
-        let mutable copiedEvidenceFiles = 0L
-        if File.Exists(Path.Combine(prepared.baseBundle, "gtfs.zip")) then
-            // The production base can be read in place until finalization.  Do
-            // not duplicate its (potentially national-scale) serving payloads
-            // in compiler scratch merely to pass them to the package writer.
-            File.WriteAllText(Path.Combine(temporary, "base-package.path"), prepared.baseBundle, new UTF8Encoding(false))
-            File.Copy(Path.Combine(prepared.baseBundle, "manifest.json"), Path.Combine(baseEvidence, "manifest.json"), false)
-            copiedEvidenceFiles <- 1L
-        else
-            for file in Directory.EnumerateFiles(prepared.baseBundle) do
-                File.Copy(file, Path.Combine(baseEvidence, Path.GetFileName(file)), false)
-                copiedEvidenceFiles <- copiedEvidenceFiles + 1L
-                logProgress "copy-base-evidence" copiedEvidenceFiles None
-            for directory in Directory.EnumerateDirectories(prepared.baseBundle) do
-                let name = Path.GetFileName(directory)
-                if name <> "gtfs-intermediate" && name <> "extensions" then
-                    copyDirectory directory (Path.Combine(baseEvidence, name))
-        logProgress "copy-base-evidence" copiedEvidenceFiles (Some copiedEvidenceFiles)
+        // The production base is read in place until finalization; its serving
+        // payloads are never duplicated into compiler scratch.
+        let basePackage = prepared.baseBundle
         let policyOutput = Path.Combine(temporary, "policy")
         Directory.CreateDirectory(policyOutput) |> ignore
         let multiSourceMetadataPath = Path.Combine(prepared.binding.payloadPath, "overlay_sources.json")
@@ -737,26 +719,6 @@ let private writeLegacy ({
         else
             File.Copy(prepared.binding.descriptorPath, Path.Combine(sourceMetadata, prepared.binding.sourceId + "-descriptor.json"), false)
 
-        let filesToHash =
-            Directory.EnumerateFiles(temporary, "*", SearchOption.AllDirectories)
-            |> Seq.filter (fun path -> Path.GetFileName(path) <> "manifest.json")
-            |> Seq.sort
-            |> Seq.toArray
-        let mutable hashedFiles = 0L
-        let fileEntries =
-            filesToHash
-            |> Seq.map (fun path ->
-                let relative = Path.GetRelativePath(temporary, path).Replace('\\', '/')
-                let info = FileInfo(path)
-                let entry = Dictionary<string, obj>()
-                entry.["path"] <- box relative
-                entry.["bytes"] <- box info.Length
-                entry.["sha256"] <- box (sha256File path)
-                hashedFiles <- hashedFiles + 1L
-                logProgress "hash-output-files" hashedFiles (Some (int64 filesToHash.Length))
-                entry :> obj)
-            |> Seq.sortBy (fun entry -> (entry :?> Dictionary<string, obj>).["path"] :?> string)
-            |> Seq.toArray
         let counts = Dictionary<string, obj>()
         counts.["routes"] <- box manifestRouteCount
         counts.["trips"] <- box manifestTripCount
@@ -797,36 +759,58 @@ let private writeLegacy ({
         manifest.["gvd"] <- box gvd
         manifest.["jrutil_commit"] <- box (currentCommit ())
         manifest.["counts"] <- box counts
-        manifest.["files"] <- box fileEntries
-        File.WriteAllText(Path.Combine(temporary, "manifest.json"), JsonSerializer.Serialize(manifest, jsonOptions), new UTF8Encoding(false))
+
+        let tablesIn directory pattern =
+            let root = Path.Combine(temporary, directory)
+            if Directory.Exists(root) then
+                Directory.EnumerateFiles(root, pattern)
+                |> Seq.map (fun path -> Path.GetFileName(path), JrUtil.Serving.CompilerOutput.csvFileTable path)
+                |> JrUtil.Serving.CompilerOutput.tables
+            else JrUtil.Serving.CompilerOutput.noTables
+        let diagnosticFiles = Dictionary<string, string>(StringComparer.Ordinal)
+        for directory, target in [ policyOutput, "inputs/policies"; sourceMetadata, "inputs/source-descriptors" ] do
+            for path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories) do
+                diagnosticFiles.[target + "/" + Path.GetRelativePath(directory, path).Replace('\\', '/')] <- path
+        let diagnosticsPath = Path.Combine(temporary, "diagnostics.json")
+        let json (text: string) =
+            use document = JsonDocument.Parse(text)
+            document.RootElement.Clone()
+        let output: JrUtil.Serving.CompilerOutput.Output = {
+            gtfs = tablesIn "gtfs-intermediate" "*.txt"
+            czech = tablesIn "extensions" "*.txt"
+            mappings = tablesIn "mappings" "*.csv"
+            reports = tablesIn "reports" "*.csv"
+            sidecars = JrUtil.Serving.CompilerOutput.noTables
+            manifest = json (JsonSerializer.Serialize(manifest, jsonOptions))
+            diagnostics = if File.Exists(diagnosticsPath) then Some (json (File.ReadAllText(diagnosticsPath))) else None
+            basePackage = Some basePackage
+            diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> }
 
         prepared.scratch.Flush()
-        temporary, prepared.outputBundle, diagnosticsOutput, diagnosticTraces, finalResult
+        temporary, output, prepared.outputBundle, diagnosticsOutput, diagnosticTraces, finalResult
     with error ->
         if Directory.Exists(temporary) then Directory.Delete(temporary, true)
         reraise ()
 
-/// Finalize only after writeLegacy has returned.  The method boundary makes
+/// Finalize only after compile has returned.  The method boundary makes
 /// the compiler's national matching/projection graph unreachable before the
 /// production writer allocates its own nationwide buffers.
 let write input =
-    let temporary, outputBundle, diagnosticsOutput, diagnosticTraces, finalResult =
-        writeLegacy input
+    let temporary, compiled, outputBundle, diagnosticsOutput, diagnosticTraces, finalResult =
+        compile input
     let productionTemporary = temporary + ".production"
     try
-        JrUtil.Serving.PackageWriter.finalizeLegacyStaging
-            Map.empty None (fun _ _ -> ()) temporary productionTemporary
+        JrUtil.Serving.PackageWriter.writePackage
+            Map.empty None (fun _ _ -> ()) compiled productionTemporary
         diagnosticsOutput
         |> Option.iter (fun path ->
-            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact
-                temporary path diagnosticTraces)
+            JrUtil.Serving.PackageWriter.writeDiagnosticArtifact compiled path diagnosticTraces)
         Directory.Delete(temporary, true)
         Directory.Move(productionTemporary, outputBundle)
         finalResult
     with error ->
-        // The compiled legacy staging (GTFS, mappings, reports) is the only
-        // evidence for a finalization failure, and PackageWriter has already
-        // announced it as retained. Keep both staging trees for diagnosis.
+        // The compiler scratch (GTFS, mappings, reports) is the only evidence
+        // for a finalization failure. Keep it for diagnosis.
         if Directory.Exists(temporary) then
-            Serilog.Log.Error("Regional overlay finalization failed; compiled staging retained at {StagingPath}", temporary)
+            Serilog.Log.Error("Regional overlay finalization failed; compiler scratch retained at {ScratchPath}", temporary)
         reraise ()

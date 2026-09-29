@@ -28,16 +28,68 @@ type RegionalGtfsOverlayTests() =
         use reader = new StreamReader(archive.GetEntry(file).Open(), Encoding.UTF8)
         reader.ReadToEnd()
 
+    /// Fixtures describe the base as compiler tables; the overlay only accepts
+    /// a production package. Translate the fixture shorthand into what the JDF
+    /// compiler hands over, on a copy, and finalize it into a package.
+    let productionBase (basePath: string) =
+        if File.Exists(Path.Combine(basePath, "gtfs.zip")) then basePath
+        else
+            let unique = Guid.NewGuid().ToString("N")
+            let stage = basePath + ".stage-" + unique
+            for path in Directory.EnumerateFiles(basePath, "*", SearchOption.AllDirectories) do
+                let target = Path.Combine(stage, Path.GetRelativePath(basePath, path))
+                Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
+                File.Copy(path, target)
+            // Compilers emit calls grouped by trip in stop_sequence order.
+            let stopTimes = Path.Combine(stage, "gtfs-intermediate", "stop_times.txt")
+            if File.Exists(stopTimes) then
+                let lines = File.ReadAllLines(stopTimes) |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                let header = lines.[0].Split(',')
+                let trip, sequence = Array.IndexOf(header, "trip_id"), Array.IndexOf(header, "stop_sequence")
+                let ordered =
+                    lines.[1..]
+                    |> Array.sortBy (fun line -> let fields = line.Split(',') in fields.[trip], int fields.[sequence])
+                File.WriteAllText(stopTimes, String.concat "\n" (Array.append [| lines.[0] |] ordered) + "\n")
+            // A real base names its source and records its GVD as `gvd`.
+            let manifestPath = Path.Combine(stage, "manifest.json")
+            let manifest = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(manifestPath)).AsObject()
+            match manifest.["source_snapshot"] with
+            | :? System.Text.Json.Nodes.JsonObject as snapshot when isNull snapshot.["source_id"] ->
+                snapshot.["source_id"] <- System.Text.Json.Nodes.JsonValue.Create("national-jdf-vld-drahy")
+            | _ -> ()
+            match manifest.["service_horizon"] with
+            | null -> ()
+            | horizon ->
+                manifest.Remove("service_horizon") |> ignore
+                manifest.["gvd"] <- horizon.DeepClone()
+            File.WriteAllText(manifestPath, manifest.ToJsonString())
+            // JDF records detour (výluka) timetables as route metadata.
+            let czRoutes = Path.Combine(stage, "extensions", "cz_routes.txt")
+            if File.Exists(czRoutes) && (File.ReadLines(czRoutes) |> Seq.head).Contains("timetable_kind") then
+                let lines = File.ReadAllLines(czRoutes) |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                let header = lines.[0].Split(',')
+                let route, kind = Array.IndexOf(header, "route_id"), Array.IndexOf(header, "timetable_kind")
+                let rows = lines.[1..] |> Array.map (fun line -> let fields = line.Split(',') in fields.[route], (if fields.[kind] = "detour" then "True" else "False"))
+                let relation: JrUtil.Serving.Schema.Relation = {
+                    name = "source_route_metadata"
+                    fields = [| for name in [ "gtfs_route_id"; "detour" ] -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false } |]
+                    primaryKey = [| "gtfs_route_id" |]; foreignKeys = [||] }
+                use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_route_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
+                writer.Append([| JrUtil.Serving.ColumnWriter.Text(rows |> Array.map fst); JrUtil.Serving.ColumnWriter.Text(rows |> Array.map snd) |])
+            let package = basePath + ".package-" + unique
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage package
+            package
+
     let execute auditDate policy gvdYear binding basePath output =
         (RegionalGtfsOverlay.compile {
             auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
-            bindings = [| binding |]; baseBundle = basePath; outputBundle = output
+            bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }).aggregate
 
     let executeAll policy gvdYear bindings basePath output =
         RegionalGtfsOverlay.compile {
             auditDate = None; policyPath = policy; gvdYear = gvdYear
-            bindings = bindings; baseBundle = basePath; outputBundle = output
+            bindings = bindings; baseBundle = productionBase basePath; outputBundle = output
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }
 
     let policyJson = """{
@@ -424,7 +476,7 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(additionCalls |> Array.exists (fun line -> line.Contains("09:04:00")))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output "events" "source_trip_additions.csv").Contains("st2_251201"))
             let czTrip =
-                File.ReadAllText(diagnosticPath output "projection/legacy-extensions" "cz_trips.txt").Split('\n')
+                File.ReadAllText(diagnosticPath output "projection/czech" "cz_trips.txt").Split('\n')
                 |> Array.find (fun line -> line.StartsWith(additionTripId + ",", StringComparison.Ordinal) || line.StartsWith("\"" + additionTripId + "\",", StringComparison.Ordinal))
             Assert.IsTrue(czTrip.Contains("\"199010\",\"\",\"\""), $"A PID-native pattern must not inherit a fabricated CIS trip identity: {czTrip}")
         finally
@@ -483,7 +535,7 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(File.ReadAllText(diagnosticPath output "events" "headsigns.csv").Contains("Island"))
             Assert.IsTrue(File.ReadAllText(Path.Combine(output, "diagnostics.json")).Contains("audit_day"))
             Assert.IsTrue((readGtfs output "stops.txt").Contains("overlay:pid-gtfs:stop-place:"))
-            let czRoutes = File.ReadAllText(diagnosticPath output "projection/legacy-extensions" "cz_routes.txt")
+            let czRoutes = File.ReadAllText(diagnosticPath output "projection/czech" "cz_routes.txt")
             Assert.IsTrue(czRoutes.Contains(outputRouteId) && czRoutes.Contains(cis))
             let stopMappings = File.ReadAllText(diagnosticPath output "traces" "source_to_output_stops.csv")
             Assert.IsTrue(stopMappings.Split('\n') |> Array.exists (fun line -> line.Contains("\"sf\"") && line.Contains("source_native")))
@@ -788,7 +840,8 @@ type RegionalGtfsOverlayTests() =
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
             Assert.AreEqual(2, manifest.RootElement.GetProperty("bundle_version").GetInt32())
             Assert.AreEqual(3, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
-            Assert.AreEqual(2, manifest.RootElement.GetProperty("sources").GetArrayLength())
+            // The production base contributes its own source.
+            Assert.AreEqual(3, manifest.RootElement.GetProperty("sources").GetArrayLength())
             JrUtil.Serving.Validation.validatePackage output1 |> ignore
             let mappings = File.ReadAllText(diagnosticPath output1 "traces" "operational_to_source_trips.csv")
             Assert.IsTrue(mappings.Contains("\"10\",\"42\",\"j1\"") && mappings.Contains("\"10\",\"42\",\"j2\""), mappings)
@@ -813,7 +866,7 @@ type RegionalGtfsOverlayTests() =
             Assert.IsFalse(
                 jmkTripBindings |> Array.exists (fun row -> row.[0] = "ids-jmk-gtfs" && row.[1] = "jt"),
                 "PID native-mode permissions must not make an unmatched JMK trolleybus native")
-            let zones = File.ReadAllText(diagnosticPath output1 "projection/legacy-extensions" "cz_stop_zones.txt")
+            let zones = File.ReadAllText(diagnosticPath output1 "projection/czech" "cz_stop_zones.txt")
             Assert.IsTrue(zones.Contains("ids-jmk-gtfs") && zones.Contains("overlay:ids-jmk-gtfs:zone:"), zones)
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("cross_source_fact_coalesced"))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "stop_group_matches.csv").Contains("coordinate_identity_unique"))

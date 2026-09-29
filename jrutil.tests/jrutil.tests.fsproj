@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="Asserts.fs" />
+    <Compile Include="StagingFixture.fs" />
     <Compile Include="ExecutionTests.fs" />
     <Compile Include="JdfParserTests.fs" />
     <Compile Include="HolidayTests.fs" />

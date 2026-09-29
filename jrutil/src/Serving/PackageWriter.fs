@@ -179,68 +179,6 @@ module PackageWriter =
         RelationWriter.write path relation (256L * 1024L * 1024L)
             (16L * 1024L * 1024L) 65536 CancellationToken.None progress size key encode decode columns typed
 
-    let private csv path name =
-        let file = Path.Combine(path, name)
-        if File.Exists(file) then csvRows path name else Seq.empty
-
-    // TextFieldParser is intentionally general, but its per-field machinery is
-    // disproportionately expensive on the 13M-row stop_times hot path.  This
-    // parser implements the same RFC-style comma/quote rules, including doubled
-    // quotes and embedded newlines, while projecting only after one header map.
-    let private fastCsvValues path name (columns: string array) = seq {
-        let file = Path.Combine(path, name)
-        if File.Exists(file) then
-            use reader = new StreamReader(file, Encoding.UTF8, true, 1024 * 1024)
-            let parse (record: string) =
-                let values = ResizeArray<string>()
-                let field = StringBuilder()
-                let mutable quoted, index = false, 0
-                while index < record.Length do
-                    let character = record.[index]
-                    if quoted then
-                        if character = '"' then
-                            if index + 1 < record.Length && record.[index + 1] = '"' then
-                                field.Append('"') |> ignore; index <- index + 1
-                            else quoted <- false
-                        else field.Append(character) |> ignore
-                    elif character = ',' then
-                        values.Add(field.ToString()); field.Clear() |> ignore
-                    elif character = '"' && field.Length = 0 then quoted <- true
-                    else field.Append(character) |> ignore
-                    index <- index + 1
-                if quoted then invalidOp $"{name} contains an unterminated quoted field"
-                values.Add(field.ToString())
-                values.ToArray()
-            let hasOpenQuote (record: string) =
-                let mutable quoted, index = false, 0
-                while index < record.Length do
-                    if record.[index] = '"' then
-                        if quoted && index + 1 < record.Length && record.[index + 1] = '"' then index <- index + 1
-                        else quoted <- not quoted
-                    index <- index + 1
-                quoted
-            let readRecord () =
-                let first = reader.ReadLine()
-                if isNull first then null else
-                if not (hasOpenQuote first) then first else
-                let builder = StringBuilder(first)
-                let mutable openQuote = true
-                while openQuote && not reader.EndOfStream do
-                    builder.Append('\n').Append(reader.ReadLine()) |> ignore
-                    openQuote <- hasOpenQuote (builder.ToString())
-                builder.ToString()
-            let headerText = readRecord ()
-            if not (isNull headerText) then
-                let header = parse headerText
-                if header.Length > 0 then header.[0] <- header.[0].TrimStart('\uFEFF')
-                let indexes = columns |> Array.map (fun column -> header |> Array.tryFindIndex ((=) column) |> Option.defaultValue -1)
-                while not reader.EndOfStream do
-                    let record = readRecord ()
-                    if not (isNull record) && record <> "" then
-                        let fields = parse record
-                        yield indexes |> Array.map (fun index -> if index >= 0 && index < fields.Length then fields.[index] else "")
-    }
-
     let private value column (row: CsvRow) = rowValue row column
 
     let private sourceManifest (manifest: JsonElement) =
@@ -285,18 +223,9 @@ module PackageWriter =
         | Schema.Boolean -> box (Boolean.Parse value)
         | Schema.Date -> box (date value)
 
-    let private tryBasePackage legacy =
-        let reference = Path.Combine(legacy, "base-package.path")
-        if File.Exists(reference) then
-            let package = File.ReadAllText(reference).Trim()
-            if Directory.Exists(package) then Some package else None
-        else
-            let copied = Path.Combine(legacy, "base-evidence")
-            if File.Exists(Path.Combine(copied, "manifest.json")) then Some copied else None
-
-    let private combinedSourceManifest legacy (manifest: JsonElement) =
+    let private combinedSourceManifest (input: CompilerOutput.Output) (manifest: JsonElement) =
         let result = Dictionary<string,string>(StringComparer.Ordinal)
-        match tryBasePackage legacy with
+        match input.basePackage with
         | Some package ->
             let path = Path.Combine(package, "manifest.json")
             if File.Exists(path) then
@@ -328,18 +257,18 @@ module PackageWriter =
     /// package, not a fresh generic-GTFS conversion.  Project public base
     /// semantics through the explicit base-to-output mapping so native JDF
     /// meaning survives trip slicing and replacement without depending on
-    /// private compiler staging files.
-    let private projectedBaseRelations legacy gtfs =
-        match tryBasePackage legacy with
+    /// compiler-private tables.
+    let private projectedBaseRelations (input: CompilerOutput.Output) =
+        match input.basePackage with
         | None -> Map.empty
         | Some package ->
             let targetTrips =
-                csvValues gtfs "trips.txt" [| "trip_id"; "service_id" |]
+                CompilerOutput.values input.gtfs "trips.txt" [| "trip_id"; "service_id" |]
                 |> Seq.map (fun row -> row.[0], row.[1]) |> dict
-            let targetRoutes = HashSet<string>(csvValues gtfs "routes.txt" [| "route_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
-            let targetLocations = HashSet<string>(csvValues gtfs "stops.txt" [| "stop_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
+            let targetRoutes = HashSet<string>(CompilerOutput.values input.gtfs "routes.txt" [| "route_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
+            let targetLocations = HashSet<string>(CompilerOutput.values input.gtfs "stops.txt" [| "stop_id" |] |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
             let projections =
-                csvValues (Path.Combine(legacy, "mappings")) "base_to_output_trips.csv"
+                CompilerOutput.values input.mappings "base_to_output_trips.csv"
                     [| "base_trip_id"; "output_trip_id" |]
                 |> Seq.choose (fun row ->
                     match targetTrips.TryGetValue(row.[1]) with
@@ -505,20 +434,19 @@ module PackageWriter =
         | 11 | 800 -> "trolleybus"
         | _ -> "bus"
 
-    let private gtfsRelations legacy gtfs (tripCallSummaries: IDictionary<string, TripCallSummary>)
+    let private gtfsRelations (input: CompilerOutput.Output) (tripCallSummaries: IDictionary<string, TripCallSummary>)
                               (nonContiguousTripSequences: IDictionary<string, HashSet<int>>) =
-        let agencies = csv gtfs "agency.txt" |> Seq.map (fun row -> objectRow [
+        let agencies = CompilerOutput.rows input.gtfs "agency.txt" |> Seq.map (fun row -> objectRow [
             "agency_id", box (value "agency_id" row); "name", box (value "agency_name" row)
             "url", nullableString (value "agency_url" row); "timezone", box (value "agency_timezone" row)
             "language", nullableString (value "agency_lang" row); "phone", nullableString (value "agency_phone" row)
             "fare_url", nullableString (value "agency_fare_url" row); "email", nullableString (value "agency_email" row) ])
         let stopMetadata =
-            let path = Path.Combine(legacy, "source_stop_metadata.parquet")
-            if File.Exists(path) then
-                PackageReader.readTextRows path [| "gtfs_stop_id"; "town"; "district"; "nearby_place"; "country"; "coordinate_precision" |]
+            if CompilerOutput.has input.sidecars "source_stop_metadata" then
+                CompilerOutput.values input.sidecars "source_stop_metadata" [| "gtfs_stop_id"; "town"; "district"; "nearby_place"; "country"; "coordinate_precision" |]
                 |> Seq.map (fun row -> row.[0], row) |> dict
             else dict []
-        let locations = csv gtfs "stops.txt" |> Seq.map (fun row ->
+        let locations = CompilerOutput.rows input.gtfs "stops.txt" |> Seq.map (fun row ->
             let locationType = value "location_type" row
             let parent = value "parent_station" row
             let kind = if locationType = "1" then "stop_place" elif not (String.IsNullOrEmpty(parent)) then "boarding_point" else "stop_place"
@@ -539,23 +467,22 @@ module PackageWriter =
         let mode value = servingMode (routeType value)
         // JDF routes are regular or detour (výluka) timetables; other sources carry no kind.
         let timetableKinds =
-            let path = Path.Combine(legacy, "source_route_metadata.parquet")
-            if File.Exists(path) then
-                PackageReader.readTextRowsWithOptional [ "detour" ] path [| "gtfs_route_id"; "detour" |]
+            if CompilerOutput.has input.sidecars "source_route_metadata" then
+                CompilerOutput.values input.sidecars "source_route_metadata" [| "gtfs_route_id"; "detour" |]
                 |> Seq.filter (fun row -> row.[1] <> "")
                 |> Seq.map (fun row -> row.[0], (if row.[1] = "True" then "detour" else "regular"))
                 |> Seq.distinct
                 |> dict
             else
                 // A regional overlay keeps base route ids, so inherit the base package's kinds.
-                match tryBasePackage legacy with
+                match input.basePackage with
                 | Some package when File.Exists(Path.Combine(package, "serving", "route.parquet")) ->
                     PackageReader.readTextRowsWithOptional [ "timetable_kind" ] (Path.Combine(package, "serving", "route.parquet")) [| "route_id"; "timetable_kind" |]
                     |> Seq.filter (fun row -> row.[1] <> "")
                     |> Seq.map (fun row -> row.[0], row.[1])
                     |> dict
                 | _ -> dict []
-        let routes = csv gtfs "routes.txt" |> Seq.map (fun row -> objectRow [
+        let routes = CompilerOutput.rows input.gtfs "routes.txt" |> Seq.map (fun row -> objectRow [
             "route_id", box (value "route_id" row); "agency_id", box (value "agency_id" row)
             "mode", box (mode (value "route_type" row)); "gtfs_route_type", box (routeType (value "route_type" row))
             "short_name", nullableString (value "route_short_name" row); "long_name", nullableString (value "route_long_name" row)
@@ -566,7 +493,7 @@ module PackageWriter =
                 (match timetableKinds.TryGetValue(value "route_id" row) with
                  | true, kind -> box kind
                  | _ -> null) ])
-        let calendarRows = csv gtfs "calendar.txt" |> Seq.map (fun row ->
+        let calendarRows = CompilerOutput.rows input.gtfs "calendar.txt" |> Seq.map (fun row ->
             let mask =
                 [| "monday"; "tuesday"; "wednesday"; "thursday"; "friday"; "saturday"; "sunday" |]
                 |> Array.mapi (fun index name -> if value name row = "1" then 1 <<< index else 0)
@@ -576,7 +503,7 @@ module PackageWriter =
         let exceptionCalendars =
             seq {
                 let bounds = Dictionary<string, struct(DateOnly * DateOnly)>(StringComparer.Ordinal)
-                for row in csvValues gtfs "calendar_dates.txt" [| "service_id"; "date" |] do
+                for row in CompilerOutput.values input.gtfs "calendar_dates.txt" [| "service_id"; "date" |] do
                     if not (existingServices.Contains row.[0]) then
                         let day = date row.[1]
                         bounds.[row.[0]] <-
@@ -587,36 +514,35 @@ module PackageWriter =
                     yield objectRow [ "service_id", box service; "valid_from", box first; "valid_to", box last; "weekday_mask", box 0s ]
             }
         let calendars = Seq.append calendarRows exceptionCalendars
-        let exceptions = csv gtfs "calendar_dates.txt" |> Seq.map (fun row -> objectRow [
+        let exceptions = CompilerOutput.rows input.gtfs "calendar_dates.txt" |> Seq.map (fun row -> objectRow [
             "service_id", box (value "service_id" row); "service_date", box (date (value "date" row)); "added", box (value "exception_type" row = "1") ])
-        let shapeIds = csv gtfs "shapes.txt" |> Seq.map (value "shape_id") |> Seq.distinct |> Seq.map (fun id -> objectRow [ "shape_id", box id; "generation_method", box "source_or_compiler" ])
-        let shapePoints = csv gtfs "shapes.txt" |> Seq.map (fun row -> objectRow [
+        let shapeIds = CompilerOutput.rows input.gtfs "shapes.txt" |> Seq.map (value "shape_id") |> Seq.distinct |> Seq.map (fun id -> objectRow [ "shape_id", box id; "generation_method", box "source_or_compiler" ])
+        let shapePoints = CompilerOutput.rows input.gtfs "shapes.txt" |> Seq.map (fun row -> objectRow [
             "shape_id", box (value "shape_id" row); "sequence", box (integer (value "shape_pt_sequence" row))
             "longitude", box (number (value "shape_pt_lon" row)); "latitude", box (number (value "shape_pt_lat" row))
             "distance_traveled", nullableParsed number (value "shape_dist_traveled" row) ])
-        let trips = csv gtfs "trips.txt" |> Seq.map (fun row -> objectRow [
+        let trips = CompilerOutput.rows input.gtfs "trips.txt" |> Seq.map (fun row -> objectRow [
             "trip_id", box (value "trip_id" row); "route_id", box (value "route_id" row); "service_id", box (value "service_id" row)
             "direction", nullableParsed int16 (value "direction_id" row); "headsign", nullableString (value "trip_headsign" row)
             "short_name", nullableString (value "trip_short_name" row); "block_key", nullableString (value "block_id" row)
             "wheelchair_accessible", nullableParsed int16 (value "wheelchair_accessible" row); "bikes_allowed", nullableParsed int16 (value "bikes_allowed" row)
             "shape_id", nullableString (value "shape_id" row) ])
-        let parentByStop = csv gtfs "stops.txt" |> Seq.map (fun row -> value "stop_id" row, value "parent_station" row) |> dict
-        let jdfCallMetadata = Path.Combine(legacy, "source_call_metadata.parquet")
+        let parentByStop = CompilerOutput.rows input.gtfs "stops.txt" |> Seq.map (fun row -> value "stop_id" row, value "parent_station" row) |> dict
         let hasJdfCallMetadata =
-            File.Exists(jdfCallMetadata)
-            && (File.Exists(Path.Combine(legacy, "source_route_stop_zone_metadata.parquet"))
-                || File.Exists(Path.Combine(legacy, "source_notice_metadata.parquet")))
+            CompilerOutput.has input.sidecars "source_call_metadata"
+            && (CompilerOutput.has input.sidecars "source_route_stop_zone_metadata"
+                || CompilerOutput.has input.sidecars "source_notice_metadata")
         let routeByTrip =
             if hasJdfCallMetadata then
-                csv gtfs "trips.txt" |> Seq.map (fun row -> value "trip_id" row, value "route_id" row) |> dict
+                CompilerOutput.rows input.gtfs "trips.txt" |> Seq.map (fun row -> value "trip_id" row, value "route_id" row) |> dict
             else dict []
         let metadataRows =
             if hasJdfCallMetadata then
-                PackageReader.readTextRows jdfCallMetadata
+                CompilerOutput.values input.sidecars "source_call_metadata"
                     [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
             else Seq.empty
         let pairedCalls = seq {
-            use calls = (csv gtfs "stop_times.txt").GetEnumerator()
+            use calls = (CompilerOutput.rows input.gtfs "stop_times.txt").GetEnumerator()
             use metadata = metadataRows.GetEnumerator()
             let mutable reading = true
             while reading do
@@ -707,7 +633,7 @@ module PackageWriter =
                     "shape_distance_traveled", nullableParsed number (value "shape_dist_traveled" row) ]
             finish ()
         }
-        let transferRows = csv gtfs "transfers.txt" |> Seq.map (fun row ->
+        let transferRows = CompilerOutput.rows input.gtfs "transfers.txt" |> Seq.map (fun row ->
             let selectors = [ "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" ] |> List.map (fun name -> name, value name row)
             let key = Identity.bindingId "transfer" selectors
             objectRow [
@@ -722,7 +648,7 @@ module PackageWriter =
             "trip", trips; "trip_call", calls; "transfer", transferRows
         ]
 
-    let private writeOrderedTripCalls progress legacy gtfs path
+    let private writeOrderedTripCalls progress (input: CompilerOutput.Output) path
                                       (tripCallSummaries: IDictionary<string, TripCallSummary>)
                                       (nonContiguousTripSequences: IDictionary<string, HashSet<int>>)
                                       (wantedTargetTrips: HashSet<string>)
@@ -732,21 +658,20 @@ module PackageWriter =
             "pickup_type"; "drop_off_type"; "timepoint"; "stop_headsign"; "shape_dist_traveled"
         |]
         let parentByStop =
-            csvValues gtfs "stops.txt" [| "stop_id"; "parent_station" |]
+            CompilerOutput.values input.gtfs "stops.txt" [| "stop_id"; "parent_station" |]
             |> Seq.map (fun row -> row.[0], row.[1]) |> dict
-        let metadataPath = Path.Combine(legacy, "source_call_metadata.parquet")
         let hasMetadata =
-            File.Exists(metadataPath)
-            && (File.Exists(Path.Combine(legacy, "source_route_stop_zone_metadata.parquet"))
-                || File.Exists(Path.Combine(legacy, "source_notice_metadata.parquet")))
+            CompilerOutput.has input.sidecars "source_call_metadata"
+            && (CompilerOutput.has input.sidecars "source_route_stop_zone_metadata"
+                || CompilerOutput.has input.sidecars "source_notice_metadata")
         let routeByTrip =
             if hasMetadata then
-                csvValues gtfs "trips.txt" [| "trip_id"; "route_id" |]
+                CompilerOutput.values input.gtfs "trips.txt" [| "trip_id"; "route_id" |]
                 |> Seq.map (fun row -> row.[0], row.[1]) |> dict
             else dict []
         let metadataRows =
             if hasMetadata then
-                PackageReader.readTextRows metadataPath
+                CompilerOutput.values input.sidecars "source_call_metadata"
                     [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
             else Seq.empty
         let parsedSeconds value =
@@ -782,7 +707,7 @@ module PackageWriter =
                         firstSequence = firstSequence
                         calls = targetTimes.ToArray()
                     })
-        for row in fastCsvValues gtfs "stop_times.txt" columns do
+        for row in CompilerOutput.values input.gtfs "stop_times.txt" columns do
             let tripId, stopId = row.[0], row.[3]
             let sequence = integer row.[4]
             if tripId <> currentTrip then
@@ -834,7 +759,7 @@ module PackageWriter =
         progress written
         int written
 
-    let private writeOrderedShapes progress gtfs serving =
+    let private writeOrderedShapes progress (input: CompilerOutput.Output) serving =
         let shapeSchema = Schema.relations |> Array.find (fun relation -> relation.name = "shape")
         let pointSchema = Schema.relations |> Array.find (fun relation -> relation.name = "shape_point")
         use shapes = new ColumnWriter.Writer(Path.Combine(serving, "shape.parquet"), shapeSchema, 8192, CancellationToken.None)
@@ -860,7 +785,7 @@ module PackageWriter =
                 progress points.RowCount
         let mutable previousShape: string = null
         let mutable previousSequence = 0
-        for row in csvValues gtfs "shapes.txt"
+        for row in CompilerOutput.values input.gtfs "shapes.txt"
                        [| "shape_id"; "shape_pt_sequence"; "shape_pt_lon"; "shape_pt_lat"; "shape_dist_traveled" |] do
             let shape, sequence = row.[0], integer row.[1]
             if not (isNull previousShape) then
@@ -879,12 +804,12 @@ module PackageWriter =
         flushShapes (); flushPoints ()
         int shapes.RowCount, int points.RowCount
 
-    let private writeOrderedTrips progress gtfs path =
+    let private writeOrderedTrips progress (input: CompilerOutput.Output) path =
         let schema = Schema.relations |> Array.find (fun relation -> relation.name = "trip")
         let optionalText value = if String.IsNullOrWhiteSpace(value) then null else value
         let optionalInt16 value = if String.IsNullOrWhiteSpace(value) then Nullable() else Nullable(int16 value)
         let rows =
-            csvValues gtfs "trips.txt"
+            CompilerOutput.values input.gtfs "trips.txt"
                 [| "trip_id"; "route_id"; "service_id"; "direction_id"; "trip_headsign"; "trip_short_name"
                    "block_id"; "wheelchair_accessible"; "bikes_allowed"; "shape_id" |]
             |> Seq.map (fun row -> {
@@ -916,18 +841,18 @@ module PackageWriter =
             (16L * 1024L * 1024L) 65536 CancellationToken.None (fun _ count -> progress count)
             size (fun row -> row.tripId) encode decode columns rows
 
-    let private serviceBounds gtfs =
+    let private serviceBounds (input: CompilerOutput.Output) =
         let result = Dictionary<string, DateOnly * DateOnly>(StringComparer.Ordinal)
-        for row in csv gtfs "calendar.txt" do
+        for row in CompilerOutput.rows input.gtfs "calendar.txt" do
             result.[value "service_id" row] <- date (value "start_date" row), date (value "end_date" row)
-        for row in csvValues gtfs "calendar_dates.txt" [| "service_id"; "date" |] do
+        for row in CompilerOutput.values input.gtfs "calendar_dates.txt" [| "service_id"; "date" |] do
             let service, day = row.[0], date row.[1]
             match result.TryGetValue(service) with
             | true, (first, last) -> result.[service] <- min first day, max last day
             | _ -> result.[service] <- day, day
         result
 
-    let private summarizeTripCalls gtfs =
+    let private summarizeTripCalls (input: CompilerOutput.Output) =
         let result = Dictionary<string, TripCallSummary>(StringComparer.Ordinal)
         let completed = HashSet<string>(StringComparer.Ordinal)
         let mutable currentTrip = ""
@@ -956,7 +881,7 @@ module PackageWriter =
                     scheduledStart = scheduledStart; scheduledEnd = scheduledEnd
                     callPatternSha256 = "v1:" + (pattern.GetHashAndReset() |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()) })
                 completed.Add(currentTrip) |> ignore
-        for row in csv gtfs "stop_times.txt" do
+        for row in CompilerOutput.rows input.gtfs "stop_times.txt" do
             let trip = value "trip_id" row
             let sequence = integer (value "stop_sequence" row)
             if trip <> currentTrip then
@@ -988,7 +913,7 @@ module PackageWriter =
                     && manifest.GetProperty("source_format").GetString() = "czptt" -> "national-czptt"
         | None -> "unknown-source"
 
-    let private bindingRows (nativeCalls: JrUtil.Serving.Model.NativeCallArtifacts option) legacy gtfs (manifest: JsonElement)
+    let private bindingRows (nativeCalls: JrUtil.Serving.Model.NativeCallArtifacts option) (input: CompilerOutput.Output) (manifest: JsonElement)
                             (targetCalls: IDictionary<string, TripCallSummary>)
                             (nonContiguousTripSequences: IDictionary<string, HashSet<int>>)
                             (targetCallSchedules: IDictionary<string, TargetCallSchedule>) =
@@ -999,14 +924,12 @@ module PackageWriter =
             | true, existing -> existing
             | _ -> stringPool.Add(value, value); value
         let targetTrips =
-            csvValues gtfs "trips.txt" [| "trip_id"; "service_id"; "direction_id"; "block_id" |]
+            CompilerOutput.values input.gtfs "trips.txt" [| "trip_id"; "service_id"; "direction_id"; "block_id" |]
             |> Seq.map (fun row -> intern row.[0], struct(intern row.[1], intern row.[2], intern row.[3])) |> dict
         let mappings =
-            let mappingRoot = Path.Combine(legacy, "mappings")
-            let mappingPath = Path.Combine(mappingRoot, "source_to_output_trips.csv")
             let rows =
-                if File.Exists(mappingPath) then
-                    csvValues mappingRoot "source_to_output_trips.csv"
+                if CompilerOutput.has input.mappings "source_to_output_trips.csv" then
+                    CompilerOutput.values input.mappings "source_to_output_trips.csv"
                         [| "source_id"; "source_trip_id"; "output_trip_id"; "valid_from"; "valid_to"; "method" |]
                 else Seq.empty
             rows
@@ -1020,8 +943,8 @@ module PackageWriter =
                 struct(row.sourceId, row.sourceTripId, row.validFrom, row.validTo))
             |> Seq.map (fun (key, rows) -> key, rows |> Seq.toArray)
             |> dict
-        let bounds = serviceBounds gtfs
-        let snapshots = combinedSourceManifest legacy manifest
+        let bounds = serviceBounds input
+        let snapshots = combinedSourceManifest input manifest
         let defaultSource = defaultSourceId manifest snapshots
         let binding sourceId sourceTrip target first last variant : TripBinding =
                 let sourceId, sourceTrip, target = intern sourceId, intern sourceTrip, intern target
@@ -1041,18 +964,16 @@ module PackageWriter =
                 mappings |> Seq.map (fun row ->
                     binding row.sourceId row.sourceTripId row.outputTripId row.validFrom row.validTo row.methodName)
             else
-                csv gtfs "trips.txt" |> Seq.map (fun row ->
+                CompilerOutput.rows input.gtfs "trips.txt" |> Seq.map (fun row ->
                     let trip, service = value "trip_id" row, value "service_id" row
                     let first, last = bounds.[service]
                     binding defaultSource trip trip (first.ToString("yyyyMMdd")) (last.ToString("yyyyMMdd")) "source_native")
             |> Seq.toArray
-        let basePackage = tryBasePackage legacy
+        let basePackage = input.basePackage
         let baseSlices =
-            let mappingRoot = Path.Combine(legacy, "mappings")
-            let mappingPath = Path.Combine(mappingRoot, "base_to_output_trips.csv")
             let rows =
-                if File.Exists(mappingPath) then
-                    csvValues mappingRoot "base_to_output_trips.csv"
+                if CompilerOutput.has input.mappings "base_to_output_trips.csv" then
+                    CompilerOutput.values input.mappings "base_to_output_trips.csv"
                         [| "base_trip_id"; "output_trip_id"; "valid_from"; "valid_to" |]
                 else Seq.empty
             rows
@@ -1095,7 +1016,7 @@ module PackageWriter =
             for row in primaryBindings do result.TryAdd(row.trip_id, row) |> ignore
             result)
         let czpttBindings =
-            csv (Path.Combine(legacy, "extensions")) "cz_trips.txt"
+            CompilerOutput.rows input.czech "cz_trips.txt"
             |> Seq.collect (fun row ->
                 let target = value "trip_id" row
                 match targetTrips.TryGetValue(target) with
@@ -1125,7 +1046,7 @@ module PackageWriter =
         let compilerCalls =
             if nativeCalls.IsSome then Seq.empty
             elif mappings.Length > 0 then
-                csvValues (Path.Combine(legacy, "mappings")) "source_to_output_calls.csv"
+                CompilerOutput.values input.mappings "source_to_output_calls.csv"
                     [| "source_id"; "source_trip_id"; "output_trip_id"; "source_call_ordinal"; "output_call_ordinal"; "source_stop_id" |]
                 |> Seq.collect (fun row ->
                     let key = row.[0], row.[1], row.[2]
@@ -1162,7 +1083,7 @@ module PackageWriter =
                               stop = row.[5]; arrival = arrival; departure = departure } : SourceCallWriter.MappedRow)))
             else
                 let bindingByTrip = bindings |> Seq.map (fun row -> row.trip_id, row) |> dict
-                csv gtfs "stop_times.txt" |> Seq.map (fun row ->
+                CompilerOutput.rows input.gtfs "stop_times.txt" |> Seq.map (fun row ->
                     let sequence = value "stop_sequence" row
                     let binding = bindingByTrip.[value "trip_id" row]
                     let optional value = let parsed = seconds value in if isNull parsed then Nullable() else Nullable(unbox<int> parsed)
@@ -1212,7 +1133,7 @@ module PackageWriter =
                         "service_id", box targetBinding.service_id; "from_sequence", box (integer row.[2]); "to_sequence", box (integer row.[3])
                         "coverage_type", box row.[4]; "system_id", nullableString row.[5]; "coverage_role", nullableString row.[6] ]))
         let calls = Seq.append compilerCalls baseCalls
-        let operational = csv (Path.Combine(legacy, "mappings")) "operational_to_source_trips.csv" |> Seq.collect (fun row ->
+        let operational = CompilerOutput.rows input.mappings "operational_to_source_trips.csv" |> Seq.collect (fun row ->
             let key =
                 struct(value "source_id" row, value "source_trip_id" row,
                        value "valid_from" row, value "valid_to" row)
@@ -1232,33 +1153,33 @@ module PackageWriter =
                         variant_key = "ids-jmk-api-v1" }) )
         Seq.append bindings operational, calls, baseCoverage
 
-    let private identityRelations legacy gtfs (bindings: TripBinding array) (manifest: JsonElement) =
+    let private identityRelations (input: CompilerOutput.Output) (bindings: TripBinding array) (manifest: JsonElement) =
         let firstDate, lastDate =
             if bindings.Length = 0 then DateOnly(1970, 1, 1), DateOnly(1970, 1, 1)
             else
                 bindings |> Array.map (fun row -> row.valid_from) |> Array.min,
                 bindings |> Array.map (fun row -> row.valid_to) |> Array.max
         let locationKind =
-            csv gtfs "stops.txt"
+            CompilerOutput.rows input.gtfs "stops.txt"
             |> Seq.map (fun row ->
                 let kind = if value "location_type" row = "1" || String.IsNullOrEmpty(value "parent_station" row) then "stop_place" else "boarding_point"
                 value "stop_id" row, kind)
             |> dict
-        let snapshots = combinedSourceManifest legacy manifest
+        let snapshots = combinedSourceManifest input manifest
         let defaultSource = defaultSourceId manifest snapshots
         let entityRows kind namespaceName mappingName sourceColumn targetColumn =
             let mapped =
-                csv (Path.Combine(legacy, "mappings")) mappingName
+                CompilerOutput.rows input.mappings mappingName
                 |> Seq.map (fun row -> value "source_id" row, value sourceColumn row, value targetColumn row)
             let native =
-                if tryBasePackage legacy |> Option.isSome then Seq.empty
+                if input.basePackage |> Option.isSome then Seq.empty
                 elif kind = "route" then
-                    csv (Path.Combine(legacy, "extensions")) "cz_routes.txt"
+                    CompilerOutput.rows input.czech "cz_routes.txt"
                     |> Seq.map (fun row ->
                         let owner = value "source_provenance" row |> fun value -> if String.IsNullOrWhiteSpace(value) then defaultSource else value
                         owner, value "route_id" row, value "route_id" row)
                 else
-                    csv (Path.Combine(legacy, "extensions")) "cz_stops.txt"
+                    CompilerOutput.rows input.czech "cz_stops.txt"
                     |> Seq.map (fun row -> defaultSource, value "stop_id" row, value "stop_id" row)
             Seq.append mapped native |> Seq.distinct |> Seq.map (fun (sourceId, sourceObject, target) ->
                 let effectiveKind = if kind = "location" then locationKind.[target] else kind
@@ -1276,7 +1197,7 @@ module PackageWriter =
             |> Seq.groupBy (fun row -> row.["public_id"] :?> string)
             |> Seq.map (fun (key, values) -> key, values |> Seq.head) |> dict
         let routeKeys =
-            csv (Path.Combine(legacy, "extensions")) "cz_routes.txt"
+            CompilerOutput.rows input.czech "cz_routes.txt"
             |> Seq.choose (fun row ->
                 let target, cis = value "route_id" row, value "cis_line_id" row
                 match routeBindingByTarget.TryGetValue(target) with
@@ -1288,7 +1209,7 @@ module PackageWriter =
             let tripBindingsByTarget = lazy (
                 bindings |> Seq.groupBy (fun row -> row.trip_id)
                 |> Seq.map (fun (key, values) -> key, values |> Seq.toArray) |> dict)
-            yield! csv (Path.Combine(legacy, "extensions")) "cz_trips.txt"
+            yield! CompilerOutput.rows input.czech "cz_trips.txt"
             |> Seq.collect (fun row ->
                 let target, key = value "trip_id" row, value keyName row
                 if String.IsNullOrWhiteSpace(key) then Seq.empty else
@@ -1317,7 +1238,7 @@ module PackageWriter =
             | _ -> None)
         let origins = seq {
             let rows kind namespaceName table idColumn =
-                csv gtfs table |> Seq.map (fun row ->
+                CompilerOutput.rows input.gtfs table |> Seq.map (fun row ->
                     let id = value idColumn row
                     objectRow [
                         "object_type", box kind; "object_key", box (Identity.compositeKey [ id ])
@@ -1327,7 +1248,7 @@ module PackageWriter =
             yield! rows "location" "gtfs_stop_id" "stops.txt" "stop_id"
             yield! rows "trip" "gtfs_trip_id" "trips.txt" "trip_id"
             yield! rows "shape" "gtfs_shape_id" "shapes.txt" "shape_id" |> Seq.distinctBy (fun row -> row.["object_key"])
-            for transfer in csv gtfs "transfers.txt" do
+            for transfer in CompilerOutput.rows input.gtfs "transfers.txt" do
                 let selectors = [ "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" ]
                 let key = selectors |> Seq.map (fun name -> value name transfer) |> Identity.compositeKey
                 yield objectRow [
@@ -1344,21 +1265,19 @@ module PackageWriter =
             "object_origin", origins
         ]
 
-    let private semanticRelations (nativeCalls: JrUtil.Serving.Model.NativeCallArtifacts option) legacy gtfs (manifest: JsonElement) =
+    let private semanticRelations (nativeCalls: JrUtil.Serving.Model.NativeCallArtifacts option) (input: CompilerOutput.Output) (manifest: JsonElement) =
         let read name columns =
-            let path = Path.Combine(legacy, name)
-            if File.Exists(path) then PackageReader.readTextRows path columns else Seq.empty
+            CompilerOutput.values input.sidecars (Path.GetFileNameWithoutExtension(name: string)) columns
         let readOptional optional name columns =
-            let path = Path.Combine(legacy, name)
-            if File.Exists(path) then PackageReader.readTextRowsWithOptional optional path columns else Seq.empty
-        let snapshots = combinedSourceManifest legacy manifest
+            CompilerOutput.values input.sidecars (Path.GetFileNameWithoutExtension(name: string)) columns
+        let snapshots = combinedSourceManifest input manifest
         let sourceId = defaultSourceId manifest snapshots
         let digest = match snapshots.TryGetValue(sourceId) with | true, value -> value | _ -> String.replicate 64 "0"
         let callFacts () =
             read "source_call_metadata.parquet"
                 [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
         let routeStops = seq {
-            let routeByTrip = csvValues gtfs "trips.txt" [| "trip_id"; "route_id" |] |> Seq.map (fun row -> row.[0], row.[1]) |> dict
+            let routeByTrip = CompilerOutput.values input.gtfs "trips.txt" [| "trip_id"; "route_id" |] |> Seq.map (fun row -> row.[0], row.[1]) |> dict
             for row in callFacts () do
                 match routeByTrip.TryGetValue(row.[0]) with
                 | true, route ->
@@ -1460,11 +1379,10 @@ module PackageWriter =
             "travel_restriction_assignment", restrictions
         ]
 
-    let private czpttRelations legacy (bindings: TripBinding array) (manifest: JsonElement) =
+    let private czpttRelations (input: CompilerOutput.Output) (bindings: TripBinding array) (manifest: JsonElement) =
         let read name columns =
-            let path = Path.Combine(legacy, name)
-            if File.Exists(path) then PackageReader.readTextRows path columns else Seq.empty
-        let snapshots = combinedSourceManifest legacy manifest
+            CompilerOutput.values input.sidecars (Path.GetFileNameWithoutExtension(name: string)) columns
+        let snapshots = combinedSourceManifest input manifest
         let sourceId = defaultSourceId manifest snapshots
         let digest = match snapshots.TryGetValue(sourceId) with | true, value -> value | _ -> String.replicate 64 "0"
         let operationalCallsRaw =
@@ -1578,10 +1496,9 @@ module PackageWriter =
             "service_feature_assignment", features
         ], sourceCalls
 
-    let private extensionRows legacy =
-        let extensions = Path.Combine(legacy, "extensions")
-        let stopZones = csv extensions "cz_stop_zones.txt" |> Seq.toArray
-        let callZones = csv extensions "cz_trip_stop_zones.txt" |> Seq.toArray
+    let private extensionRows (input: CompilerOutput.Output) =
+        let stopZones = CompilerOutput.rows input.czech "cz_stop_zones.txt" |> Seq.toArray
+        let callZones = CompilerOutput.rows input.czech "cz_trip_stop_zones.txt" |> Seq.toArray
         let zones =
             Seq.append
                 (stopZones |> Seq.map (fun row -> value "zone_id" row, value "zone_code" row, value "ids_system_id" row, value "source_provenance" row, "route_stop"))
@@ -1602,33 +1519,42 @@ module PackageWriter =
         writeCsvRow writer columns
         for row: string array in rows do writeCsvRow writer row
 
-    let private writeGtfsZip gtfs output =
+    let private writeGtfsZip (input: CompilerOutput.Output) output =
         let zipPath = Path.Combine(output, "gtfs.zip")
         use stream = File.Open(zipPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)
         use archive = new ZipArchive(stream, ZipArchiveMode.Create, false, Encoding.UTF8)
-        let standardTransfer = Path.Combine(output, ".transfers.txt")
-        if File.Exists(Path.Combine(gtfs, "transfers.txt")) then
-            let columns = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "transfer_type"; "min_transfer_time" |]
-            writeCsv standardTransfer columns (csv gtfs "transfers.txt" |> Seq.map (fun row -> columns |> Array.map (fun name -> value name row)))
-        let files = Directory.EnumerateFiles(gtfs, "*.txt") |> Seq.map (fun path -> Path.GetFileName(path), path) |> Seq.sortBy fst
-        for name, original in files do
-            let source = if name = "transfers.txt" && File.Exists(standardTransfer) then standardTransfer else original
-            // The ZIP is a transport copy of already canonical text. Fastest
-            // compression materially reduces package wall/CPU time; contents
-            // and deterministic entry metadata remain unchanged.
+        let standardTransferColumns = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "transfer_type"; "min_transfer_time" |]
+        for name in input.gtfs.Keys |> Seq.sortWith (fun left right -> String.CompareOrdinal(left, right)) do
+            let table = input.gtfs.[name]
+            // Fastest compression materially reduces package wall/CPU time;
+            // contents and deterministic entry metadata are unaffected.
             let entry = archive.CreateEntry(name, CompressionLevel.Fastest)
             entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
-            use input = File.OpenRead(source)
             use target = entry.Open()
-            input.CopyTo(target)
-        if File.Exists(standardTransfer) then File.Delete(standardTransfer)
+            match name, table.file with
+            | "transfers.txt", _ ->
+                // Waiting-time constraints are serving-only; GTFS keeps standard columns.
+                use writer = new StreamWriter(target, UTF8Encoding(false))
+                writer.NewLine <- "\n"
+                CompilerOutput.writeCsv writer {
+                    table with
+                        columns = standardTransferColumns
+                        rows = fun () -> CompilerOutput.values input.gtfs name standardTransferColumns }
+            | _, Some path ->
+                // Canonical text a compiler already spooled is copied verbatim.
+                use source = File.OpenRead(path)
+                source.CopyTo(target)
+            | _ ->
+                use writer = new StreamWriter(target, UTF8Encoding(false))
+                writer.NewLine <- "\n"
+                CompilerOutput.writeCsv writer table
 
-    let private writeDiagnosticsSummary legacy output =
+    let private writeDiagnosticsSummary (input: CompilerOutput.Output) output =
         let events = ResizeArray<string * string * string * string>()
-        let legacyJson = Path.Combine(legacy, "diagnostics.json")
-        if File.Exists(legacyJson) then
-            use document = JsonDocument.Parse(File.ReadAllText(legacyJson))
-            match document.RootElement.TryGetProperty("diagnostics") with
+        match input.diagnostics with
+        | None -> ()
+        | Some root ->
+            match root.TryGetProperty("diagnostics") with
             | true, values when values.ValueKind = JsonValueKind.Array ->
                 for item in values.EnumerateArray() do
                     let property (name: string) (fallback: string) =
@@ -1637,7 +1563,7 @@ module PackageWriter =
                         | _ -> fallback
                     events.Add(property "severity" "warning", property "code" "unknown", property "source_object_id" "", property "message" "")
             | _ -> ()
-        for row in csv (Path.Combine(legacy, "reports")) "diagnostics.csv" do
+        for row in CompilerOutput.rows input.reports "diagnostics.csv" do
             events.Add("warning", value "code" row, value "source_object_id" row, value "message" row)
         let counts =
             events |> Seq.countBy (fun (severity, code, _, _) -> severity, code)
@@ -1653,8 +1579,8 @@ module PackageWriter =
         let coverage = Dictionary<string,obj>(StringComparer.Ordinal)
         for fileName in [| "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "trip_coverage_populations.csv"; "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" |] do
             let rows =
-                csv (Path.Combine(legacy, "reports")) fileName
-                |> Seq.map (fun row ->
+                CompilerOutput.rows input.reports fileName
+                |> Seq.map (fun (row: CsvRow) ->
                     row |> Seq.map (fun pair -> pair.Key, box pair.Value) |> dict :> obj)
                 |> Seq.toArray
             if rows.Length > 0 then coverage.[Path.GetFileNameWithoutExtension(fileName)] <- box rows
@@ -1665,9 +1591,8 @@ module PackageWriter =
             "coverage_populations", box coverage ]
         File.WriteAllText(Path.Combine(output, "diagnostics.json"), JsonSerializer.Serialize(diagnostics, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
-    let private writeManifest legacyManifest output (relationCounts: IDictionary<string,int>) =
-        use sourceDocument = JsonDocument.Parse(File.ReadAllText(legacyManifest))
-        let source = sourceDocument.RootElement
+    let private writeManifest (input: CompilerOutput.Output) output (relationCounts: IDictionary<string,int>) =
+        let source = input.manifest
         let files =
             Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories)
             |> Seq.filter (fun path -> Path.GetFileName(path) <> "manifest.json")
@@ -1721,7 +1646,7 @@ module PackageWriter =
                 match root.TryGetProperty("source") with
                 | true, item -> add item
                 | _ -> match root.TryGetProperty("source_snapshot") with | true, item -> add item | _ -> ()
-        match tryBasePackage (Path.GetDirectoryName(legacyManifest)) with
+        match input.basePackage with
         | Some package ->
             let baseManifest = Path.Combine(package, "manifest.json")
             if File.Exists(baseManifest) then
@@ -1747,9 +1672,9 @@ module PackageWriter =
         manifest.["files"] <- box files
         File.WriteAllText(Path.Combine(output, "manifest.json"), JsonSerializer.Serialize(manifest, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
-    /// Convert the compiler's private staging representation to the only public
-    /// production package shape.  The staging tree is never a supported API.
-    let finalizeLegacyStaging (compiled: Map<string, string * int>) (nativeSummaries: JrUtil.Serving.Model.NativeCallArtifacts option) (progress: string -> int64 -> unit) legacy output =
+    /// Write the production package from a compiler's hand-off. `compiled`
+    /// holds relations a compiler already wrote natively (path, row count).
+    let writePackage (compiled: Map<string, string * int>) (nativeSummaries: JrUtil.Serving.Model.NativeCallArtifacts option) (progress: string -> int64 -> unit) (input: CompilerOutput.Output) output =
         if Directory.Exists(output) || File.Exists(output) then invalidArg "output" "Production package output already exists"
         Directory.CreateDirectory(output) |> ignore
         let progressLock = obj()
@@ -1788,8 +1713,7 @@ module PackageWriter =
             // The overlay/compiler phase has completed, so release its dead
             // object graph before production-package projection starts.
             reclaimManagedPhaseMemory ()
-            let gtfs = Path.Combine(legacy, "gtfs-intermediate")
-            if not (Directory.Exists(gtfs)) then invalidArg "legacy" "Compiler staging has no gtfs-intermediate directory"
+            if input.gtfs.Count = 0 then invalidArg "input" "Compiler output has no GTFS tables"
             let serving = Path.Combine(output, "serving")
             Directory.CreateDirectory(serving) |> ignore
             phase "start-independent-output-jobs"
@@ -1800,7 +1724,7 @@ module PackageWriter =
                     Serilog.Log.Information(
                         "Production package job complete: {Job}; elapsed_ms={ElapsedMs}",
                         name, int64 started.Elapsed.TotalMilliseconds))
-            let gtfsZipJob = startJob "zip-gtfs" (fun () -> writeGtfsZip gtfs output)
+            let gtfsZipJob = startJob "zip-gtfs" (fun () -> writeGtfsZip input output)
             let counts = Dictionary<string,int>()
             let bindingsState, suppliedState =
                 phase "prepare-serving-core"
@@ -1808,36 +1732,34 @@ module PackageWriter =
                 let nonContiguousTripSequences = Dictionary<string, HashSet<int>>(StringComparer.Ordinal)
                 let targetCallSchedules = Dictionary<string, TargetCallSchedule>(StringComparer.Ordinal)
                 let wantedTargetTrips =
-                    let mappingPath = Path.Combine(legacy, "mappings", "source_to_output_trips.csv")
-                    if nativeSummaries.IsSome || not (File.Exists(mappingPath)) then HashSet<string>(StringComparer.Ordinal) else
+                    if nativeSummaries.IsSome || not (CompilerOutput.has input.mappings "source_to_output_trips.csv") then HashSet<string>(StringComparer.Ordinal) else
                     HashSet<string>(
-                        csvValues (Path.Combine(legacy, "mappings")) "source_to_output_trips.csv" [| "output_trip_id" |]
+                        CompilerOutput.values input.mappings "source_to_output_trips.csv" [| "output_trip_id" |]
                         |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
-                let mutable core = gtfsRelations legacy gtfs tripCallSummaries nonContiguousTripSequences
+                let mutable core = gtfsRelations input tripCallSummaries nonContiguousTripSequences
                 if nativeSummaries.IsNone then
                     phase "write-ordered-trip_call"
                     let relation = Schema.relations |> Array.find (fun value -> value.name = "trip_call")
                     let target = Path.Combine(serving, "trip_call.parquet")
-                    counts.[relation.name] <- writeOrderedTripCalls advance legacy gtfs target tripCallSummaries nonContiguousTripSequences wantedTargetTrips targetCallSchedules
+                    counts.[relation.name] <- writeOrderedTripCalls advance input target tripCallSummaries nonContiguousTripSequences wantedTargetTrips targetCallSchedules
                     core <- core |> Map.remove relation.name
                     phase "write-ordered-shapes"
-                    let shapeCount, pointCount = writeOrderedShapes advance gtfs serving
+                    let shapeCount, pointCount = writeOrderedShapes advance input serving
                     counts.["shape"] <- shapeCount
                     counts.["shape_point"] <- pointCount
                     core <- core |> Map.remove "shape" |> Map.remove "shape_point"
                     phase "write-ordered-trip"
-                    counts.["trip"] <- writeOrderedTrips advance gtfs (Path.Combine(serving, "trip.parquet"))
+                    counts.["trip"] <- writeOrderedTrips advance input (Path.Combine(serving, "trip.parquet"))
                     core <- core |> Map.remove "trip"
-                use legacyManifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(legacy, "manifest.json")))
                 phase "prepare-source-bindings"
                 let bindingsSequence, calls, baseCoverage =
                     match nativeSummaries with
                     | Some native -> BindingWriter.readNativeFacts native.tripFacts native.summaries, Seq.empty, Seq.empty
-                    | None -> bindingRows None legacy gtfs legacyManifest.RootElement tripCallSummaries nonContiguousTripSequences targetCallSchedules
+                    | None -> bindingRows None input input.manifest tripCallSummaries nonContiguousTripSequences targetCallSchedules
                 let bindings = bindingsSequence |> Seq.toArray
                 let czptt, czpttCalls =
-                    if File.Exists(Path.Combine(legacy, "operational_calls.parquet")) then
-                        czpttRelations legacy bindings legacyManifest.RootElement
+                    if CompilerOutput.has input.sidecars "operational_calls" then
+                        czpttRelations input bindings input.manifest
                     else Map.empty, Seq.empty
                 if nativeSummaries.IsNone then
                     // Do not overlap the dominant nationwide source-call sort
@@ -1855,17 +1777,17 @@ module PackageWriter =
                     // lookup tables before constructing identity/semantic
                     // relations from the same nationwide bindings.
                     reclaimManagedPhaseMemory ()
-                let zones, callZones = extensionRows legacy
-                let projectedBase = projectedBaseRelations legacy gtfs
+                let zones, callZones = extensionRows input
+                let projectedBase = projectedBaseRelations input
                 phase "prepare-serving-identities"
                 reclaimManagedPhaseMemory ()
-                let identities = identityRelations legacy gtfs bindings legacyManifest.RootElement
+                let identities = identityRelations input bindings input.manifest
                 reclaimManagedPhaseMemory ()
                 phase "prepare-native-semantics"
                 let semantics =
-                    if File.Exists(Path.Combine(legacy, "source_route_stop_zone_metadata.parquet"))
-                       || File.Exists(Path.Combine(legacy, "source_notice_metadata.parquet")) then
-                        semanticRelations nativeSummaries legacy gtfs legacyManifest.RootElement
+                    if CompilerOutput.has input.sidecars "source_route_stop_zone_metadata"
+                       || CompilerOutput.has input.sidecars "source_notice_metadata" then
+                        semanticRelations nativeSummaries input input.manifest
                     else Map.empty
                 let generated =
                     identities |> Map.fold (fun state name rows -> state |> Map.add name rows) core
@@ -1949,54 +1871,57 @@ module PackageWriter =
                 if currentProcess.PrivateMemorySize64 >= 3_000_000_000L then
                     reclaimManagedPhaseMemory ()
             phase "write-diagnostics-summary"
-            writeDiagnosticsSummary legacy output
+            writeDiagnosticsSummary input output
             phase "hash-production-payloads"
-            writeManifest (Path.Combine(legacy, "manifest.json")) output counts
+            writeManifest input output counts
             phase "validate-production-package"
             suppliedState.Value <- Map.empty
             reclaimManagedPhaseMemory ()
             Validation.validatePackage output |> ignore
             lock progressLock completePhase
         with error ->
-            Serilog.Log.Error(error, "Production package failed in {Phase}; diagnostic staging retained at {StagingPath}", currentPhase, output)
+            Serilog.Log.Error(error, "Production package failed in {Phase}; partial output retained at {OutputPath}", currentPhase, output)
             reraise ()
 
     /// Write the optional, explicitly addressed diagnostic artifact.  This is
     /// deliberately separate from the production package inventory.
-    let writeDiagnosticArtifact legacy output includeTraces =
+    let writeDiagnosticArtifact (input: CompilerOutput.Output) output includeTraces =
         if Directory.Exists(output) || File.Exists(output) then
             invalidArg "output" "Diagnostic output already exists"
         let temporary = output + ".tmp-" + Guid.NewGuid().ToString("N")
         Directory.CreateDirectory(temporary) |> ignore
         try
-            let copyTree source destination =
-                if Directory.Exists(source) then
-                    let obsoleteReports = set [
-                        "ambiguities.csv"; "conflicts.csv"; "equivalent_ties.csv"; "quarantine.csv"; "substitutions.csv"; "semantic_inheritance.csv"
-                        "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "trip_coverage_populations.csv"
-                        "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" ]
-                    for path in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories) do
-                        let relative = Path.GetRelativePath(source, path)
-                        if not (obsoleteReports.Contains(Path.GetFileName(relative)))
-                           && (includeTraces || not (relative.StartsWith("base_to_output_", StringComparison.Ordinal))) then
-                            let target = Path.Combine(destination, relative)
-                            Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
-                            File.Copy(path, target)
-            copyTree (Path.Combine(legacy, "reports")) (Path.Combine(temporary, "events"))
-            copyTree (Path.Combine(legacy, "policies")) (Path.Combine(temporary, "inputs", "policies"))
-            copyTree (Path.Combine(legacy, "source-descriptors")) (Path.Combine(temporary, "inputs", "source-descriptors"))
-            copyTree (Path.Combine(legacy, "extensions")) (Path.Combine(temporary, "projection", "legacy-extensions"))
-            let legacyDiagnostics = Path.Combine(legacy, "diagnostics.json")
-            if File.Exists(legacyDiagnostics) then
+            // Coverage and matching summaries already live in diagnostics.json.
+            let summarizedReports = set [
+                "ambiguities.csv"; "conflicts.csv"; "equivalent_ties.csv"; "quarantine.csv"; "substitutions.csv"; "semantic_inheritance.csv"
+                "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "trip_coverage_populations.csv"
+                "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" ]
+            let writeTables (tables: IReadOnlyDictionary<string, CompilerOutput.Table>) (directory: string) (include: string -> bool) =
+                for KeyValue(name, table) in tables do
+                    if include name then
+                        let target = Path.Combine(temporary, directory, name)
+                        Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
+                        use writer = new StreamWriter(target, false, UTF8Encoding(false))
+                        writer.NewLine <- "\n"
+                        CompilerOutput.writeCsv writer table
+            writeTables input.reports "events" (summarizedReports.Contains >> not)
+            writeTables input.czech (Path.Combine("projection", "czech")) (fun _ -> true)
+            if includeTraces then writeTables input.mappings "traces" (fun _ -> true)
+            else writeTables input.mappings "traces" (fun name -> not (name.StartsWith("base_to_output_", StringComparison.Ordinal)))
+            for KeyValue(relative, source) in input.diagnosticFiles do
+                let target = Path.Combine(temporary, relative.Replace('/', Path.DirectorySeparatorChar))
+                Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
+                File.Copy(source, target)
+            input.diagnostics |> Option.iter (fun diagnostics ->
                 let target = Path.Combine(temporary, "events", "diagnostics.json")
                 Directory.CreateDirectory(Path.GetDirectoryName(target)) |> ignore
-                File.Copy(legacyDiagnostics, target)
-            if includeTraces then copyTree (Path.Combine(legacy, "mappings")) (Path.Combine(temporary, "traces"))
+                File.WriteAllText(target, diagnostics.GetRawText() + "\n", UTF8Encoding(false)))
             let evidenceReferences = ResizeArray<obj>()
-            let baseEvidenceManifest = Path.Combine(legacy, "base-evidence", "manifest.json")
-            if File.Exists(baseEvidenceManifest) then
-                evidenceReferences.Add(dict [
-                    "kind", box "base-package"; "manifest_sha256", box (sha256File baseEvidenceManifest) ] :> obj)
+            input.basePackage |> Option.iter (fun package ->
+                let baseManifest = Path.Combine(package, "manifest.json")
+                if File.Exists(baseManifest) then
+                    evidenceReferences.Add(dict [
+                        "kind", box "base-package"; "manifest_sha256", box (sha256File baseManifest) ] :> obj))
             let entries =
                 Directory.EnumerateFiles(temporary, "*", SearchOption.AllDirectories)
                 |> Seq.map (fun path -> dict [

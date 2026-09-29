@@ -113,7 +113,7 @@ type ServingContractTests() =
                 [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order" |]
                 [| [| "jdf:route:000645:1"; "11"; "zone"; "0" |] |]
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage output
             let routeStops = parquetStrings (Path.Combine(output, "serving", "route_stop.parquet")) "route_stop_id"
             CollectionAssert.Contains(routeStops, "jdf:route:000645:1/11")
             Assert.IsFalse(routeStops |> Array.exists (fun value -> value.Contains("%3A")))
@@ -248,7 +248,7 @@ type ServingContractTests() =
             write (Path.Combine(gtfs, "calendar.txt")) "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nsvc,1,1,1,1,1,0,0,20260913,20260913\n"
             write (Path.Combine(gtfs, "calendar_dates.txt")) "service_id,date,exception_type\nsvc,20260912,1\nsvc,20260914,2\n"
             let expected = Path.Combine(root, "expected")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage expected
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage expected
             let feed = JrUtil.Gtfs.gtfsParseFolder () gtfs
             let summaries = Path.Combine(root, "summaries.bin")
             do
@@ -271,7 +271,7 @@ type ServingContractTests() =
         try
             let stage = staging root
             let expected = Path.Combine(root, "expected")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage expected
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage expected
             let actual = Path.Combine(root, "trips.parquet")
             let trip: JrUtil.GtfsModel.Trip = {
                 id = "out"; routeId = "r"; serviceId = "svc"; headsign = Some "Two"; shortName = None
@@ -289,7 +289,7 @@ type ServingContractTests() =
         try
             let stage = staging root
             let expected = Path.Combine(root, "expected")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage expected
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage expected
             let actual = Path.Combine(root, "calls.parquet")
             let summaries = Path.Combine(root, "summaries.bin")
             do
@@ -353,7 +353,7 @@ type ServingContractTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-invalid-serving-order-" + Guid.NewGuid().ToString("N"))
         try
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) (staging root) output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) (staging root) output
             let path = Path.Combine(output, "serving", "shape.parquet")
             File.Delete(path)
             let relation = JrUtil.Serving.Schema.relations |> Array.find (fun relation -> relation.name = "shape")
@@ -383,8 +383,8 @@ type ServingContractTests() =
         try
             let stage = staging root
             let first, second = Path.Combine(root, "first"), Path.Combine(root, "second")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage first
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage second
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage first
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage second
             let result = JrUtil.Serving.Validation.validatePackage first
             Assert.AreEqual(36, result.relationCount)
             Assert.AreEqual(39, result.fileCount)
@@ -403,7 +403,7 @@ type ServingContractTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-view-" + Guid.NewGuid().ToString("N"))
         try
             let package = Path.Combine(root, "package")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) (staging root) package
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) (staging root) package
             use zip = ZipFile.OpenRead(Path.Combine(package, "gtfs.zip"))
             use published = new StreamReader(zip.GetEntry("transfers.txt").Open())
             Assert.IsFalse(published.ReadToEnd().Contains("max_waiting_time"))
@@ -419,8 +419,8 @@ type ServingContractTests() =
         try
             let stage = staging root
             let first, second, renamed = Path.Combine(root, "first"), Path.Combine(root, "second"), Path.Combine(root, "renamed")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage first
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage second
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage first
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage second
             let same = JrUtil.Serving.Comparison.comparePackages [] first second
             Assert.IsTrue(same.isEquivalent)
             Assert.AreEqual(0, same.differences.Length)
@@ -429,7 +429,7 @@ type ServingContractTests() =
 
             let stops = Path.Combine(stage, "gtfs-intermediate", "stops.txt")
             File.WriteAllText(stops, File.ReadAllText(stops).Replace("s2,Two,", "s2,Deux,"))
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) stage renamed
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage renamed
             let changed = JrUtil.Serving.Comparison.comparePackages [] first renamed
             Assert.IsFalse(changed.isEquivalent)
             let subjects = changed.unexpected |> List.map (fun difference -> difference.kind, difference.subject)
@@ -450,7 +450,7 @@ type ServingContractTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-identity-" + Guid.NewGuid().ToString("N"))
         try
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) (staging root) output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) (staging root) output
             let tripKeys = parquetStrings (Path.Combine(output, "serving", "source_trip_map.parquet")) "source_trip_id"
             CollectionAssert.Contains(tripKeys, "source-trip")
             CollectionAssert.Contains(tripKeys, "L%2F1/C%202")
@@ -463,7 +463,7 @@ type ServingContractTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-call-times-" + Guid.NewGuid().ToString("N"))
         try
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) (staging root) output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) (staging root) output
             let rows = JrUtil.Serving.PackageReader.readTextRows
                            (Path.Combine(output, "serving", "source_call_map.parquet"))
                            [| "source_sequence"; "scheduled_arrival"; "scheduled_departure" |]
@@ -478,7 +478,7 @@ type ServingContractTests() =
         try
             let baseStage = staging (Path.Combine(root, "base-work"))
             let basePackage = Path.Combine(root, "base")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) baseStage basePackage
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) baseStage basePackage
             let overlayStage = staging (Path.Combine(root, "overlay-work"))
             write (Path.Combine(overlayStage, "gtfs-intermediate", "stop_times.txt"))
                 "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type,timepoint\nout,25:00:00,25:00:00,s1,1,0,0,1\nout,25:10:00,25:10:00,s2,3,0,0,1\n"
@@ -488,7 +488,7 @@ type ServingContractTests() =
                 "base_trip_id,output_trip_id,valid_from,valid_to\nout,out,20260913,20260913\n"
             write (Path.Combine(overlayStage, "base-package.path")) basePackage
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) overlayStage output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) overlayStage output
             let sequences = parquetStrings (Path.Combine(output, "serving", "source_call_map.parquet")) "source_sequence"
             CollectionAssert.AreEqual([| "0" |], sequences)
         finally if Directory.Exists(root) then Directory.Delete(root, true)
@@ -505,7 +505,7 @@ type ServingContractTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-reader-" + Guid.NewGuid().ToString("N"))
         try
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) (staging root) output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) (staging root) output
             let gtfs, extensions = JrUtil.Serving.PackageReader.prepareCompilerView output (Path.Combine(root, "scratch"))
             Assert.IsTrue(File.ReadAllText(Path.Combine(gtfs, "trips.txt")).Contains("out"))
             Assert.IsTrue(File.ReadAllText(Path.Combine(extensions, "cz_routes.txt")).Contains("001"))
@@ -520,7 +520,7 @@ type ServingContractTests() =
             write (Path.Combine(baseStage, "extensions", "cz_trips.txt"))
                 "trip_id,cis_line_id,cis_trip_id,train_number,source_trip_ids,coverage_sources\nout,001,7,123,PA=pa-1|TR=tr-1,provider\n"
             let basePackage = Path.Combine(root, "base")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) baseStage basePackage
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) baseStage basePackage
 
             let overlayStage = staging (Path.Combine(root, "overlay-work"))
             write (Path.Combine(overlayStage, "extensions", "cz_trips.txt"))
@@ -529,7 +529,7 @@ type ServingContractTests() =
                 "base_trip_id,output_trip_id,valid_from,valid_to\nout,out,20260913,20260913\n"
             write (Path.Combine(overlayStage, "base-package.path")) basePackage
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) overlayStage output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) overlayStage output
 
             let tripKeys = parquetStrings (Path.Combine(output, "serving", "source_trip_map.parquet")) "source_trip_id"
             CollectionAssert.Contains(tripKeys, "pa-1")
@@ -570,7 +570,7 @@ type ServingContractTests() =
             write (Path.Combine(baseStage, "gtfs-intermediate", "transfers.txt"))
                 "from_stop_id,to_stop_id,from_route_id,to_route_id,from_trip_id,to_trip_id,transfer_type,min_transfer_time,max_waiting_time\ns1,s2,r,r,out,out,2,60,300\n"
             let basePackage = Path.Combine(root, "base")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) baseStage basePackage
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) baseStage basePackage
 
             let overlayStage = staging (Path.Combine(root, "overlay-work"))
             for relative in [ "trips.txt"; "stop_times.txt" ] do
@@ -588,7 +588,7 @@ type ServingContractTests() =
             let overlayManifest = Path.Combine(overlayStage, "manifest.json")
             write overlayManifest (File.ReadAllText(overlayManifest).Replace("provider", "regional"))
             let output = Path.Combine(root, "output")
-            JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) overlayStage output
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) overlayStage output
 
             let relation name columns =
                 JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output, "serving", name + ".parquet")) columns |> Seq.toArray

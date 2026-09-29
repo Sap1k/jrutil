@@ -494,107 +494,29 @@ let main (args: string array) =
                 exitCode <- 1
                 Log.Error(e,"JDF post-inference feature export failed")
         else if argFlagSet args "czptt-to-bundle" then
-            let mutable temporaryOutput: string option = None
             try
-                let catalog =
-                    CzPttToGtfs.loadCatalogSnapshot(
-                        argValue args "--catalog-snapshot")
                 let operationalPointMode =
-                    match optArgValue args "--operational-points"
-                          |> Option.defaultValue "gtfs" with
+                    match optArgValue args "--operational-points" |> Option.defaultValue "gtfs" with
                     | "gtfs" -> CzPttToGtfs.Gtfs
                     | "sidecar" -> CzPttToGtfs.Sidecar
-                    | value ->
-                        invalidArg "--operational-points"
-                            $"Expected gtfs or sidecar, got {value}"
-                let blockMode = CzPttToGtfs.Blocks
-                let conversionOptions: CzPttToGtfs.ConversionOptions = {
-                    operationalPointMode = operationalPointMode
-                    blockMode = blockMode
+                    | value -> invalidArg "--operational-points" $"Expected gtfs or sidecar, got {value}"
+                let options: CzPttPackage.Options = {
+                    catalog = CzPttToGtfs.loadCatalogSnapshot (argValue args "--catalog-snapshot")
+                    conversion = { operationalPointMode = operationalPointMode; blockMode = CzPttToGtfs.Blocks }
+                    sr70Path = sr70Path
+                    sr70Name20Path = sr70Name20Path
+                    osmPath = osmPath
+                    osmAliasesPath = osmAliasesPath
+                    diagnosticsOutput = optArgValue args "--diagnostics-out"
+                    diagnosticTraces = argFlagSet args "--diagnostic-traces"
                 }
-                let inputPath = argValue args "<CzPtt-in-file>"
-                let finalOutputPath = Path.GetFullPath(argValue args "<bundle-out-dir>")
-                if Directory.Exists(finalOutputPath) || File.Exists(finalOutputPath) then
-                    invalidArg "<bundle-out-dir>" "Output path must not exist"
-                let parent = Path.GetDirectoryName(finalOutputPath)
-                Directory.CreateDirectory(parent) |> ignore
-                let outputPath =
-                    Path.Combine(
-                        parent,
-                        $".{Path.GetFileName(finalOutputPath)}.{Guid.NewGuid():N}.tmp")
-                temporaryOutput <- Some outputPath
-                Directory.CreateDirectory(outputPath) |> ignore
                 let bundleProgress name state =
                     phase "convert" name state
                     if state = "completed" then
                         resourceUsage "convert" name (CzPttBundle.currentSpillBytes())
-                let result =
-                    CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
-                        CzPttBundle.SpillBacked catalog conversionOptions inputPath outputPath
-                        sr70Path sr70Name20Path osmPath osmAliasesPath bundleProgress
-                phase "convert" "write-gtfs" "started"
-                result.feed
-                |> Gtfs.deduplicateCalendar
-                |> Gtfs.fillStandardRequiredFields
-                |> Gtfs.gtfsFeedToFolder ()
-                    (Path.Combine(outputPath, "gtfs-intermediate"))
-                let extensionsPath = Path.Combine(outputPath, "extensions")
-                Directory.CreateDirectory(extensionsPath) |> ignore
-                for fileName in
-                    [| "cz_routes.txt"; "cz_trips.txt"; "cz_trip_stop_zones.txt" |] do
-                    let source =
-                        Path.Combine(outputPath, "gtfs-intermediate", fileName)
-                    if File.Exists(source) then
-                        File.Move(source, Path.Combine(extensionsPath, fileName))
-                phase "convert" "write-gtfs" "completed"
-                resourceUsage "convert" "write-gtfs" (CzPttBundle.currentSpillBytes())
-                phase "convert" "write-diagnostics" "started"
-                let diagnostics = Dictionary<string, obj>()
-                diagnostics.["schema_version"] <- box 1
-                diagnostics.["bundle_format"] <- box "czptt-v1"
-                diagnostics.["operational_points"] <-
-                    box (
-                        match operationalPointMode with
-                        | CzPttToGtfs.Gtfs -> "gtfs"
-                        | CzPttToGtfs.Sidecar -> "sidecar")
-                diagnostics.["block_mode"] <-
-                    box (
-                        match blockMode with
-                        | CzPttToGtfs.Blocks -> "blocks"
-                        | CzPttToGtfs.NoBlocks -> "none")
-                diagnostics.["accepted_pa_count"] <- box result.acceptedPaIds.Length
-                diagnostics.["rejected_journeys"] <- box result.rejectedJourneys
-                diagnostics.["cancelled_pa_ids"] <- box result.cancelledPaIds
-                diagnostics.["sidecar_boundary_approximations"] <-
-                    box result.sidecarBoundaryApproximations
-                diagnostics.["line_boundary_adjustments"] <-
-                    box result.boundaryAdjustments
-                diagnostics.["ids_diagnostics"] <- box result.idsDiagnostics
-                diagnostics.["merge_diagnostics"] <- box result.mergeDiagnostics
-                diagnostics.["coordinate_diagnostics"] <-
-                    box result.coordinateDiagnostics
-                File.WriteAllText(
-                    Path.Combine(outputPath, "diagnostics.json"),
-                    JsonSerializer.Serialize(
-                        diagnostics,
-                        JsonSerializerOptions(WriteIndented = true)) + "\n")
-                phase "convert" "write-diagnostics" "completed"
-                resourceUsage "convert" "write-diagnostics" (CzPttBundle.currentSpillBytes())
-                CzPttBundle.writeManifest outputPath
-                resourceUsage "convert" "write-manifest" (CzPttBundle.currentSpillBytes())
-                let productionOutput = outputPath + ".production"
-                JrUtil.Serving.PackageWriter.finalizeLegacyStaging Map.empty None (fun _ _ -> ()) outputPath productionOutput
-                optArgValue args "--diagnostics-out"
-                |> Option.iter (fun diagnostics ->
-                    JrUtil.Serving.PackageWriter.writeDiagnosticArtifact outputPath diagnostics (argFlagSet args "--diagnostic-traces"))
-                Directory.Delete(outputPath, true)
-                Directory.Move(productionOutput, finalOutputPath)
-                temporaryOutput <- None
+                CzPttPackage.write options (argValue args "<CzPtt-in-file>") (argValue args "<bundle-out-dir>") bundleProgress |> ignore
                 Log.Information("Finished!")
             with e ->
-                temporaryOutput
-                |> Option.iter (fun path ->
-                    if Directory.Exists(path) then Directory.Delete(path, true))
                 exitCode <- 1
                 Log.Error(e, "CZPTT bundle conversion failed")
         else if argFlagSet args "fix-jdf" then
