@@ -1,0 +1,2 @@
+# The overlay embeds the git commit of the converter in its build spec.
+manifest build_spec_sha256

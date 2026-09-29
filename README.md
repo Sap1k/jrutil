@@ -3,9 +3,8 @@
 JrUtil is a library and a set of utilities for working with Czech (and Slovak)
 public transport data, such as:
 
-- scheduled timetables (JDF to GTFS, CZPTTCIS to GTFS, more to come)
-- real-time timetable changes (TODO)
-- vehicle positions (scraping GRAPP, viewing historical data)
+- scheduled timetables (JDF and CZPTTCIS to production packages with GTFS)
+- regional GTFS overlays (PID, IDS JMK) on top of the national JDF package
 
 Production schedule writers emit the closed `jrutil-production` contract:
 `gtfs.zip`, four public Czech enrichment extensions, serving-v2 Parquet
@@ -111,7 +110,7 @@ pattern-compatible populations, target-available candidates, and national
 snapshot/capacity gaps, so an older or less frequent national snapshot cannot
 make the calibration percentage misleading.
 
-`--audit-date=YYYY-MM-DD` defaults to the CIS snapshot retrieval date in
+The coverage audit date is the CIS snapshot retrieval date in
 Europe/Prague. `reports/snapshot_day_coverage.csv` separates that day's service
 coverage from future, unverified JDF comparisons. Semantic applicability is
 compiled into calendar-backed serving assignments; trip identity mappings alone
@@ -234,20 +233,13 @@ CZPTTCIS), convert them to GTFS and then perform various operations on the
 result.
 
 *jrutil-multitool* is a small tool whose purpose is to provide a command line
-interface to commonly used functions of *JrUtil*. It can, for example, convert
-a single JDF or CZPTT batch to a GTFS feed.
+interface to commonly used functions of *JrUtil*: the JDF fix/merge/bundle
+pipeline, CZPTT and regional-overlay packages, and package validation.
 
 *jrutil.tests* contains unit and small integration tests of JrUtil.
 
-*GeoReport* loads Czech stop position data and runs it through JrUtil to
-determine how many stops have a matching location.
-
-*RtCollect* uses JrUtil to scrape current vehicle delays and store them in a
-PostgreSQL database.
-
-*RtView* displays data collected by RtCollect as a web app.
-
-*mkscriptenv.sh* creates an environment for writing .fsx scripts in *scripts*.
+*scripts/golden* is the bounded real-data regression and performance gate
+used for refactors; see its README.
 
 # Czech schedule extensions
 
@@ -298,33 +290,19 @@ because route stop numbers are unique only within one version.
 Generated intermediate identifiers consistently use colon-separated
 namespaces: `jdf:agency:…`, `jdf:route:…`, `jdf:trip:…`, `jdf:stop:…`,
 `jdf:zone:…`, `jdf:notice:…`, `jdf:transfer:…` and `jdf:restriction:…`.
-With `--stop-ids-cis`, stop and post IDs use `cis:stop:…`. Text components are
+Text components are
 URI-escaped before being embedded in an identifier. Deduplicated GTFS service
 patterns use the derived `gtfs:service:<weekday-bitmap>:<ordinal>` namespace.
-Inferred boarding points use `jdf:stop:<stop>:est:<ordinal>`, or the equivalent
-`cis:stop:` prefix. The 1-based ordinal is assigned per parent stop by sorting
+Inferred boarding points use `jdf:stop:<stop>:est:<ordinal>`. The 1-based ordinal is assigned per parent stop by sorting
 the full internal derived-location IDs; those full IDs remain in diagnostic
 relations for traceability.
-
-JDF stop numbers are not always global CIS identifiers. Pass `--stop-ids-cis`
-only for a batch known to use the national CIS stop registry:
-
-```text
-dotnet run --project jrutil-multitool -- \
-  jdf-to-gtfs --stop-ids-cis JDF-input GTFS-output
-```
 
 The extension files are optional in the shared GTFS model. CZPTT conversion
 populates route, trip and trip-stop-zone extensions when the source supplies
 the corresponding data.
 
-CZPTT conversion defaults to `--block-mode=blocks`: line, train-category and
-operator changes produce linked GTFS trips with a shared `block_id`. Use
-`--block-mode=none` to combine the ordinary subdivisions within each transport
-mode run. In that mode route labels combine first-seen unique line marks and
-train-designation fallbacks, for example `U32/S32` or `U2/Os 7002`, and
-multi-operator routes reference a composite agency such as `ČD / DB`. Both
-`czptt-to-gtfs` and `czptt-to-bundle` accept the option.
+In CZPTT conversion, line, train-category and operator changes produce linked
+GTFS trips with a shared `block_id`.
 
 `CZAlternativeTransport=1` marks the segment departing that location as rail
 replacement transport. Such segments are emitted with extended GTFS route
@@ -333,8 +311,7 @@ line therefore becomes, for example, `U1 (NAD)`; a line-less fallback retains
 the train designation, for example `Os 363784 (NAD)`. NAD trips contain only
 passenger calls and serve a synthetic `BUS` platform instead of railway track
 numbers; its stop description directs passengers to the operator's boarding
-information. A mixed PA is split at each rail/NAD boundary even with
-`--block-mode=none`; the resulting trips use separate block IDs and a
+information. A mixed PA is split at each rail/NAD boundary; the resulting trips use separate block IDs and a
 trip-specific timed transfer (`transfer_type=1`) between the exact stops served
 by both trips, with `min_transfer_time=0`. Separate NAD PAs are connected to a train within ten minutes by
 the `+300000` operational-number convention first, falling back to the
@@ -467,11 +444,6 @@ OSM or running A*:
 jdf-to-bundle --routing-osm-pbf=clip.osm.pbf \
   --capture-post-inference-evidence=evidence --post-inference-evidence-only ...
 
-jdf-validate-post-inference --evidence=evidence
-
-jdf-replay-post-inference --evidence=evidence --policy=policy.json \
-  --expectations=expectations.tsv --review-stops=stops.txt --output=review
-
 jdf-to-bundle --post-inference-evidence=evidence \
   --post-inference-policy=policy.json ...
 ```
@@ -498,9 +470,8 @@ full capture. `--capture-exclude-source=PREFIX[,PREFIX…]` drops observations
 whose source object ID starts with a prefix (e.g. `external:PID.csv:`), so a
 training pack cannot contain the catalogue its labels come from. Restrictions
 are appended to the capture-tool version (`<version>+region:…+exclude-source:…`)
-and therefore to the pack ID. Such packs replay with `jdf-replay-post-inference`
-for review and training, but `jdf-to-bundle --post-inference-evidence` rejects
-them. `--export-post-context-calls=FILE` additionally writes every usable
+and therefore to the pack ID. Such packs feed `jdf-export-post-features` for review and training, but
+`jdf-to-bundle --post-inference-evidence` rejects them. `--export-post-context-calls=FILE` additionally writes every usable
 road/tram call in the region with its evidence `context_id`, GTFS trip ID and
 per-stop occurrence, for joining external call mappings.
 
@@ -642,11 +613,6 @@ Using the latest version is highly recommended.
 
 Clone the repo and run `dotnet build`. Now you can use the various utilities by
 going to their directory and running `dotnet run -- ARGS...`.
-
-Some parts of JrUtil use a PostgreSQL database to store data and speed up
-bulk operations. To use those, set up a PostgreSQL server and pass an
-[Npgsql connection string](https://www.npgsql.org/doc/connection-string-parameters.html)
-as a parameter.
 
 # Community
 

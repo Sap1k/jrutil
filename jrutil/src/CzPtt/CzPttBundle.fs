@@ -448,14 +448,7 @@ let private loadAliases path =
             |> Map
 
 let private distanceMeters (latitude1, longitude1) (latitude2, longitude2) =
-    let radians value = value * Math.PI / 180.
-    let dLatitude = radians (latitude2 - latitude1)
-    let dLongitude = radians (longitude2 - longitude1)
-    let a =
-        Math.Sin(dLatitude / 2.) ** 2.
-        + Math.Cos(radians latitude1) * Math.Cos(radians latitude2)
-          * Math.Sin(dLongitude / 2.) ** 2.
-    6371000. * 2. * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1. - a))
+    Geo.haversineMetres latitude1 longitude1 latitude2 longitude2
 
 let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
                                                   inputPath outputDirectory
@@ -1513,12 +1506,6 @@ let writeSidecars catalog mode inputPath outputDirectory sr70Path sr70Name20Path
         catalog mode inputPath outputDirectory sr70Path sr70Name20Path
         osmPath osmAliasesPath
         (fun _ _ -> ())
-
-let writeSidecarsWithOptions catalog options inputPath outputDirectory sr70Path
-                             sr70Name20Path osmPath osmAliasesPath =
-    writeSidecarsWithProgressAndOptions
-        catalog options inputPath outputDirectory sr70Path sr70Name20Path
-        osmPath osmAliasesPath (fun _ _ -> ())
 
 let writeManifest outputDirectory =
     let textRows path =

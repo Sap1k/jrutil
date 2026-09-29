@@ -24,8 +24,6 @@ open NodaTime
 open NodaTime.Text
 
 #nowarn "0342"
-// For deprecated BinaryFormatter
-#nowarn "44"
 
 open System
 
@@ -72,12 +70,7 @@ type DateBitmap(interval: DateInterval, bits: BitArray) =
         for i in 0..(bits.Length - 1) do
             extended.[offset + i] <- bits.[i]
         DateBitmap(resInterval, extended)
-    member this.HasAnySet() =
-        // TODO: Use native .HasAnySet() when we get to .NET 8
-        let mutable anySet = false
-        for x in this.Bits do
-            if x then anySet <- true
-        anySet
+    member this.HasAnySet() = this.Bits.HasAnySet()
 
 let memoize f =
     let cache = new ConcurrentDictionary<_, _>()
@@ -100,25 +93,6 @@ let memoizeVoidFunc f =
                 let value = f()
                 cache <- Some value
                 value)
-
-let mutable persistentCachePath: string option = None
-
-let cacheVoidFunc (key: string) (f: unit -> 'a) () =
-    match persistentCachePath with
-    | Some pcp ->
-        let cacheFilePath = Path.Combine(pcp, key)
-        if File.Exists(cacheFilePath) then
-            use stream = File.OpenRead(cacheFilePath)
-            (new BinaryFormatter()).Deserialize(stream) :?> 'a
-        else
-            let data = f ()
-            use stream = File.Open(cacheFilePath, FileMode.Create)
-            (new BinaryFormatter()).Serialize(stream, data)
-            data
-    | None -> f ()
-
-let chainCompare next prev =
-    if prev <> 0 then prev else next
 
 let fileLinesSeq filename = seq {
     use file = File.OpenText filename
@@ -230,18 +204,6 @@ let private mapParallelOrderedCore<'a, 'b>
 /// requested number of parsed results to be retained.
 let mapParallelOrderedBatches<'a, 'b> degreeOfParallelism (func: 'a -> 'b) (inputs: 'a seq) =
     mapParallelOrderedCore degreeOfParallelism None (fun _ -> 1L) func inputs
-
-/// Maintains stable result order while bounding both task count and the
-/// estimated bytes of inputs whose parsed results may be retained. One
-/// oversized input is always admitted so a conservative estimate cannot
-/// prevent progress.
-let mapParallelOrderedWeighted<'a, 'b>
-    degreeOfParallelism
-    maximumInFlightBytes
-    (weight: 'a -> int64)
-    (func: 'a -> 'b)
-    (inputs: 'a seq) =
-    mapParallelOrderedCore degreeOfParallelism (Some maximumInFlightBytes) weight func inputs
 
 type AdaptiveSchedulerSample = {
     targetWorkers: int
@@ -453,62 +415,6 @@ let mapParallelOrderedAdaptive<'a, 'b>
         producer.Join()
 }
 
-/// A custom parallel map that lets the user specify the number of processing
-/// threads used
-/// Each thread gets its next input from a queue, processes that input and then
-/// puts the output into the output queue
-let parmap<'a, 'b> threadCount func (inputs: 'a seq) = (seq {
-    let enumerator = inputs.GetEnumerator()
-    let next() =
-        lock enumerator (fun () ->
-            if enumerator.MoveNext() then Some enumerator.Current else None)
-    let outputQueue = new BlockingCollection<'b>()
-    let processingTask =
-        [for _ in 1..threadCount ->
-            async {
-                while (match next() with
-                       | Some i ->
-                           outputQueue.Add(func i)
-                           true
-                       | None -> false) do ()
-            }]
-        |> Async.Parallel
-        |> Async.StartAsTask
-    async {
-        processingTask.Wait()
-        outputQueue.CompleteAdding()
-    } |> Async.Start
-    while not outputQueue.IsCompleted do
-        // seq expressions can't contain try with directly, but can
-        // as a subexpression...
-        yield (try Some <| outputQueue.Take()
-               with :? InvalidOperationException -> None)
-} |> Seq.choose id)
-
-// A version of parmap for side-effecting functions
-let pariter<'a> threadCount func (inputs: 'a seq) =
-    let enumerator = inputs.GetEnumerator()
-    let next() =
-        lock enumerator (fun () ->
-            if enumerator.MoveNext() then Some enumerator.Current else None)
-    let processingTask =
-        [for _ in 1..threadCount ->
-            async {
-                while (match next() with
-                       | Some i ->
-                           func i
-                           true
-                       | None -> false) do ()
-            }]
-        |> Async.Parallel
-        |> Async.StartAsTask
-    processingTask.Wait()
-
-let taskMap f t = task {
-    let! x = t
-    return f x
-}
-
 // Used DateTime to parse and the converts the result to LocalDate
 let tryParseDate (format: string) (str: string) =
     let success, dt = DateTime.TryParseExact(
@@ -517,28 +423,6 @@ let tryParseDate (format: string) (str: string) =
     else None
 let parseDate format str =
     tryParseDate format str |> Option.get
-
-let tryParseTime format str =
-    let pattern = LocalTimePattern.Create(format, CultureInfo.InvariantCulture)
-    let res = pattern.Parse(str)
-    if res.Success then Some res.Value else None
-let parseTime format str =
-    match tryParseTime format str with
-    | Some t -> t
-    | None -> failwithf "Failed to parse time \"%s\" with pattern \"%s\""
-                        str format
-
-let tryParsePeriod (format: string) (str: string) =
-    let success, timespan =
-        TimeSpan.TryParseExact(str, format, CultureInfo.InvariantCulture)
-    if success then
-        Some <| Period.FromMilliseconds(int64 timespan.TotalMilliseconds)
-    else None
-let parsePeriod format str =
-    tryParsePeriod format str |> Option.get
-
-let dateToIso (date: LocalDate) =
-    date.ToString("uuuu-MM-dd", CultureInfo.InvariantCulture)
 
 let rec dateRange (startDate: LocalDate) (endDate: LocalDate) =
     // Create a list of Dates containing all days between startDate
@@ -607,29 +491,6 @@ let withProcessedArgs docstring (args: string array) fn =
         printfn "%s" e.Error
         1
     | _ -> assert false; 1
-
-let runBatchAction strict onError action =
-    try
-        action ()
-    with e ->
-        onError e
-        if strict then reraise()
-
-let measureTime msg func =
-    let sw = Stopwatch.StartNew()
-    let res = func()
-    sw.Stop()
-    Log.Information("{Section} took {Time}", msg, sw.Elapsed)
-    res
-
-let measureTimeAsync msg func =
-    task {
-        let sw = Stopwatch.StartNew()
-        let! res = func()
-        sw.Stop()
-        Log.Information("{Section} took {Time}", msg, sw.Elapsed)
-        return res
-    }
 
 let findPathCaseInsensitive dirPath (filename: string) =
     let files =
@@ -712,31 +573,8 @@ let logWrappedOp (msg: string) f =
     Log.Information("{Operation} finished", msg)
     v
 
-// Computed UIC checksum digit
-// Algorithm source: https://github.com/proggy/uic/
-// Works for computing sixth digit of SR70 ID
-let uicChecksum (digits: int array) =
-    (digits
-    |> Array.mapi (fun i d -> if (digits.Length - i) % 2 = 1 then d * 2 else d)
-    |> Array.sum) % 10
-
-let normaliseSr70 (sr70: string) =
-    // Strip checksum digit
-    if sr70.Length > 5
-    then sr70.[..4]
-    else sr70.PadLeft(5, '0')
-
-/// Like pairwise, but the previous element is returned as an option, so the
-/// first element is (None, head)
-let tryPairwise s =
-    Seq.concat [
-        seq { None, Seq.head s }
-        Seq.pairwise s |> Seq.map (fun (a, b) -> Some a, b)
-    ]
-
 let leftJoinOn xkey ykey xs ys =
     let ysMap = ys |> Seq.map (fun y -> ykey y, y) |> Map
-    let st = new System.Diagnostics.StackTrace();
     xs |> Seq.map (fun x -> x, ysMap |> Map.tryFind (xkey x))
 
 exception JoinException of string
@@ -750,40 +588,7 @@ let innerJoinOn xkey ykey xs ys =
            | None -> raise (JoinException (sprintf
                 "Could not match left key %A" (xkey x))))
 
-let optResult error = function
-    | Some v -> Ok v
-    | None -> Error error
-
 let nullOpt v =
     if v = null then None else Some v
 
 let nullableOpt (v: 'a Nullable) = if v.HasValue then Some v.Value else None
-
-let splitSeq pred xs =
-    let split = xs |> Seq.groupBy pred |> Seq.toList
-    split
-    |> List.tryFind (fun (b, _) -> b)
-    |> Option.defaultValue (true, [])
-    |> snd,
-    split
-    |> List.tryFind (fun (b, _) -> not b)
-    |> Option.defaultValue (false, [])
-    |> snd
-
-let concatTo2 xs =
-    let x1s = ResizeArray()
-    let x2s = ResizeArray()
-    for (x1, x2) in xs do
-        x1s.AddRange(x1)
-        x2s.AddRange(x2)
-    x1s, x2s
-
-let concatTo3 xs =
-    let x1s = ResizeArray()
-    let x2s = ResizeArray()
-    let x3s = ResizeArray()
-    for (x1, x2, x3) in xs do
-        x1s.AddRange(x1)
-        x2s.AddRange(x2)
-        x3s.AddRange(x3)
-    x1s, x2s, x3s

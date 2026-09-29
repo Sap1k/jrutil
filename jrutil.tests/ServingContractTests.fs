@@ -63,7 +63,7 @@ type ServingContractTests() =
         // A compacting collection releases some memory but stays above the threshold.
         let mutable current = 0L
         let reclaim () = current <- current - gib / 4L
-        let gate = JrUtil.Serving.MemoryReclaimGate(3L * gib, gib / 2L, reclaim, fun () -> current)
+        let gate = JrUtil.MemoryReclaimGate(3L * gib, gib / 2L, reclaim, fun () -> current)
         let observe value =
             current <- value
             gate.Check()

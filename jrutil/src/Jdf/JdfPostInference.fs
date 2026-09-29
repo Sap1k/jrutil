@@ -3,6 +3,7 @@
 module JrUtil.JdfPostInference
 
 open System
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.IO
 open System.Security.Cryptography
@@ -624,10 +625,6 @@ let private evidenceJsonOptions =
 let private positive field value =
     if not(Double.IsFinite value) || value<=0.0 then
         invalidArg "evidenceDirectory" $"{field}: must be positive"
-
-let private sha256File path =
-    use stream=File.OpenRead(path)
-    SHA256.HashData(stream) |> Convert.ToHexString |> _.ToLowerInvariant()
 
 let evidencePackId (captureToolVersion:string) (mergedJdfSha256:string) (routingPbfSha256:string) =
     if String.IsNullOrWhiteSpace captureToolVersion then

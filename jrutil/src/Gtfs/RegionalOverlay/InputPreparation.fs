@@ -3,6 +3,7 @@
 module internal JrUtil.RegionalOverlay.InputPreparation
 
 open System
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.IO
 open NodaTime

@@ -38,17 +38,6 @@ let normalizeZoneTokens (zones: string option seq) =
     |> Seq.filter (fun zone -> zone <> "" && seen.Add(zone))
     |> Seq.toArray
 
-let normalizeZones (zones: string option seq) =
-    let normalized = normalizeZoneTokens zones
-    if normalized.Length = 0 then None
-    else Some (System.String.Join(",", normalized))
-
-let stopZone batch (stop: Stop) =
-    batch.routeStops
-    |> Seq.filter (fun rs -> rs.stopId = stop.id)
-    |> Seq.map (fun rs -> rs.zone)
-    |> normalizeZones
-
 let tripIsReverse tripId = tripId % 2L = 0L
 
 /// name: filename inside batch (case-insensitive)

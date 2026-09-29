@@ -30,7 +30,7 @@ foreach ($package in @("bundle", "bundle-posts", "overlay", "czptt")) {
         Write-Warning "Skipping ${package}: missing in baseline or candidate"
         continue
     }
-    $mode = if ($ByteIdentical) { @("--byte-identical") } else { @("--semantic") + $(if ($Expect) { @("--expect=$((Resolve-Path $Expect).Path)") } else { @() }) }
+    [string[]] $mode = if ($ByteIdentical) { @("--byte-identical") } else { @("--semantic") + $(if ($Expect) { @("--expect=$((Resolve-Path $Expect).Path)") } else { @() }) }
     Write-Host "== $package ($($mode[0]))"
     & $exe compare-packages @mode $left $right 2>&1 | ForEach-Object { "   $_" }
     if ($LASTEXITCODE -ne 0) { $failed = $true; Write-Host "   FAIL: $package differs" -ForegroundColor Red }

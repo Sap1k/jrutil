@@ -1,6 +1,6 @@
 // This file is part of JrUtil and is licenced under the GNU AGPLv3 or later.
 
-namespace JrUtil.Serving
+namespace JrUtil
 
 open System
 open System.Diagnostics
@@ -40,9 +40,15 @@ type MemoryReclaimGate(thresholdBytes: int64, minimumGrowthBytes: int64, reclaim
 module MemoryReclaim =
     let DefaultMinimumGrowthBytes = 512L * 1024L * 1024L
 
-    let compactingCollection () =
+    /// One blocking, compacting full collection including the large object heap.
+    let compactOnce () =
         GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
+
+    /// Like compactOnce, but also runs pending finalizers and collects what
+    /// they released. Used at package phase boundaries.
+    let compactingCollection () =
+        compactOnce ()
         GC.WaitForPendingFinalizers()
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true)
 

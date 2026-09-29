@@ -207,50 +207,6 @@ type ExecutionTests() =
         assertEqual "first" error.Message
 
     [<TestMethod>]
-    member _.``Weighted parallel map preserves order and byte bound``() =
-        let gate = obj()
-        let mutable activeWeight = 0L
-        let mutable maximumWeight = 0L
-        let weights = [| 3L; 4L; 6L; 2L; 5L |]
-        let work index =
-            lock gate (fun () ->
-                activeWeight <- activeWeight + weights.[index]
-                maximumWeight <- max maximumWeight activeWeight)
-            try
-                Thread.Sleep((weights.Length - index) * 5)
-                index * index
-            finally
-                lock gate (fun () -> activeWeight <- activeWeight - weights.[index])
-        let result =
-            [0 .. weights.Length - 1]
-            |> JrUtil.Utils.mapParallelOrderedWeighted 4 10L (fun index -> weights.[index]) work
-            |> Seq.toArray
-        assertEqual [|0; 1; 4; 9; 16|] result
-        Assert.IsTrue(maximumWeight <= 10L, $"Observed {maximumWeight} bytes in flight")
-
-    [<TestMethod>]
-    member _.``Weighted parallel map admits one oversized input``() =
-        let result =
-            [0; 1; 2]
-            |> JrUtil.Utils.mapParallelOrderedWeighted 3 10L (fun index -> if index = 1 then 20L else 4L) id
-            |> Seq.toArray
-        assertEqual [|0; 1; 2|] result
-
-    [<TestMethod>]
-    member _.``Weighted parallel map reports failures in input order``() =
-        let values =
-            [0..3]
-            |> JrUtil.Utils.mapParallelOrderedWeighted 3 10L (fun _ -> 3L) (fun value ->
-                if value = 1 then raise (InvalidOperationException("first"))
-                if value = 2 then raise (InvalidOperationException("second"))
-                value)
-        use enumerator = values.GetEnumerator()
-        assertEqual true (enumerator.MoveNext())
-        assertEqual 0 enumerator.Current
-        let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> enumerator.MoveNext() |> ignore)
-        assertEqual "first" error.Message
-
-    [<TestMethod>]
     member _.``Adaptive map continuously replenishes independently of consumer``() =
         use thirdStarted = new ManualResetEventSlim(false)
         let values =

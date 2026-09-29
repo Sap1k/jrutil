@@ -3,6 +3,7 @@
 module internal JrUtil.RegionalOverlay.Support
 
 open System
+open JrUtil.Hashing
 open System.Collections.Generic
 open System.Globalization
 open System.IO
@@ -40,16 +41,6 @@ let capabilityNames =
         "transfers"; "stop_zones"; "stop_names"; "trip_headsigns"; "trip_short_names"
         "schedules"; "calendars"; "agencies"
     ]
-
-let sha256Bytes (bytes: byte array) =
-    Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
-
-let sha256Text (value: string) =
-    value |> Encoding.UTF8.GetBytes |> sha256Bytes
-
-let sha256File path =
-    use stream = File.OpenRead(path)
-    Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant()
 
 let sha256Tree root =
     let builder = StringBuilder()
@@ -200,14 +191,7 @@ let structurallyCompatibleRouteLabels (leftRaw: string) (rightRaw: string) =
         && longer.[shorter.Length..] |> Seq.forall Char.IsDigit
     left = right || (left <> "" && right <> "" && (prefixVariant left right || prefixVariant right left))
 
-let haversineMetres lat1 lon1 lat2 lon2 =
-    let radians value = value * Math.PI / 180.0
-    let dLat = radians (lat2 - lat1)
-    let dLon = radians (lon2 - lon1)
-    let a =
-        Math.Sin(dLat / 2.0) ** 2.0
-        + Math.Cos(radians lat1) * Math.Cos(radians lat2) * Math.Sin(dLon / 2.0) ** 2.0
-    6371000.0 * 2.0 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1.0 - a))
+let haversineMetres = JrUtil.Geo.haversineMetres
 
 let csvFields archivePath fileName =
     seq {

@@ -1,6 +1,7 @@
 namespace JrUtil.Tests
 
 open System
+open JrUtil.Hashing
 open System.IO
 open System.Text
 open System.Security.Cryptography

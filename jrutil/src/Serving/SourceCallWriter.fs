@@ -2,6 +2,7 @@
 namespace JrUtil.Serving
 
 open System
+open JrUtil
 open System.IO
 open System.Diagnostics
 open System.Runtime
@@ -139,9 +140,7 @@ module SourceCallWriter =
     /// seven boxed values per call in the production overlay path.
     let writeMappedTyped (path: string) (typed: seq<MappedRow>) (token: CancellationToken) (progress: string -> int64 -> unit) =
         let reclaimGate =
-            MemoryReclaimGate(3_000_000_000L, MemoryReclaim.DefaultMinimumGrowthBytes, fun () ->
-                GCSettings.LargeObjectHeapCompactionMode <- GCLargeObjectHeapCompactionMode.CompactOnce
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true))
+            MemoryReclaimGate(3_000_000_000L, MemoryReclaim.DefaultMinimumGrowthBytes, MemoryReclaim.compactOnce)
         let reclaimTransientMemory () = reclaimGate.Check() |> ignore
         let encode (output: BinaryWriter) row =
             output.Write(row.binding); output.Write(row.callNamespace); output.Write(row.sequence)
