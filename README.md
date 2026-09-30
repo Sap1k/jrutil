@@ -6,13 +6,13 @@ public transport data, such as:
 - scheduled timetables (JDF and CZPTTCIS to production packages with GTFS)
 - regional GTFS overlays (PID, IDS JMK) on top of the national JDF package
 
-Production schedule writers emit the closed `jrutil-production` contract:
-`gtfs.zip`, four public Czech enrichment extensions, serving-v2 Parquet
-relations, `manifest.json`, and bounded `diagnostics.json`. The normative
+Production schedule writers emit the closed `jrutil-production` contract
+(bundle version 2): a standard `gtfs.zip`, serving Parquet relations (schema
+version 3), `manifest.json`, and bounded `diagnostics.json`. The normative
 contract is [docs/PRODUCTION_CONTRACT.md](docs/PRODUCTION_CONTRACT.md), with
 [migration instructions](docs/OUTPUT_MIGRATION.md) and the
-[historical output audit](docs/OUTPUT_AUDIT.md). Older sidecar layouts
-described below are compiler staging details, not consumer interfaces.
+[historical output audit](docs/OUTPUT_AUDIT.md). The source metadata tables
+described below are compiler-internal, not consumer interfaces.
 
 ## Regional GTFS overlays
 
@@ -32,9 +32,10 @@ the regional arrival/departure values (including seconds) on shared dates. GVD
 jrutil-multitool regional-gtfs-overlay \
   --policy=config/regional-gtfs-overlay/pid-overlay-v1.json \
   --gvd-year=2026 \
+  --converter-version=<fork-commit> \
   --source=pid-gtfs=PID_GTFS.zip \
   --source-descriptor=pid-gtfs=pid-snapshot.json \
-  jdf-aug-final-v2/bundle output-bundle
+  national-jdf-package output-bundle
 ```
 
 The descriptor must contain `retrieved_at` and the source ZIP's lowercase
@@ -51,11 +52,12 @@ the command does not chain independently produced overlays.
 jrutil-multitool regional-gtfs-overlay \
   --policy=config/regional-gtfs-overlay/pid-ids-jmk-overlay-v1.json \
   --gvd-year=2026 \
+  --converter-version=<fork-commit> \
   --source=pid-gtfs=PID_GTFS.zip \
   --source-descriptor=pid-gtfs=pid-snapshot.json \
   --source=ids-jmk-gtfs=IDSJMK_GTFS.zip \
   --source-descriptor=ids-jmk-gtfs=ids-jmk-snapshot.json \
-  jdf-aug-final-v2/bundle output-bundle
+  national-jdf-package output-bundle
 ```
 
 JrUtil performs no download. Pin the official IDS JMK `gtfs.zip` separately,
@@ -126,9 +128,8 @@ Optional detailed diagnostics preserve raw and output headsign decisions.
 Retained national headsigns are not rewritten. Bounded pattern edits are not complete service coverage and
 yield to full source trip projection on authoritative dates.
 
-The production package contains `gtfs.zip`, four public extension tables, the
-declared serving-v2 Parquet relations, `manifest.json`, and bounded
-`diagnostics.json`. Detailed matching evidence is written only to an explicitly
+The production package contains `gtfs.zip`, the declared serving Parquet
+relations, `manifest.json`, and bounded `diagnostics.json`. Detailed matching evidence is written only to an explicitly
 requested diagnostics artifact. The checked-in PID v1 policy is deliberately a non-publishable
 calibration policy. Publication requires a reviewed policy-only update which
 sets coverage floors and enables publication.
@@ -212,10 +213,10 @@ projections have their existing construction rules, including source agencies,
 calendars and displays; approximate national stops also retain their explicitly
 supported correction behavior.
 
-Single-source bundle version 1, IDs, report schemas and machine-readable values
-are preserved. Combined bundles use version 2 with a sorted `sources` array,
-per-source and aggregate counts, source payload/descriptor hashes, and the
-combined policy hash.
+IDs, report schemas and machine-readable values are stable. A combined overlay
+records every source in the manifest `sources` array with per-source and
+aggregate counts, source payload/descriptor hashes, and the combined policy
+hash.
 In particular, `pid_name_and_coordinates` and `pid_native` in the stop-match
 report are legacy classification labels even for another source. Consult the
 source identity and provenance rather than interpreting these values as feed IDs.
@@ -241,18 +242,18 @@ pipeline, CZPTT and regional-overlay packages, and package validation.
 *scripts/golden* is the bounded real-data regression and performance gate
 used for refactors; see its README.
 
-# Czech schedule extensions
+# Czech schedule facts
 
-Production packages expose only portable schedule facts that standard GTFS
-cannot represent. Identity and provenance are available exclusively through
-the typed serving relations documented in `docs/PRODUCTION_CONTRACT.md`.
+`gtfs.zip` is standard GTFS only. Facts that standard GTFS cannot represent,
+along with identity and provenance, are available exclusively through the
+typed serving relations documented in `docs/PRODUCTION_CONTRACT.md`:
 
-| File | Purpose |
+| Relation | Purpose |
 | --- | --- |
-| `cz_zones.txt` | Zone identity and optional fare-system ownership |
-| `cz_route_stop_zones.txt` | Ordered route-stop-specific zone memberships |
-| `cz_call_zones.txt` | Ordered call-specific zone memberships |
-| `cz_transfer_constraints.txt` | Waiting limits attached to standard GTFS transfers |
+| `fare_zone` | Zone identity and optional fare-system ownership |
+| `route_stop_zone` | Ordered route-stop-specific zone memberships |
+| `call_zone` | Ordered call-specific zone memberships |
+| `transfer` | Standard transfers plus waiting limits |
 
 The selected public line number is written to `routes.txt`'s
 `route_short_name`. A preferred JDF `LinExt` designation wins;
@@ -271,8 +272,8 @@ Raw zone lists are split, trimmed and deduplicated without attempting to infer
 their IDS system. `fare_system_id` therefore remains null when ownership is
 unknown. A route
 distinction and raw token form the source zone identity. Standard GTFS
-route-stop occurrences and source order are retained in `route_stop_zone` and
-projected to `cz_route_stop_zones.txt`. Standard `stop_times.txt` never contains
+route-stop occurrences and source order are retained in `route_stop_zone`.
+Standard `stop_times.txt` never contains
 the old non-standard `stop_zone_ids` column.
 
 Output routes group the merged versions of one CIS line. Versions that share
@@ -296,10 +297,6 @@ patterns use the derived `gtfs:service:<weekday-bitmap>:<ordinal>` namespace.
 Inferred boarding points use `jdf:stop:<stop>:est:<ordinal>`. The 1-based ordinal is assigned per parent stop by sorting
 the full internal derived-location IDs; those full IDs remain in diagnostic
 relations for traceability.
-
-The extension files are optional in the shared GTFS model. CZPTT conversion
-populates route, trip and trip-stop-zone extensions when the source supplies
-the corresponding data.
 
 In CZPTT conversion, line, train-category and operator changes produce linked
 GTFS trips with a shared `block_id`.
@@ -397,8 +394,8 @@ deterministic and byte-identical across memory budgets.
 ## Oběhy JDF conversion bundles
 
 `jdf-to-bundle` accepts either an extracted JDF directory or a ZIP and writes
-an immutable bundle with standard GTFS tables, the four extension tables,
-typed Parquet sidecars, structured diagnostics and a checksummed manifest:
+an immutable production package with `gtfs.zip`, serving Parquet relations,
+bounded diagnostics and a checksummed manifest:
 
 ```text
 dotnet run --project jrutil-multitool -- \
@@ -420,7 +417,6 @@ Production packages use the versioned contract documented in
 ```text
 output/
 ├── gtfs.zip
-├── extensions/
 ├── serving/
 ├── manifest.json
 └── diagnostics.json
@@ -567,8 +563,8 @@ union route-stop and trip-call assignments rather than expecting expanded rows.
 The join path is deliberately relational: GTFS identifies routes, trips and
 calls; `source_call_metadata` maps a GTFS call to its JDF route-stop;
 route-stop zone, transfer and restriction relations add only facts missing
-from GTFS. These historical Parquet files are compiler inputs. Serving v2 is
-the immutable import format. A runtime
+from GTFS. These tables are compiler inputs; the serving relations are the
+immutable import format. A runtime
 application should import them into indexed database tables rather than query
 bundle files per request.
 
@@ -598,8 +594,9 @@ path; the tree digest appends each path, a NUL byte and that file's SHA-256.
 `payload_bytes` is the sum of file sizes. ZIP input must contain exactly one
 JDF batch root and is rejected if paths are unsafe or collide by case.
 
-Production Parquet relations use serving schema v2, Snappy compression and
-fixed row groups of at most 65,536 rows. The manifest records schemas, keys,
+Production Parquet relations use serving schema v3, Snappy compression and
+row groups of at most 65,536 rows. Rows are in deterministic generation order;
+relations are not sorted, and primary keys are validated for uniqueness. The manifest records schemas, keys,
 source snapshots, row counts, byte sizes and SHA-256 for every payload.
 Identical inputs, converter version and options produce identical bytes.
 
