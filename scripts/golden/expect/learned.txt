@@ -1,0 +1,21 @@
+# Intended differences between the post-refactor reference (final) and
+# bundle-posts built with the learned-v1 post scorer, as Oběhy now does by
+# default. Only bundle-posts changes; bundle, overlay and czptt are identical.
+#
+# The learned scorer resolves more calls to an estimated post: calls left at
+# the stop centroid (":unspecified") drop from 354,375 to 185,850 and estimated
+# posts rise from 12,830 to 14,927 on the golden subset. Post ordinals
+# (":est:N") are renumbered with the new selections.
+relation location
+relation trip_call
+relation source_entity_map
+relation source_trip_map
+relation source_call_map
+relation object_origin
+gtfs stop_times.txt
+gtfs stops.txt
+
+# The compiler section records the learned policy and scorer.
+manifest compiler
+manifest build_spec_sha256
+manifest relations

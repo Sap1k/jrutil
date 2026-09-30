@@ -15,6 +15,8 @@ param(
     [string] $Jobs = "8",
     [string] $MemoryBudget = "4GiB",
     [string] $OsmPbf = "E:/Git/obehy/work/regional-merged.osm.pbf",
+    # Oběhy passes the learned scorer to every estimated-posts build.
+    [string] $PostInferencePolicy = "E:/Git/obehy/repo/src/obehy/data/post-inference/learned-v1.json",
     [switch] $NoPublish
 )
 
@@ -138,7 +140,7 @@ function Get-StageArguments([string] $Stage, [string] $Target) {
         "merge" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=2026-09-16") + $common + @($Target, "$out/fix") }
         "merge-posts" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=2026-09-16") + $common + @($Target, "$out/fix-posts") }
         "bundle" { Get-BundleArguments $Target "merge" @("--no-estimated-posts") }
-        "bundle-posts" { Get-BundleArguments $Target "merge-posts" @("--routing-osm-pbf=$routingPbf") }
+        "bundle-posts" { Get-BundleArguments $Target "merge-posts" @("--routing-osm-pbf=$routingPbf", "--post-inference-policy=$PostInferencePolicy") }
         "overlay" { @("regional-gtfs-overlay", "--policy=$config/pid-ids-jmk-production-v1.json", "--gvd-year=2026", "--converter-version=golden",
                       "--source=pid-gtfs=$overlayInputs/pid-gtfs.zip", "--source-descriptor=pid-gtfs=$overlayInputs/pid-gtfs-descriptor.json",
                       "--source=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs.zip", "--source-descriptor=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs-descriptor.json",
