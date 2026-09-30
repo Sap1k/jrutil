@@ -23,7 +23,6 @@ open JrUtil.RegionalOverlay.Values
 
 let matchingTimeNormalizer (policy: TripMatchPolicy) =
     if policy.timeResolutionSeconds <= 0 then invalidOp "trip_match.time_resolution_seconds must be positive"
-    if policy.timeRounding <> "floor" then invalidOp "trip_match.time_rounding must be 'floor'"
     fun (value: string) ->
         if String.IsNullOrWhiteSpace(value) then ""
         else

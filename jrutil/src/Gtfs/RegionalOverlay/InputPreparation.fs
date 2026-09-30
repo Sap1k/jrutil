@@ -25,7 +25,7 @@ open JrUtil.RegionalOverlay
 type Input = {
     scratch: Scratch.Storage
     auditDate: LocalDate option
-    policyPath: string
+    policy: OverlayPolicy
     gvdYear: int
     binding: SourceBinding
     baseBundle: string
@@ -35,7 +35,6 @@ type Input = {
 type Result = {
     shapeRows: seq<string array>
     scratch: Scratch.Storage
-    policyPath: string
     baseBundle: string
     outputBundle: string
     binding: SourceBinding
@@ -50,8 +49,6 @@ type Result = {
     baseExtensions: string
     diagnostics: DiagnosticLog
     stopOverrides: OverrideBinding array
-    routeOverrides: OverrideBinding array
-    tripOverrides: OverrideBinding array
     baseStopRows: CsvRow array
     baseRouteRows: CsvRow array
     baseTripValues: Trip array
@@ -77,13 +74,12 @@ type Result = {
 let prepare ({
     scratch = scratch
     auditDate = auditDate
-    policyPath = policyPath
+    policy = policy
     gvdYear = gvdYear
     binding = binding
     baseBundle = baseBundle
     outputBundle = outputBundle
 }: Input) : Result =
-    let policyPath = Path.GetFullPath(policyPath)
     let baseBundle = Path.GetFullPath(baseBundle)
     let outputBundle = Path.GetFullPath(outputBundle)
     let binding = {
@@ -91,8 +87,7 @@ let prepare ({
             payloadPath = Path.GetFullPath(binding.payloadPath)
             descriptorPath = Path.GetFullPath(binding.descriptorPath)
     }
-    validateInputs policyPath baseBundle outputBundle gvdYear binding
-    let policy = loadPolicy policyPath
+    validateInputs baseBundle outputBundle gvdYear binding
     let normalizeMatchingTime = matchingTimeNormalizer policy.source.tripMatch
     if binding.sourceId <> policy.source.sourceId then
         invalidArg "--source" $"Source binding {binding.sourceId} does not match policy source {policy.source.sourceId}"
@@ -121,13 +116,11 @@ let prepare ({
         | _ -> ()
     let snapshotDate = Instant.FromDateTimeOffset(baseRetrievedAt).InZone(DateTimeZoneProviders.Tzdb.["Europe/Prague"]).Date
     let auditDate = auditDate |> Option.defaultValue snapshotDate
-    if not (window.index.ContainsKey(auditDate)) then invalidArg "--audit-date" "Audit date is outside the GVD window"
+    if not (window.index.ContainsKey(auditDate)) then invalidArg "auditDate" "Audit date is outside the GVD window"
     let baseGtfs, baseExtensions = JrUtil.Serving.PackageReader.prepareCompilerView baseBundle scratch.Directory
     let diagnostics = DiagnosticLog(scratch)
     logProgress "validate-inputs" 1L (Some 1L)
-    let stopOverrides = loadOverrides policyPath policy.source.overrides.stops
-    let routeOverrides = loadOverrides policyPath policy.source.overrides.routes
-    let tripOverrides = loadOverrides policyPath policy.source.overrides.trips
+    let stopOverrides = loadOverrides policy.source.overrides.stops
 
     logProgress "spool-source-shapes" 0L None
     let shapeRows = if enabled policy "shapes" then Shapes.spool scratch binding.payloadPath else Seq.empty
@@ -166,7 +159,6 @@ let prepare ({
     {
         shapeRows = shapeRows
         scratch = scratch
-        policyPath = policyPath
         baseBundle = baseBundle
         outputBundle = outputBundle
         binding = binding
@@ -181,8 +173,6 @@ let prepare ({
         baseExtensions = baseExtensions
         diagnostics = diagnostics
         stopOverrides = stopOverrides
-        routeOverrides = routeOverrides
-        tripOverrides = tripOverrides
         baseStopRows = nationalBase.baseStopRows
         baseRouteRows = nationalBase.baseRouteRows
         baseTripValues = nationalBase.baseTripValues

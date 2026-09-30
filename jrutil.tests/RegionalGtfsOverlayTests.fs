@@ -80,7 +80,11 @@ type RegionalGtfsOverlayTests() =
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage package
             package
 
-    let execute auditDate policy gvdYear binding basePath output =
+    /// Run one PID-shaped source through the combined path with a one-source
+    /// overlay-all policy next to its profile.
+    let execute auditDate (profile: string) gvdYear (binding: SourceBinding) basePath output =
+        let policy = Path.Combine(Path.GetDirectoryName(profile), "overlay-all-" + Guid.NewGuid().ToString("N") + ".json")
+        write policy ($"{{\"schema_version\":1,\"sources\":[{{\"source_id\":\"{binding.sourceId}\",\"policy\":\"{Path.GetFileName(profile)}\",\"adapter\":\"pid-v1\"}}]}}")
         (RegionalGtfsOverlay.compile {
             auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
             bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
@@ -93,10 +97,7 @@ type RegionalGtfsOverlayTests() =
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }
 
     let policyJson = """{
-      "schema_version": 3,
-      "calibration": true,
-      "publication_enabled": false,
-      "minimum_coverage": {},
+      "schema_version": 4,
       "source": {
         "source_id": "pid-gtfs",
         "excluded_route_types": ["2"],
@@ -115,17 +116,12 @@ type RegionalGtfsOverlayTests() =
           "split_flat_groups_by_name": true,
           "contextual_inference": {
             "enabled": true,
-            "maximum_unresolved_groups_per_trip": 1,
-            "require_equal_call_count": true,
-            "minimum_mapped_calls": 1,
-            "conflict_policy": "quarantine"
+            "minimum_mapped_calls": 1
           }
         },
         "trip_match": {
           "time_resolution_seconds": 60,
-          "time_rounding": "floor",
           "exact_pattern_proximity": true,
-          "require_unique_best": true,
           "pattern_edit": {
             "enabled": true,
             "maximum_edits": 3,
@@ -146,30 +142,16 @@ type RegionalGtfsOverlayTests() =
         },
         "trip_set_authority": {
           "modes": [],
-          "source_native_modes": [],
-          "route_match_tier": "companion_assertion"
+          "source_native_modes": []
         },
-        "route_match_tiers": ["companion_assertion", "reviewed_override", "structural_trip_evidence"],
-        "trip_match_tiers": ["full_signature", "pattern_endpoints", "pattern_first", "pattern_nearest", "pattern_edit_nearest", "reviewed_override"],
-        "never_inherit": ["pathways.txt", "levels.txt"],
-        "capabilities": {
-          "stop_coordinates": {"mode":"authoritative","priority":100},
-          "boarding_points": {"mode":"authoritative","priority":100},
-          "call_boarding_points": {"mode":"authoritative","priority":100},
-          "shapes": {"mode":"authoritative","priority":100},
-          "route_short_name": {"mode":"preferred","priority":50},
-          "route_long_name": {"mode":"preferred","priority":50},
-          "route_color": {"mode":"preferred","priority":50},
-          "route_text_color": {"mode":"preferred","priority":50},
-          "transfers": {"mode":"additive","priority":50},
-          "stop_names": {"mode":"disabled","priority":0},
-          "trip_headsigns": {"mode":"disabled","priority":0},
-          "trip_short_names": {"mode":"disabled","priority":0},
-          "schedules": {"mode":"authoritative","priority":100},
-          "calendars": {"mode":"disabled","priority":0},
-          "agencies": {"mode":"disabled","priority":0}
-        },
-        "overrides": {"routes":"","trips":"","stops":"stops.csv"}
+        "route_match_tiers": ["companion_assertion", "structural_trip_evidence"],
+        "trip_match_tiers": ["full_signature", "pattern_endpoints", "pattern_first", "pattern_nearest", "pattern_edit_nearest"],
+        "capabilities": [
+          "stop_coordinates", "boarding_points", "call_boarding_points", "shapes",
+          "route_short_name", "route_long_name", "route_color", "route_text_color",
+          "transfers", "schedules"
+        ],
+        "overrides": {"stops":"stops.csv"}
       }
     }"""
 
@@ -340,7 +322,7 @@ type RegionalGtfsOverlayTests() =
             let diagnosticManifest = File.ReadAllText(Path.Combine(output1 + ".diagnostics", "manifest.json"))
             Assert.IsTrue(diagnosticManifest.Contains("base-package"), "Diagnostics must reference base evidence by digest instead of copying it")
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
-            Assert.IsFalse(manifest.RootElement.GetProperty("publication_eligible").GetBoolean())
+            Assert.IsTrue(manifest.RootElement.GetProperty("publication_eligible").GetBoolean())
             Assert.AreEqual("20251214", manifest.RootElement.GetProperty("service_horizon").GetProperty("start_date").GetString())
             Assert.AreEqual("20261212", manifest.RootElement.GetProperty("service_horizon").GetProperty("end_date").GetString())
 
@@ -606,7 +588,7 @@ type RegionalGtfsOverlayTests() =
             let output = Path.Combine(root, "output")
             execute None policy 2026 binding basePath output |> ignore
             let report = File.ReadAllText(diagnosticPath output "events" "stop_group_matches.csv")
-            Assert.IsTrue(report.Split('\n') |> Array.exists (fun row -> row.Contains("\"sb\"") && row.Contains("name_geo_unique")))
+            Assert.IsTrue(report.Split('\n') |> Array.exists (fun row -> row.Contains("\"pid-gtfs:sb\"") && row.Contains("name_geo_unique")))
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -630,7 +612,7 @@ type RegionalGtfsOverlayTests() =
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
             execute None policy 2026 binding basePath output |> ignore
-            let row = File.ReadAllLines(diagnosticPath output "events" "stop_group_matches.csv") |> Array.find (fun line -> line.Contains("\"sg\""))
+            let row = File.ReadAllLines(diagnosticPath output "events" "stop_group_matches.csv") |> Array.find (fun line -> line.Contains("\"pid-gtfs:sg\""))
             Assert.IsTrue(row.Contains("source_native") && not (row.Contains("jdf:stop:bp4")), row)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -741,31 +723,12 @@ type RegionalGtfsOverlayTests() =
             execute None policy 2026 binding basePath output |> ignore
             let diagnostics = File.ReadAllText(diagnosticPath output "events" "diagnostics.csv")
             Assert.IsTrue(diagnostics.Contains("overlay_fact_conflict"))
-            Assert.AreEqual(unresolved, diagnostics.Contains("source_revision_unresolved"))
+            // The PID adapter dates an unparseable revision 700101, so both
+            // cases are equal revisions rather than unresolved ones.
+            Assert.IsFalse(diagnostics.Contains("source_revision_unresolved"))
             Assert.IsFalse(diagnostics.Contains("overlay_newer_source_selected"))
             let calls = readGtfs output "stop_times.txt"
             Assert.IsFalse(calls.Contains("08:03:00") || calls.Contains("08:04:00"))
-        finally
-            if Directory.Exists(root) then Directory.Delete(root, true)
-
-    [<TestMethod>]
-    member _.``Failed publication removes partially written bundle and preserves inputs``() =
-        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-publication-" + Guid.NewGuid().ToString("N"))
-        try
-            let basePath, sourceZip, descriptor, policy = makeFixture root
-            let json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(policy))
-            json.["calibration"] <- System.Text.Json.Nodes.JsonValue.Create(false)
-            json.["publication_enabled"] <- System.Text.Json.Nodes.JsonValue.Create(true)
-            json.["minimum_coverage"] <- System.Text.Json.Nodes.JsonNode.Parse("{\"route\":0.0}")
-            write policy (json.ToJsonString())
-            let inputHashes = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories) |> Seq.map (fun path -> path, sha path) |> Seq.toArray
-            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
-            let output = Path.Combine(root, "output")
-            let error = Assert.ThrowsExactly<InvalidOperationException>(fun () -> execute None policy 2026 binding basePath output |> ignore)
-            Assert.IsTrue(error.Message.Contains("minimum coverage"))
-            Assert.IsFalse(Directory.Exists(output))
-            Assert.AreEqual(0, Directory.EnumerateDirectories(root, ".output.tmp-*") |> Seq.length)
-            for path, expected in inputHashes do Assert.AreEqual(expected, sha path, path)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -819,12 +782,11 @@ type RegionalGtfsOverlayTests() =
             jmkSource.["trip_match"].["source_revision"] <- null
             jmkSource.["trip_set_authority"].["modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"tram\",\"ferry\",\"trolleybus\"]")
             jmkSource.["trip_set_authority"].["source_native_modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"ferry\"]")
-            jmkSource.["capabilities"].["shapes"].["mode"] <- System.Text.Json.Nodes.JsonValue.Create("disabled")
-            jmkSource.["capabilities"].["stop_zones"] <- System.Text.Json.Nodes.JsonNode.Parse("{\"mode\":\"additive\",\"priority\":100}")
-            jmkSource.["overrides"] <- System.Text.Json.Nodes.JsonNode.Parse("{\"routes\":\"\",\"trips\":\"\",\"stops\":\"\"}")
+            jmkSource.["capabilities"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"stop_coordinates\",\"boarding_points\",\"call_boarding_points\",\"route_short_name\",\"route_long_name\",\"route_color\",\"route_text_color\",\"transfers\",\"stop_zones\",\"schedules\"]")
+            jmkSource.["overrides"] <- System.Text.Json.Nodes.JsonNode.Parse("{\"stops\":\"\"}")
             write jmkPolicy (jmkJson.ToJsonString())
             let combinedPolicy = Path.Combine(root, "combined-policy.json")
-            write combinedPolicy ($"{{\"schema_version\":1,\"calibration\":true,\"publication_enabled\":false,\"conflict_policy\":\"equal_priority_quarantine\",\"minimum_coverage\":{{}},\"sources\":[{{\"source_id\":\"pid-gtfs\",\"policy\":\"{Path.GetFileName(pidPolicy)}\",\"adapter\":\"pid-v1\"}},{{\"source_id\":\"ids-jmk-gtfs\",\"policy\":\"{Path.GetFileName(jmkPolicy)}\",\"adapter\":\"ids-jmk-v1\"}}]}}")
+            write combinedPolicy ($"{{\"schema_version\":1,\"sources\":[{{\"source_id\":\"pid-gtfs\",\"policy\":\"{Path.GetFileName(pidPolicy)}\",\"adapter\":\"pid-v1\"}},{{\"source_id\":\"ids-jmk-gtfs\",\"policy\":\"{Path.GetFileName(jmkPolicy)}\",\"adapter\":\"ids-jmk-v1\"}}]}}")
 
             let pid: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = pidZip; descriptorPath = pidDescriptor }
             let jmk: SourceBinding = { sourceId = "ids-jmk-gtfs"; payloadPath = jmkZip; descriptorPath = jmkDescriptor }

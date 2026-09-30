@@ -173,7 +173,8 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
         let unresolved = groups |> Array.filter (stopMatching.stopGroupMatches.ContainsKey >> not)
         let unresolvedGroups = Array.distinct unresolved
         let policy = prepared.policy.source.stopMatch.contextualInference
-        if unresolvedGroups.Length <> policy.maximumUnresolvedGroupsPerTrip || calls.Length - unresolved.Length < policy.minimumMappedCalls then None
+        // Context can place exactly one unresolved stop group per trip.
+        if unresolvedGroups.Length <> 1 || calls.Length - unresolved.Length < policy.minimumMappedCalls then None
         else
             let group = unresolvedGroups.[0]
             let ordinals = calls |> Array.indexed |> Array.choose (fun (index, call) ->

@@ -26,14 +26,11 @@ open JrUtil.RegionalOverlay.GtfsFiles
 open JrUtil.RegionalOverlay.StopGroups
 
 
-let parseOverridePath policyPath configuredPath =
-    if String.IsNullOrWhiteSpace(configuredPath) then None
-    else
-        let path =
-            if Path.IsPathRooted(configuredPath) then configuredPath
-            else Path.Combine(Path.GetDirectoryName(Path.GetFullPath(policyPath)), configuredPath)
-        if not (File.Exists(path)) then invalidOp $"Configured override CSV does not exist: {path}"
-        Some path
+/// The combined policy names its stop override CSV by absolute path.
+let parseOverridePath path =
+    if String.IsNullOrWhiteSpace(path) then None
+    elif not (File.Exists(path)) then invalidOp $"Configured override CSV does not exist: {path}"
+    else Some path
 
 type OverrideBinding = {
     sourceNamespace: string
@@ -45,8 +42,8 @@ type OverrideBinding = {
     reviewNote: string
 }
 
-let loadOverrides policyPath configuredPath =
-    match parseOverridePath policyPath configuredPath with
+let loadOverrides configuredPath =
+    match parseOverridePath configuredPath with
     | None -> [||]
     | Some path ->
         csvRows (Path.GetDirectoryName(path)) (Path.GetFileName(path))
@@ -69,12 +66,7 @@ let loadOverrides policyPath configuredPath =
             })
         |> Seq.toArray
 
-let capability policy name =
-    match policy.source.capabilities.TryGetValue(name) with
-    | true, value -> value
-    | _ -> { mode = "disabled"; priority = 0 }
-
-let enabled policy name = (capability policy name).mode <> "disabled"
+let enabled policy name = policy.source.capabilities |> Array.contains name
 
 let datesOverlap (left: DateSet.Dates) right = left.Overlaps(right)
 
@@ -156,14 +148,13 @@ let descriptorRetrievedAtFromBase basePath =
         invalidOp "Base manifest does not pin source retrieved_at"
     DateTimeOffset.Parse(retrieved.GetString(), CultureInfo.InvariantCulture)
 
-let validateInputs policyPath basePath outputPath gvdYear (binding: SourceBinding) =
+let validateInputs basePath outputPath gvdYear (binding: SourceBinding) =
     if gvdYear < 2000 || gvdYear > 9999 then invalidArg "--gvd-year" "GVD year is invalid"
     if not (Directory.Exists(basePath)) then invalidArg "base-bundle" $"Base bundle does not exist: {basePath}"
     if not (File.Exists(Path.Combine(basePath, "gtfs.zip"))) then
         invalidArg "base-bundle" "Base bundle is not a production package (no gtfs.zip)"
     if Directory.Exists(outputPath) || File.Exists(outputPath) then
         invalidArg "output-bundle" "Output already exists; overlay bundles are immutable"
-    if not (File.Exists(policyPath)) then invalidArg "--policy" $"Policy does not exist: {policyPath}"
     if not (File.Exists(binding.payloadPath) || Directory.Exists(binding.payloadPath)) then
         invalidArg "--source" $"Source payload does not exist: {binding.payloadPath}"
     if not (File.Exists(binding.descriptorPath)) then

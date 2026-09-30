@@ -628,7 +628,6 @@ let private compile ({
             matches = matches
             temporary = temporary
             usedStopIds = usedStopIds
-            usedRouteIds = usedRouteIds
             usedOutputShapeIds = usedOutputShapeIds
             slicesForBinding = slicesForBinding
             transferProvenance = transferProvenance
@@ -637,63 +636,21 @@ let private compile ({
         let matchedSourceTripSet = reports.matchedSourceTripSet
         let activeSourceTrips = reports.activeSourceTrips
 
-        let manifestRouteCount = outputRouteRows.Length
-        let manifestTripCount = outputTripCount
-        let manifestStopCount = outputStopRows.Length
-        let manifestCallCount = writtenCallCount
-        let manifestServiceCount = projection.serviceDates.Count
-        let manifestShapeCount = usedOutputShapeIds.Count
-        let manifestTransferCount = transferRows.Count
-        let manifestMatchedTripCount = matchedSourceTripSet.Count
-        let manifestUnmatchedTripCount = activeSourceTrips.Length - manifestMatchedTripCount
-        let manifestAmbiguousTripCount =
-            matches.unresolvedPending
-            |> Seq.map (fun value -> value.sourceTripId)
-            |> Seq.filter (fullyCoveredSourceTrips.Contains >> not)
-            |> Seq.distinct
-            |> Seq.length
         let finalResult = {
             outputPath = prepared.outputBundle
-            matchedTrips = manifestMatchedTripCount
-            unmatchedTrips = manifestUnmatchedTripCount
-            ambiguousTrips = manifestAmbiguousTripCount
+            matchedTrips = matchedSourceTripSet.Count
+            unmatchedTrips = activeSourceTrips.Length - matchedSourceTripSet.Count
+            ambiguousTrips =
+                matches.unresolvedPending
+                |> Seq.map (fun value -> value.sourceTripId)
+                |> Seq.filter (fullyCoveredSourceTrips.Contains >> not)
+                |> Seq.distinct
+                |> Seq.length
             matchedStopGroups = source.stopGroupMatches.Count
             unmatchedStopGroups = source.stopGroups.Length - source.stopGroupMatches.Count
-            selectedShapes = manifestShapeCount
-            selectedTransfers = manifestTransferCount
+            selectedShapes = usedOutputShapeIds.Count
+            selectedTransfers = transferRows.Count
         }
-        let perSourceCounts =
-            let sourceIds =
-                source.tripRows
-                |> Seq.map (sourceIdentity prepared.binding.sourceId)
-                |> Seq.distinct
-                |> Seq.sort
-                |> Seq.toArray
-            sourceIds
-            |> Array.map (fun sourceId ->
-                let active = activeSourceTrips |> Array.filter (fun row -> sourceIdentity prepared.binding.sourceId row = sourceId)
-                let matched =
-                    matchedSourceTripSet
-                    |> Seq.filter (fun tripId -> source.tripsById.ContainsKey(tripId) && sourceIdentity prepared.binding.sourceId source.tripsById.[tripId] = sourceId)
-                    |> Seq.length
-                let ambiguous =
-                    matches.unresolvedPending
-                    |> Seq.map (fun value -> value.sourceTripId)
-                    |> Seq.filter (fun tripId -> source.tripsById.ContainsKey(tripId) && sourceIdentity prepared.binding.sourceId source.tripsById.[tripId] = sourceId)
-                    |> Seq.filter (fullyCoveredSourceTrips.Contains >> not)
-                    |> Seq.distinct
-                    |> Seq.length
-                let groups = source.stopGroups |> Array.filter (fun group -> sourceIdentity prepared.binding.sourceId group.members.[0] = sourceId)
-                let matchedGroups = groups |> Array.filter (fun group -> source.stopGroupMatches.ContainsKey(group.groupId)) |> Array.length
-                let item = Dictionary<string, obj>()
-                item.["source_id"] <- box sourceId
-                item.["matched_source_trips"] <- box matched
-                item.["unmatched_source_trips"] <- box (max 0 (active.Length - matched))
-                item.["ambiguous_source_trips"] <- box ambiguous
-                item.["matched_stop_groups"] <- box matchedGroups
-                item.["unmatched_stop_groups"] <- box (groups.Length - matchedGroups)
-                item.["selected_shapes"] <- box (projection.outputShapeBySource |> Seq.filter (fun pair -> pair.Key.StartsWith(sourceId + ":", StringComparison.Ordinal)) |> Seq.length)
-                item :> obj)
         projection.selectionByBinding.Clear()
         matches.bindings.Clear()
         source.stopInferenceEvidence.Clear()
@@ -709,63 +666,29 @@ let private compile ({
         let basePackage = prepared.baseBundle
         let policyOutput = Path.Combine(temporary, "policy")
         Directory.CreateDirectory(policyOutput) |> ignore
-        let multiSourceMetadataPath = Path.Combine(prepared.binding.payloadPath, "overlay_sources.json")
-        let isMultiSource = File.Exists(multiSourceMetadataPath)
-        if isMultiSource then
-            copyDirectory (Path.Combine(prepared.binding.payloadPath, "_overlay", "policies")) policyOutput
-        else
-            File.Copy(prepared.policyPath, Path.Combine(policyOutput, "overlay-policy.json"), false)
-        for configuredPath in [ prepared.policy.source.overrides.routes; prepared.policy.source.overrides.trips; prepared.policy.source.overrides.stops ] do
-            match parseOverridePath prepared.policyPath configuredPath with
-            | Some path -> File.Copy(path, Path.Combine(policyOutput, Path.GetFileName(path)), false)
-            | None -> ()
+        copyDirectory (Path.Combine(prepared.binding.payloadPath, "_overlay", "policies")) policyOutput
+        match parseOverridePath prepared.policy.source.overrides.stops with
+        | Some path -> File.Copy(path, Path.Combine(policyOutput, Path.GetFileName(path)), false)
+        | None -> ()
         let sourceMetadata = Path.Combine(temporary, "source-metadata")
-        Directory.CreateDirectory(sourceMetadata) |> ignore
-        if isMultiSource then
-            copyDirectory (Path.Combine(prepared.binding.payloadPath, "_overlay", "descriptors")) sourceMetadata
-        else
-            File.Copy(prepared.binding.descriptorPath, Path.Combine(sourceMetadata, prepared.binding.sourceId + "-descriptor.json"), false)
+        copyDirectory (Path.Combine(prepared.binding.payloadPath, "_overlay", "descriptors")) sourceMetadata
 
-        let counts = Dictionary<string, obj>()
-        counts.["routes"] <- box manifestRouteCount
-        counts.["trips"] <- box manifestTripCount
-        counts.["stops"] <- box manifestStopCount
-        counts.["calls"] <- box manifestCallCount
-        counts.["services"] <- box manifestServiceCount
-        counts.["shapes"] <- box manifestShapeCount
-        counts.["transfers"] <- box manifestTransferCount
-        counts.["matched_source_trips"] <- box manifestMatchedTripCount
-        counts.["unmatched_source_trips"] <- box manifestUnmatchedTripCount
-        counts.["ambiguous_source_trips"] <- box manifestAmbiguousTripCount
-        if isMultiSource then counts.["per_source"] <- box perSourceCounts
-        let sourceManifest = Dictionary<string, obj>()
-        sourceManifest.["source_id"] <- box prepared.binding.sourceId
-        sourceManifest.["payload_sha256"] <- box prepared.actualSourceHash
-        sourceManifest.["descriptor_sha256"] <- box (sha256File prepared.binding.descriptorPath)
-        sourceManifest.["retrieved_at"] <- box (prepared.descriptor.retrievedAt.ToString("O", CultureInfo.InvariantCulture))
         let gvd = Dictionary<string, obj>()
         gvd.["year"] <- box gvdYear
         gvd.["start_date"] <- box (dateString prepared.window.startDate)
         gvd.["end_date"] <- box (dateString prepared.window.endDate)
         let manifest = Dictionary<string, obj>()
         manifest.["bundle_format"] <- box "obehy-jrutil-regional-gtfs-overlay"
-        manifest.["bundle_version"] <- box (if isMultiSource then MultiSourceOverlayBundleVersion else OverlayBundleVersion)
-        manifest.["calibration"] <- box prepared.policy.calibration
+        manifest.["bundle_version"] <- box OverlayBundleVersion
         manifest.["audit_date"] <- box (dateString prepared.auditDate)
         manifest.["base_snapshot_date"] <- box (dateString prepared.snapshotDate)
-        manifest.["publishable"] <- box (prepared.policy.publicationEnabled && not prepared.policy.calibration)
         manifest.["base_manifest_sha256"] <- box (sha256File (Path.Combine(prepared.baseBundle, "manifest.json")) )
-        if isMultiSource then
-            use metadataDocument = JsonDocument.Parse(File.ReadAllText(multiSourceMetadataPath))
-            let metadataRoot = metadataDocument.RootElement
-            manifest.["sources"] <- box (JsonSerializer.Deserialize<obj>(metadataRoot.GetProperty("sources").GetRawText(), jsonOptions))
-            manifest.["policy_sha256"] <- box (metadataRoot.GetProperty("policy_sha256").GetString())
-        else
-            manifest.["source"] <- box sourceManifest
-            manifest.["policy_sha256"] <- box (sha256File prepared.policyPath)
+        use metadataDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(prepared.binding.payloadPath, "overlay_sources.json")))
+        let metadataRoot = metadataDocument.RootElement
+        manifest.["sources"] <- box (JsonSerializer.Deserialize<obj>(metadataRoot.GetProperty("sources").GetRawText(), jsonOptions))
+        manifest.["policy_sha256"] <- box (metadataRoot.GetProperty("policy_sha256").GetString())
         manifest.["gvd"] <- box gvd
         manifest.["conversion"] <- box (dict [ "tool", box "jrutil"; "version", box converterVersion ])
-        manifest.["counts"] <- box counts
 
         let tablesIn directory pattern =
             let root = Path.Combine(temporary, directory)
@@ -778,7 +701,6 @@ let private compile ({
         for directory, target in [ policyOutput, "inputs/policies"; sourceMetadata, "inputs/source-descriptors" ] do
             for path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories) do
                 diagnosticFiles.[target + "/" + Path.GetRelativePath(directory, path).Replace('\\', '/')] <- path
-        let diagnosticsPath = Path.Combine(temporary, "diagnostics.json")
         let json (text: string) =
             use document = JsonDocument.Parse(text)
             document.RootElement.Clone()
@@ -789,7 +711,7 @@ let private compile ({
             reports = tablesIn "reports" "*.csv"
             sidecars = JrUtil.Serving.CompilerOutput.noTables
             manifest = json (JsonSerializer.Serialize(manifest, jsonOptions))
-            diagnostics = if File.Exists(diagnosticsPath) then Some (json (File.ReadAllText(diagnosticsPath))) else None
+            diagnostics = None
             basePackage = Some basePackage
             diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> }
 

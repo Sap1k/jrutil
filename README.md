@@ -21,44 +21,27 @@ from a checksum-pinned regional GTFS snapshot. It never downloads a feed and
 never mutates either input. Output is first written to a sibling temporary
 directory and atomically activated as a new, self-contained bundle.
 
-The PID calibration profile is in
-`config/regional-gtfs-overlay/pid-overlay-v1.json`. It excludes heavy rail and
-hard-excludes `pathways.txt` and `levels.txt`; regional calendars and times are
-used as matching evidence, and uniquely matched complete call patterns inherit
-the regional arrival/departure values (including seconds) on shared dates. GVD
-2026 is explicitly clipped to 2025-12-14 through 2026-12-12.
+The command takes an overlay-all policy (schema v1) that names one or more
+sources, each with a source profile (policy schema v4) and an adapter
+(`pid-v1` or `ids-jmk-v1`). Oběhy's production policy is
+`src/obehy/data/regional-gtfs-overlay/pid-ids-jmk-production-v1.json`. Bind every
+declared source with its checksum-pinned archive, in any order. The sources are
+merged into one namespaced input and resolved in a single pass; the command
+does not chain independently produced overlays. Heavy rail is excluded and
+`pathways.txt` and `levels.txt` are never inherited; regional calendars and
+times are used as matching evidence, and uniquely matched complete call
+patterns inherit the regional arrival/departure values (including seconds) on
+shared dates. The GVD year clips the window (GVD 2026: 2025-12-14 through
+2026-12-12).
 
 ```text
-jrutil-multitool regional-gtfs-overlay \
-  --policy=config/regional-gtfs-overlay/pid-overlay-v1.json \
-  --gvd-year=2026 \
-  --converter-version=<fork-commit> \
-  --source=pid-gtfs=PID_GTFS.zip \
-  --source-descriptor=pid-gtfs=pid-snapshot.json \
-  national-jdf-package output-bundle
+jrutil-multitool regional-gtfs-overlay   --policy=pid-ids-jmk-production-v1.json   --gvd-year=2026   --converter-version=<fork-commit>   --source=pid-gtfs=PID_GTFS.zip   --source-descriptor=pid-gtfs=pid-snapshot.json   --source=ids-jmk-gtfs=IDSJMK_GTFS.zip   --source-descriptor=ids-jmk-gtfs=ids-jmk-snapshot.json   national-jdf-package output-bundle
 ```
 
 The descriptor must contain `retrieved_at` and the source ZIP's lowercase
-`payload_sha256`. Reviewed override CSVs are validity-bounded and require
+`payload_sha256`. Reviewed stop override CSVs are validity-bounded and require
 source/target namespaces, IDs, validity dates, and a review note. An empty CSV
 with only the supplied header is valid.
-
-For the non-publishable PID + IDS JMK calibration, use the versioned
-`pid-ids-jmk-overlay-v1.json` policy and bind both checksum-pinned archives in
-any order. The base is prepared once and both feeds are resolved in one pass;
-the command does not chain independently produced overlays.
-
-```text
-jrutil-multitool regional-gtfs-overlay \
-  --policy=config/regional-gtfs-overlay/pid-ids-jmk-overlay-v1.json \
-  --gvd-year=2026 \
-  --converter-version=<fork-commit> \
-  --source=pid-gtfs=PID_GTFS.zip \
-  --source-descriptor=pid-gtfs=pid-snapshot.json \
-  --source=ids-jmk-gtfs=IDSJMK_GTFS.zip \
-  --source-descriptor=ids-jmk-gtfs=ids-jmk-snapshot.json \
-  national-jdf-package output-bundle
-```
 
 JrUtil performs no download. Pin the official IDS JMK `gtfs.zip` separately,
 record its hash in the descriptor, and keep `api.txt` in the archive. The
@@ -78,7 +61,7 @@ To reconcile verbose IDS JMK names with abbreviated JDF names, its profile also
 allows a coordinate-only identity within 25 m when the next candidate is at
 least 10 m farther away; nearby urban stops without that margin stay quarantined.
 
-Policy schema v3 retains v2's iterative one-gap stop inference, nearest-schedule
+Source profiles keep iterative one-gap stop inference, nearest-schedule
 ranking for exact stop patterns, bounded ordered-pattern edits, and
 capability-specific minimum match tiers. Equal-score candidates are expanded
 only when they share a stable CIS line identity and have an identical complete
@@ -110,7 +93,7 @@ JDF-specific trip/call evidence for the imported objects.
 Coverage reports distinguish all active source trips, shared-date and
 pattern-compatible populations, target-available candidates, and national
 snapshot/capacity gaps, so an older or less frequent national snapshot cannot
-make the calibration percentage misleading.
+make a coverage percentage misleading.
 
 The coverage audit date is the CIS snapshot retrieval date in
 Europe/Prague. `reports/snapshot_day_coverage.csv` separates that day's service
@@ -130,9 +113,7 @@ yield to full source trip projection on authoritative dates.
 
 The production package contains `gtfs.zip`, the declared serving Parquet
 relations, `manifest.json`, and bounded `diagnostics.json`. Detailed matching evidence is written only to an explicitly
-requested diagnostics artifact. The checked-in PID v1 policy is deliberately a non-publishable
-calibration policy. Publication requires a reviewed policy-only update which
-sets coverage floors and enables publication.
+requested diagnostics artifact. Coverage is reported, never gated.
 
 ### Overlay implementation and feed profiles
 
@@ -163,36 +144,24 @@ source representation on authoritative dates. Contextual stop inference and targ
 availability resolve each round's proposals together before applying them.
 
 Report and mapping row order is deterministic but is not a semantic contract.
-To compare pinned runs, use `scripts/verify_regional_overlay.py BASELINE OUTPUT`:
-it checks both manifests independently, requires unchanged transit/evidence bytes,
-and compares changed report, mapping and provenance files as exact row multisets.
-The offline verifier uses Python's built-in SQLite to bound its own memory; the
-overlay has no database dependency.
 
-The compiled runner in `scripts/overlay-profile/` samples
-working set, private memory, managed heap, allocations and scratch use every 100 ms,
-with named stages inside writing. Pass policy, GVD year, source ID, payload,
-descriptor, base bundle, output bundle and an explicit `YYYYMMDD` audit date.
-Build it with `dotnet build scripts/overlay-profile/overlay-profile.fsproj`, then
-run its generated executable. It writes `.memory.csv` and `.summary.json` beside
-the output. Run measurements
-without concurrent builds or audits; heap collection itself perturbs the process.
-
-Schema-v3 profiles may omit `source.route_join` and
-`source.trip_match.source_revision`. An omitted join provides no companion CIS
-assertions. Reviewed overrides and structural matching remain available; a
+Profiles may omit `source.route_join`. A configured join (PID:
+`route_sub_agencies.txt`) supplies companion CIS line assertions and requires
+its table; an omitted join provides none. Revision dates come from the adapter:
+`pid-v1` reads a `_YYMMDD` suffix of the trip ID (unparseable IDs date
+700101), other adapters leave revisions equal. Reviewed stop overrides and
+structural matching remain available; a
 unique structural route/date proof can authorize a complete source trip set,
 while configured road/local modes can import unmatched service under
 deterministic source-namespaced IDs. A configured join must name `cis_line_id`
 as its target namespace,
 provide equally sized non-empty source/lookup key arrays, and supply its table.
-An omitted revision extractor provides no recency ordering; conflicting claims
-remain quarantined. Configured but unparseable revisions retain the existing
-oldest-revision treatment and diagnostic.
+Equal revisions provide no recency ordering; conflicting claims remain
+quarantined.
 
-Stop grouping first uses standard `parent_station`, then the configured group
-column, then the individual stop ID. Group/post columns can be omitted; posts
-fall back to their source stop IDs. These defaults allow ordinary GTFS snapshots
+Stop grouping comes from the adapter: `pid-v1` groups by `asw_node_id`, then
+`parent_station`, then the stop ID, with `asw_stop_id` as the post; `ids-jmk-v1`
+groups by `parent_station`, then the stop ID. These defaults allow ordinary GTFS snapshots
 without PID-specific columns. IDS JMK has a supplied adapter/profile. IDZK is
 intentionally out of scope because its feed lacks the required boarding-post
 hierarchy.
@@ -203,20 +172,17 @@ survives. Missing facts are neutral, so a PID shape can coexist with an identica
 JMK schedule. Equivalent source-native trips and strongly equivalent boarding
 points (same resolved place and nonblank platform code) are structurally
 deduplicated. Matching-tier arrays enable existing tiers;
-route precedence remains companion assertion, reviewed override, then structural
-evidence. `require_unique_best` and `require_equal_call_count` retain their
-existing fixed behavior: uniqueness and equal-call-count contextual inference
-are always enforced. `never_inherit` must include pathways and levels; this is
-not a general-purpose table filter. Disabled name, agency, calendar and
-trip-display inheritance applies to enrichment of retained national objects. Complete authoritative/source-native
+route precedence is companion assertion, then structural evidence. Uniqueness
+and equal-call-count contextual inference are always enforced. `capabilities`
+lists what a source may supply; stop names, agencies, calendars and trip
+displays are never inherited into retained national objects. Complete authoritative/source-native
 projections have their existing construction rules, including source agencies,
 calendars and displays; approximate national stops also retain their explicitly
 supported correction behavior.
 
-IDs, report schemas and machine-readable values are stable. A combined overlay
-records every source in the manifest `sources` array with per-source and
-aggregate counts, source payload/descriptor hashes, and the combined policy
-hash.
+IDs, report schemas and machine-readable values are stable. The overlay
+records every source in the manifest `sources` array with its payload/descriptor
+hashes, and the combined policy hash.
 In particular, `pid_name_and_coordinates` and `pid_native` in the stop-match
 report are legacy classification labels even for another source. Consult the
 source identity and provenance rather than interpreting these values as feed IDs.
@@ -403,7 +369,7 @@ dotnet run --project jrutil-multitool -- \
   --snapshot-descriptor=snapshot.json \
   --converter-version=<fork-commit> \
   --routing-osm-pbf=jdf-transit-routing-demand.osm.pbf \
-  [--diagnostic-post-labels] \
+  [--post-inference-policy=learned-v1.json] \
   JDF-input bundle-output
 ```
 
@@ -427,21 +393,17 @@ scope, zones, notices, connection claims, restrictions, and source
 provenance. The private source metadata used to build them is not a published
 consumer interface.
 
-Estimated posts are disabled by default unless `--routing-osm-pbf` or
-`--post-inference-evidence` is supplied.
+Estimated posts are disabled by default unless `--routing-osm-pbf` is supplied.
 The input must be the Osmium-prepared demand clip and have its matching
 `.manifest.json` sidecar. `--no-estimated-posts` remains the complete rollback
-path. Diagnostic `O1`/`O-N`/`?` platform codes are independently default-off.
+path.
 
-Expensive directed routing can be captured once and replayed without opening
-OSM or running A*:
+For retraining, directed routing can be captured once into a policy-neutral
+evidence pack without writing a bundle:
 
 ```text
 jdf-to-bundle --routing-osm-pbf=clip.osm.pbf \
   --capture-post-inference-evidence=evidence --post-inference-evidence-only ...
-
-jdf-to-bundle --post-inference-evidence=evidence \
-  --post-inference-policy=policy.json ...
 ```
 
 Evidence v2 contains `observations.parquet`, `route_points.parquet`,
@@ -466,8 +428,8 @@ full capture. `--capture-exclude-source=PREFIX[,PREFIX…]` drops observations
 whose source object ID starts with a prefix (e.g. `external:PID.csv:`), so a
 training pack cannot contain the catalogue its labels come from. Restrictions
 are appended to the capture-tool version (`<version>+region:…+exclude-source:…`)
-and therefore to the pack ID. Such packs feed `jdf-export-post-features` for review and training, but
-`jdf-to-bundle --post-inference-evidence` rejects them. `--export-post-context-calls=FILE` additionally writes every usable
+and therefore to the pack ID. Such packs feed `jdf-export-post-features` for review and training.
+`--export-post-context-calls=FILE` additionally writes every usable
 road/tram call in the region with its evidence `context_id`, GTFS trip ID and
 per-stop occurrence, for joining external call mappings.
 
@@ -479,11 +441,9 @@ Its disk preflight is derived from the canonical deduplicated route-pattern
 plan, not from the number of timetable calls. The upper bound includes every
 captured relation, and atomic publication requires one temporary pack plus a
 fixed safety reserve because activation is a same-volume directory rename.
-Evidence-backed bundle generation rejects a different input snapshot before
-conversion and performs no graph construction or routing searches. Live and
-replay conversion invoke the same v2 evaluator; the live path first creates a
-temporary evidence store and reopens it through the same validated trust
-boundary as replay. Validation covers exact Arrow types/nullability and
+Live conversion writes a temporary evidence store and reopens it through the
+same validated trust boundary that feature export uses, so one evaluator serves
+both. Validation covers exact Arrow types/nullability and
 metadata, canonical ordering, key/foreign-key integrity, context/block/family
 identity, corridor ranks and costs, unavailable sentinels, finite numeric facts,
 and complete route-point attachment coverage. Policy v2 owns consolidation, hard gates, geometry,

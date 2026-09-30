@@ -76,7 +76,6 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
     let dateSets = DateSet.Pool()
     let tierRanks = prepared.policy.source.tripMatchTiers |> Array.mapi (fun i tier -> tier, i) |> dict
     let tierEnabled tier = tierRanks.ContainsKey(tier)
-    let tripOverridesBySource = prepared.tripOverrides |> Array.groupBy (fun value -> value.sourceId) |> dict
     let bindings = ResizeArray<MatchBinding>()
     let candidateScoreReports = new Scratch.RowLog(prepared.scratch)
     let addCandidateScore (value: CandidateScoreReport) =
@@ -170,36 +169,6 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
                 let primaryMatches = primaryMatchTrips |> Array.choose matchingCandidate
                 let structuralMatches = structuralMatchTrips |> Array.choose matchingCandidate
                 let signatureCandidates = Array.append primaryMatches structuralMatches
-                let reviewedCandidates =
-                    match tripOverridesBySource.TryGetValue(sourceTripId) with
-                    | true, values when tierEnabled "reviewed_override" ->
-                        values
-                        |> Array.filter (fun value -> prepared.baseTrips.ContainsKey(value.targetId))
-                        |> Array.choose (fun value ->
-                            match indexes.baseSignatures.TryGetValue(value.targetId) with
-                            | true, target ->
-                                let alignment =
-                                    if calls.Length = target.pattern.Length then alignmentForLength target.pattern.Length
-                                    else patternEditAlignment prepared.policy.source.tripMatch.patternEdit sourceStopPattern target.pattern |> Option.map snd |> Option.defaultValue [||]
-                                let firstDelta, aggregateDelta, durationDelta, maximumDelta, squaredDelta, alignedCalls =
-                                    candidateTimeScore sourceArrivals sourceDepartures target alignment
-                                Some (value.validFrom, value.validTo, {
-                                    tripId = value.targetId
-                                    tier = "reviewed_override"
-                                    sourceOrdinalByTarget = alignment
-                                    editCount = if calls.Length = target.pattern.Length then 0 else abs (calls.Length - target.pattern.Length)
-                                    alignedCallCount = alignedCalls
-                                    firstDepartureDelta = firstDelta
-                                    aggregateTimeDelta = aggregateDelta
-                                    durationDelta = durationDelta
-                                    maximumTimeDelta = maximumDelta
-                                    squaredTimeDelta = squaredDelta
-                                })
-                            | _ -> None)
-                    | _ -> [||]
-                let reviewedForDate date =
-                    reviewedCandidates |> Array.choose (fun (first, last, candidate) ->
-                        if first <= date && last >= date then Some candidate else None)
                 let assignments = Dictionary<string, CandidateMatch * string * bool array * int64 option>(StringComparer.Ordinal)
                 let mutable sourceHadMatch = false
                 let mutable sourceHadSharedCandidate = false
@@ -218,10 +187,7 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
                         if primaryActive.Length > 0 || structuralActive.Length > 0 then sourceHadSharedCandidate <- true
                         let routeMethod, candidates =
                             if primaryActive.Length > 0 then primaryRouteMethod, primaryActive
-                            elif structuralActive.Length > 0 then "structural_trip_evidence", structuralActive
-                            else
-                                let reviewed = reviewedForDate prepared.window.dates.[dateIndex] |> active
-                                "reviewed_override", reviewed
+                            else "structural_trip_evidence", structuralActive
                         if candidates.Length > 0 then sourceHadCompatibleCandidate <- true
                         match chooseCandidates tierRank indexes.candidateEquivalenceKey candidates with
                         | Accepted(acceptedBest, runnerMargin) ->
