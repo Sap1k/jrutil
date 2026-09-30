@@ -25,40 +25,6 @@ let markApproximateStopName (name: string) =
     if name.EndsWith(suffix, StringComparison.Ordinal) then name
     else name + suffix
 
-let gtfsStandardTablesExceptStopTimesToFolder () =
-    // This is an attempt at speeding serialization up. In the end it didn't do
-    // much, but this should be faster so I'm leaving it like this
-    let agencySerializer = getRowsSerializerWriter<Agency>
-    let stopSerializer = getRowsSerializerWriter<Stop>
-    let routeSerializer = getRowsSerializerWriter<Route>
-    let tripSerializer = getRowsSerializerWriter<Trip>
-    let calendarEntrySerializer = getRowsSerializerWriter<CalendarEntry>
-    let calendarExceptionSerializer = getRowsSerializerWriter<CalendarException>
-    let feedInfoSerializer = getRowsSerializerWriter<FeedInfo>
-    let transferSerializer = getRowsSerializerWriter<Transfer>
-    let shapeSerializer = getRowsSerializerWriter<ShapePoint>
-    fun path feed ->
-        Directory.CreateDirectory(path) |> ignore
-        let serializeTo name ser obj =
-            let filePath = Path.Combine(path, name)
-            use file = File.Open(filePath, FileMode.Create)
-            ser file obj
-        let serializeToOpt name ser obj =
-            obj |> Option.iter (fun o -> serializeTo name ser o)
-        serializeTo "agency.txt" agencySerializer feed.agencies
-        serializeTo "stops.txt" stopSerializer feed.stops
-        serializeTo "routes.txt" routeSerializer feed.routes
-        serializeTo "trips.txt" tripSerializer feed.trips
-        serializeToOpt "shapes.txt" shapeSerializer feed.shapes
-        serializeToOpt "calendar.txt" calendarEntrySerializer feed.calendar
-        serializeToOpt "calendar_dates.txt"
-                       calendarExceptionSerializer
-                       feed.calendarExceptions
-        serializeToOpt "transfers.txt" transferSerializer feed.transfers
-        match feed.feedInfo with
-        | Some fi -> serializeTo "feed_info.txt" feedInfoSerializer [fi]
-        | _ -> ()
-
 let gtfsStopTimesToFolder () =
     fun path stopTimes ->
         Directory.CreateDirectory(path) |> ignore
@@ -66,42 +32,8 @@ let gtfsStopTimesToFolder () =
         use file = File.Open(filePath, FileMode.Create)
         writeStandardStopTimes file stopTimes
 
-let gtfsStandardTablesToFolder () =
-    let standardSerializer = gtfsStandardTablesExceptStopTimesToFolder ()
-    let stopTimeSerializer = gtfsStopTimesToFolder ()
-    fun path feed ->
-        standardSerializer path feed
-        stopTimeSerializer path feed.stopTimes
-
-let gtfsExtensionsToFolder () =
-    let czRouteSerializer = getRowsSerializerWriter<CzRoute>
-    let czTripSerializer = getRowsSerializerWriter<CzTrip>
-    let czStopSerializer = getRowsSerializerWriter<CzStop>
-    let czStopZoneSerializer = getRowsSerializerWriter<CzStopZone>
-    let czTripStopZoneSerializer = getRowsSerializerWriter<CzTripStopZone>
-    fun path feed ->
-        Directory.CreateDirectory(path) |> ignore
-        let serializeToOpt name ser obj =
-            obj |> Option.iter (fun rows ->
-                let filePath = Path.Combine(path, name)
-                use file = File.Open(filePath, FileMode.Create)
-                ser file rows)
-        serializeToOpt "cz_routes.txt" czRouteSerializer feed.czRoutes
-        serializeToOpt "cz_trips.txt" czTripSerializer feed.czTrips
-        serializeToOpt "cz_stops.txt" czStopSerializer feed.czStops
-        serializeToOpt "cz_stop_zones.txt" czStopZoneSerializer feed.czStopZones
-        serializeToOpt "cz_trip_stop_zones.txt" czTripStopZoneSerializer feed.czTripStopZones
-
-let gtfsFeedToFolder () =
-    let standardSerializer = gtfsStandardTablesToFolder ()
-    let extensionSerializer = gtfsExtensionsToFolder ()
-    fun path feed ->
-        standardSerializer path feed
-        extensionSerializer path feed
-
 /// The feed's standard and Czech tables as in-memory text tables
-/// (file name, header, replayable rows), with exactly the cell text the folder
-/// serializers write. Czech tables are compiler-internal.
+/// (file name, header, replayable rows). Czech tables are compiler-internal.
 let feedTables (feed: GtfsFeed) =
     let table name (formatter: string array * ('r -> string array)) (rows: 'r seq) =
         let header, cells = formatter

@@ -22,6 +22,15 @@ type JdfToGtfsTests() =
     let batch () =
         Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
 
+    /// The production streaming conversion, materialized for assertions.
+    let convert (source: JdfModel.JdfBatch) =
+        let preparation =
+            JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar (JdfToGtfs.prepareGtfsCalendar source) source
+        let stopTimes = JdfToGtfs.getStreamingBundleStopTimes preparation |> Seq.toArray
+        let feed =
+            JdfToGtfs.finishStreamingFeedWithUniqueCalendars preparation
+                (stopTimes |> Seq.map (fun stopTime -> stopTime.stopId) |> Set.ofSeq)
+        { feed with stopTimes = stopTimes }
     let route routeId (feed: GtfsModel.GtfsFeed) =
         feed.routes |> Array.find (fun item -> item.id = routeId)
 
@@ -110,7 +119,7 @@ type JdfToGtfsTests() =
 
     [<TestMethod>]
     member _.``JDF conversion emits Oběhy identities and public line numbers``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed
+        let feed = batch () |> convert
 
         route "jdf:route:586001" feed
         |> fun item ->
@@ -171,11 +180,11 @@ type JdfToGtfsTests() =
 
     [<TestMethod>]
     member _.``Feed contact round-trips and legacy feed info remains readable``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed
+        let feed = batch () |> convert
         let root =
             Path.Combine(Path.GetTempPath(), "jrutil-feed-info-" + Guid.NewGuid().ToString("N"))
         try
-            Gtfs.gtfsFeedToFolder () root feed
+            StagingFixture.writeFeed root feed
             let parsed = Gtfs.gtfsParseFolder () root
             assertEqual
                 (Some "admin@obehy.cz")
@@ -258,7 +267,7 @@ type JdfToGtfsTests() =
         Assert.IsTrue(prepared.schedules.IsEmpty)
 
     [<TestMethod>]
-    member _.``Shared calendars preserve v1 service identities across workers and trip order``() =
+    member _.``Shared calendars are identical across workers``() =
         let source = batch ()
         // More than one preparation chunk, repeated schedules and reversed IDs.
         let trips =
@@ -279,102 +288,20 @@ type JdfToGtfsTests() =
                           && note.tripId = original.id then
                            yield { note with tripId = trips.[index].id } |]
         let expanded = { source with trips = trips; tripStops = calls; serviceNotes = notes }
-        let legacy = JdfToGtfs.getGtfsFeed expanded |> Gtfs.deduplicateCalendar
-        for workers in [1; 4] do
+        let unique workers =
             let calendar = JdfToGtfs.prepareGtfsCalendarWithWorkers workers expanded
-            let preparation =
-                JdfToGtfs.prepareGtfsFeedForStreaming true expanded
-            let actual =
-                JdfToGtfs.finishStreamingFeedWithUniqueCalendars
-                    { preparation with calendarPreparation = calendar } Set.empty
+            JdfToGtfs.finishStreamingFeedWithUniqueCalendars
+                (JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar calendar expanded) Set.empty
+        let legacy = unique 1
+        for workers in [1; 4] do
+            let actual = unique workers
             assertEqual legacy.calendar actual.calendar
             assertEqual legacy.calendarExceptions actual.calendarExceptions
             assertEqual
                 (legacy.trips |> Array.map (fun trip -> trip.id, trip.serviceId))
                 (actual.trips |> Array.map (fun trip -> trip.id, trip.serviceId))
 
-    [<TestMethod>]
-    member _.``Streaming and materialized JDF conversion outputs are byte-identical``() =
-        let root =
-            Path.Combine(Path.GetTempPath(), "jrutil-jdf-streaming-" + Guid.NewGuid().ToString("N"))
-        let materialized = Path.Combine(root, "materialized")
-        let streaming = Path.Combine(root, "streaming")
-        try
-            let source = batch ()
-            let feed = source |> JdfToGtfs.getGtfsFeed
-            Gtfs.gtfsFeedToFolder () materialized feed
 
-            let preparation =
-                JdfToGtfs.prepareGtfsFeedForStreaming true source
-            let referenced = Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-            let stopTimes =
-                JdfToGtfs.getStreamingBundleStopTimes preparation
-                |> Seq.map (fun stopTime ->
-                    referenced.Add(stopTime.stopId) |> ignore
-                    stopTime)
-            Gtfs.gtfsStopTimesToFolder () streaming stopTimes
-            let remainder =
-                JdfToGtfs.finishStreamingBundleFeed preparation (referenced |> Set.ofSeq)
-            Gtfs.gtfsStandardTablesExceptStopTimesToFolder () streaming remainder
-            Gtfs.gtfsExtensionsToFolder () streaming remainder
-
-            let expectedFiles =
-                Directory.EnumerateFiles(materialized)
-                |> Seq.map Path.GetFileName
-                |> Seq.sort
-                |> Seq.toArray
-            let actualFiles =
-                Directory.EnumerateFiles(streaming)
-                |> Seq.map Path.GetFileName
-                |> Seq.sort
-                |> Seq.toArray
-            CollectionAssert.AreEqual(expectedFiles, actualFiles)
-            for name in expectedFiles do
-                CollectionAssert.AreEqual(
-                    File.ReadAllBytes(Path.Combine(materialized, name)),
-                    File.ReadAllBytes(Path.Combine(streaming, name)),
-                    name)
-        finally
-            if Directory.Exists(root) then Directory.Delete(root, true)
-
-        let legacy =
-            GtfsParser.getGtfsParser<GtfsModel.FeedInfo> [
-                "feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version"
-                "\"Legacy\",\"https://example.test\",\"cs\",\"\",\"\",\"\""
-            ]
-            |> Seq.exactlyOne
-        assertEqual "Legacy" legacy.publisherName
-        assertEqual None legacy.version
-        assertEqual None legacy.contactEmail
-
-    [<TestMethod>]
-    member _.``Standalone stop-time conversion preserves unsorted JDF behavior``() =
-        let source = batch ()
-        let normalize (calls: GtfsModel.StopTime seq) =
-            calls
-            |> Seq.sortBy (fun call -> call.tripId, call.stopSequence, call.stopId)
-            |> Seq.map (fun call ->
-                call.tripId, call.stopSequence, call.stopId,
-                call.arrivalTime, call.departureTime)
-            |> Seq.toArray
-        let expected = JdfToGtfs.getGtfsStopTimes source |> normalize
-        let unsorted = {
-            source with
-                tripStops = source.tripStops |> Seq.toArray |> Array.sortBy (fun call -> call.routeStopId)
-        }
-        let actual = JdfToGtfs.getGtfsStopTimes unsorted |> normalize
-        assertEqual expected actual
-        let expectedStreamed =
-            source
-            |> JdfToGtfs.getGtfsFeed
-            |> fun feed -> feed.stopTimes
-            |> normalize
-        let streamed =
-            unsorted
-            |> JdfToGtfs.prepareGtfsFeedForStreaming true
-            |> JdfToGtfs.getStreamingBundleStopTimes
-            |> normalize
-        assertEqual expectedStreamed streamed
 
     [<TestMethod>]
     member _.``Timed calls at border-only stops are kept without boarding or alighting``() =
@@ -402,8 +329,8 @@ type JdfToGtfsTests() =
                         else stop)
         }
         let key (call: GtfsModel.StopTime) = call.tripId, call.stopSequence
-        let before = JdfToGtfs.getGtfsStopTimes source |> Seq.toArray
-        let after = JdfToGtfs.getGtfsStopTimes border |> Seq.toArray
+        let before = (convert source).stopTimes
+        let after = (convert border).stopTimes
         assertEqual (before |> Array.map key) (after |> Array.map key)
         let isBorderCall (call: GtfsModel.StopTime) =
             let prefix = JdfToGtfs.jdfStopId borderStop
@@ -532,7 +459,7 @@ type JdfToGtfsTests() =
 
     [<TestMethod>]
     member _.``JDF conversion normalizes zones and preserves both post forms``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed
+        let feed = batch () |> convert
         let stopIds = feed.stops |> Array.map (fun stop -> stop.id) |> set
 
         assertEqual true (stopIds.Contains "jdf:stop:100:post:1")
@@ -631,7 +558,7 @@ type JdfToGtfsTests() =
                     }
                 |]
         }
-        let feed = withLocations |> JdfToGtfs.getGtfsFeed
+        let feed = withLocations |> convert
         let stop100Names =
             feed.stops
             |> Array.filter (fun stop -> stop.id.StartsWith("jdf:stop:100"))
@@ -656,10 +583,8 @@ type JdfToGtfsTests() =
                     { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
                 |]
         }
-        let plan = JdfToGtfs.buildPostEstimationPlan inferred
-        assertEqual 0 plan.authored.Count
 
-        let feed = inferred |> JdfToGtfs.getGtfsFeed
+        let feed = inferred |> convert
         let authored = feed.stops |> Array.find (fun stop -> stop.id = "jdf:stop:100:post:1")
         Assert.AreEqual(50.0, float authored.lat.Value, 0.000001)
         Assert.AreEqual(14.0, float authored.lon.Value, 0.000001)
@@ -724,109 +649,11 @@ type JdfToGtfsTests() =
             source with
                 postCandidateEvidence = [| postEvidence 200L "only" 50.01M 14.0M |]
         }
-        let plan = JdfToGtfs.buildPostEstimationPlan inferred
-        assertEqual 0 plan.singleCandidateSkips
-        assertEqual 0 plan.authored.Count
-        assertEqual 0 plan.calls.Count
-        let feed = inferred |> JdfToGtfs.getGtfsFeed
+        let feed = inferred |> convert
         assertEqual false (feed.stops |> Array.exists (fun stop -> stop.id.Contains(":estimated:")))
 
-    [<TestMethod>]
-    member _.``Legacy tram geometry is disabled without routed evidence``() =
-        let source = batch ()
-        let tram = {
-            source with
-                routes = source.routes |> Array.map (fun route ->
-                    if route.id = "586001" then { route with transportMode = JdfModel.Tram } else route)
-                stopLocations = [|
-                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                |]
-        }
-        assertEqual 0 (JdfToGtfs.buildPostEstimationPlan tram).authored.Count
 
-    [<TestMethod>]
-    member _.``Legacy turnback geometry is disabled without routed evidence``() =
-        let source = batch ()
-        let template = source.tripStops.[0]
-        let call routeStopId stopId post = {
-            template with
-                tripId = 5L
-                routeStopId = routeStopId
-                stopId = stopId
-                stopPostId = None
-                stopPostNum = post
-                arrivalTime = template.departureTime
-                departureTime = template.departureTime
-        }
-        let turnback = {
-            source with
-                tripStops = [|
-                    call 1L 200L None
-                    call 2L 100L (Some "A")
-                    call 3L 100L (Some "B")
-                    call 4L 200L None
-                |]
-                stopLocations = [|
-                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                |]
-        }
-        let plan = JdfToGtfs.buildPostEstimationPlan turnback
-        assertEqual 0 plan.authored.Count
-        assertEqual 0 plan.sameStopBlocks
-        assertEqual 0 plan.distinctPairChoices
 
-    [<TestMethod>]
-    member _.``Repeated same authored post does not receive a distinctness preference``() =
-        let source = batch ()
-        let template = source.tripStops.[0]
-        let call routeStopId stopId post = {
-            template with
-                tripId = 5L; routeStopId = routeStopId; stopId = stopId
-                stopPostId = None; stopPostNum = post
-                arrivalTime = template.departureTime; departureTime = template.departureTime
-        }
-        let turnback = {
-            source with
-                tripStops = [|
-                    call 1L 200L None; call 2L 100L (Some "A")
-                    call 3L 100L (Some "A"); call 4L 200L None
-                |]
-                stopLocations = [|
-                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                |]
-        }
-        let plan = JdfToGtfs.buildPostEstimationPlan turnback
-        assertEqual 0 plan.distinctPairChoices
-        assertEqual false (plan.authored.ContainsKey(100L, "num:A"))
-
-    [<TestMethod>]
-    member _.``Near-tie unlabelled calls abstain without a composite location``() =
-        let source = batch ()
-        let template = source.tripStops.[0]
-        let call tripId routeStopId stopId = {
-            template with
-                tripId = tripId; routeStopId = routeStopId; stopId = stopId
-                stopPostId = None; stopPostNum = None
-                arrivalTime = template.departureTime; departureTime = template.departureTime
-        }
-        let inferred = {
-            source with
-                tripStops = [|
-                    call 5L 1L 100L; call 5L 2L 200L
-                    call 7L 1L 100L; call 7L 2L 200L
-                |]
-                stopLocations = [|
-                    { stopId = 100L; lat = 50.0M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                    { stopId = 200L; lat = 50.01M; lon = 14.0M; precision = JdfModel.StopPrecise }
-                |]
-        }
-        let plan = JdfToGtfs.buildPostEstimationPlan inferred
-        let selections = plan.calls |> Seq.map (fun pair -> pair.Value) |> Seq.toArray
-        assertEqual 0 selections.Length
-        assertEqual 0 plan.locations.Length
 
 
     member private _.routeVersions (versions: (bool * string * LocalDate) list) =

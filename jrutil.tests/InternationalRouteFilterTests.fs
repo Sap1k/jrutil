@@ -258,8 +258,7 @@ type InternationalRouteFilterTests() =
   "payload_bytes": {FileInfo(zipPath).Length}
 }}"""
             File.WriteAllText(descriptorPath, descriptor)
-            JrUtil.JdfBundle.writeBundleWithPolicy
-                descriptorPath "test-commit" RegionalAdjacent zipPath output
+            JrUtil.JdfBundle.execute { JrUtil.JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit"; internationalPolicy=RegionalAdjacent } zipPath output |> ignore
 
             let gtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView output (Path.Combine(root, "compiler-view"))
             assertEqual 1 (File.ReadAllLines(Path.Combine(gtfs, "routes.txt")).Length)

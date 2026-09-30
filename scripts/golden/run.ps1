@@ -144,7 +144,7 @@ function Get-StageArguments([string] $Stage, [string] $Target) {
                       "--source=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs.zip", "--source-descriptor=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs-descriptor.json",
                       "--diagnostics-out=$Target-diagnostics") + $common + @("$out/bundle", $Target) }
         "czptt" { @("czptt-to-bundle", "--catalog-snapshot=$czptt/sources/kadr/catalog.json", "--operational-points=sidecar",
-                    "--sr70=$czptt/sources/sr70/SR70.csv", "--sr70-name20=$czptt/sources/sr70/SR70_Nazev20.csv",
+                    "--sr70=$czptt/sources/sr70/SR70.csv",
                     "--osm-pbf=$inputs/osm/railway-locations.osm.pbf", "--osm-aliases=$config/czptt_osm_aliases.json",
                     "--diagnostics-out=$Target-diagnostics") + $common + @("$czptt/derived/messages.zip", $Target) }
         default { throw "Unknown stage $Stage" }

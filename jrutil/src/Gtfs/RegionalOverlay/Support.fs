@@ -68,12 +68,6 @@ let parseInt (value: string) =
     | true, result -> result
     | _ -> invalidOp $"Invalid integer value: {value}"
 
-let parseInt64Opt (value: string) =
-    match Int64.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-    | true, result -> Some result
-    | _ when String.IsNullOrWhiteSpace(value) -> None
-    | _ -> invalidOp $"Invalid integer value: {value}"
-
 let parseDecimalOpt (value: string) =
     match Decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture) with
     | true, result -> Some result
@@ -273,9 +267,6 @@ let requireTable archivePath fileName =
     if rows.Length = 0 then invalidOp $"Required GTFS table is empty or missing: {fileName}"
     rows
 
-let optionalTable archivePath fileName =
-    csvRows archivePath fileName |> Seq.toArray
-
 let readDescriptor (path: string) =
     use document = JsonDocument.Parse(File.ReadAllText(path))
     let root = document.RootElement
@@ -324,13 +315,6 @@ let parseCalendar (window: DateWindow) (calendarRows: CsvRow seq) (exceptionRows
     for KeyValue(service, dates) in result do packed.Add(service, pool.Intern dates)
     packed
 
-let periodOption value =
-    if String.IsNullOrWhiteSpace(value) then None
-    else
-        let parts = value.Split(':') |> Array.map int64
-        if parts.Length <> 3 then invalidOp $"Invalid GTFS time: {value}"
-        Some (Period.FromSeconds(parts.[0] * 3600L + parts.[1] * 60L + parts.[2]))
-
 let locationType value =
     match value with
     | "" -> None
@@ -353,19 +337,6 @@ let stopRow (row: CsvRow) : Stop = {
     timezone = rowValue row "stop_timezone" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
     wheelchairBoarding = rowValue row "wheelchair_boarding" |> fun value -> if value = "" then None else Some (parseInt value)
     platformCode = rowValue row "platform_code" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-}
-
-let routeRow (row: CsvRow) : Route = {
-    id = rowValue row "route_id"
-    agencyId = rowValue row "agency_id" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    shortName = rowValue row "route_short_name" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    longName = rowValue row "route_long_name" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    description = rowValue row "route_desc" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    routeType = rowValue row "route_type"
-    url = rowValue row "route_url" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    color = rowValue row "route_color" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    textColor = rowValue row "route_text_color" |> Option.ofObj |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    sortOrder = rowValue row "route_sort_order" |> fun value -> if value = "" then None else Some (parseInt value)
 }
 
 let bicycleCapacity value =
@@ -463,10 +434,6 @@ let overlayEquivalenceDigest (calls: CallValue array) =
             .Append(timeSeconds call.departure).Append(';')
         |> ignore
     sha256Text (builder.ToString())
-
-let normalizedTimeSeconds (normalizeTime: string -> string) value =
-    let normalized = normalizeTime value
-    if String.IsNullOrWhiteSpace(normalized) then -1 else parseInt normalized
 
 let identityAlignment length = Array.init length Some
 
@@ -579,9 +546,6 @@ let rec copyDirectory source target =
         File.Copy(file, Path.Combine(target, Path.GetFileName(file)), false)
     for directory in Directory.EnumerateDirectories(source) do
         copyDirectory directory (Path.Combine(target, Path.GetFileName(directory)))
-
-let csvEscape (value: string) =
-    "\"" + (if isNull value then "" else value.Replace("\"", "\"\"")) + "\""
 
 let writeCsvRow (writer: TextWriter) (fields: seq<string>) =
     let mutable first = true

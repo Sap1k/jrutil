@@ -12,6 +12,14 @@ open JrUtil.Serving
 /// (gtfs-intermediate/, extensions/, mappings/, reports/, *.parquet,
 /// manifest.json, diagnostics.json); production compilers build it in memory.
 module StagingFixture =
+    /// Write a feed's standard GTFS tables as CSV files.
+    let writeFeed (root: string) (feed: JrUtil.GtfsModel.GtfsFeed) =
+        Directory.CreateDirectory(root) |> ignore
+        let standard, _ = JrUtil.Gtfs.feedTables feed
+        for name, header, rows in standard do
+            use writer = new StreamWriter(Path.Combine(root, name))
+            CompilerOutput.writeCsv writer (CompilerOutput.memoryTable header rows)
+
     let output (legacy: string) : CompilerOutput.Output =
         let files (directory: string) (pattern: string) =
             let root = Path.Combine(legacy, directory)

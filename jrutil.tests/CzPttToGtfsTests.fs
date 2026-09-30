@@ -16,6 +16,8 @@ open JrUtil
 
 [<TestClass>]
 type CzPttToGtfsTests() =
+    let convertMessages catalog mode messages =
+        CzPttToGtfs.convert catalog { operationalPointMode = mode } CzPttToGtfs.emptyPointNames messages
     let osmTags pairs =
         let result = TagsCollection()
         for key, value in pairs do result.Add(key, value)
@@ -227,8 +229,8 @@ type CzPttToGtfsTests() =
                     [ "CZPassengerServiceNumber", "101" ]
                 location "57017" "Deadhead" "08:25:00" [] None []
             ] []
-        let gtfs = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
-        let sidecar = CzPttToGtfs.convert catalog CzPttToGtfs.Sidecar [ value ]
+        let gtfs = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
+        let sidecar = convertMessages catalog CzPttToGtfs.Sidecar [ value ]
         Assert.AreEqual(3, gtfs.feed.stopTimes.Length)
         Assert.AreEqual(2, sidecar.feed.stopTimes.Length)
         Assert.AreEqual(4, gtfs.operationalCalls.Length)
@@ -244,7 +246,7 @@ type CzPttToGtfsTests() =
                     (Some ("12", Some "12S")) [ "CZPassengerServiceNumber", "101" ]
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] []
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         let platform = feed.stops |> Array.find (fun stop -> stop.platformCode.IsSome)
         Assert.AreEqual("Praha hl.n.", platform.name)
         Assert.AreEqual(Some "12S", platform.platformCode)
@@ -257,7 +259,7 @@ type CzPttToGtfsTests() =
                     (Some ("12", Some "12S")) []
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] []
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(4, feed.stops.Length)
         let stationIds =
             feed.stops
@@ -312,7 +314,7 @@ type CzPttToGtfsTests() =
                     ] []
                     |> setCommercialType category
                 let route =
-                    (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ])
+                    (convertMessages catalog CzPttToGtfs.Gtfs [ value ])
                         .feed.routes.[0]
                 Assert.AreEqual(expectedRouteType, route.routeType, category)
                 Assert.AreEqual(Some expectedColor, route.color, category)
@@ -323,7 +325,7 @@ type CzPttToGtfsTests() =
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] []
         let unknownRoute =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ unknown ]).feed.routes.[0]
+            (convertMessages catalog CzPttToGtfs.Gtfs [ unknown ]).feed.routes.[0]
         Assert.AreEqual("100", unknownRoute.routeType)
         Assert.AreEqual(Some "475569", unknownRoute.color)
         Assert.AreEqual(Some "ffffff", unknownRoute.textColor)
@@ -346,7 +348,7 @@ type CzPttToGtfsTests() =
             |> setCommercialType "RJ"
             |> setCore "000000000002"
         let feed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ inbound; outbound ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ inbound; outbound ]).feed
         Assert.AreEqual(1, feed.routes.Length)
         let route = feed.routes.[0]
         Assert.IsTrue(
@@ -384,7 +386,7 @@ type CzPttToGtfsTests() =
                     [ "CZPassengerServiceNumber", "101" ]
             ] []
         let feed =
-            (CzPttToGtfs.convert trailingCatalog CzPttToGtfs.Gtfs [ value ]).feed
+            (convertMessages trailingCatalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(Some "  Praha  –  Kolín", feed.routes.[0].longName)
         let info = feed.feedInfo.Value
         Assert.AreEqual("Oběhy project (via JrUtil)", info.publisherName)
@@ -395,7 +397,7 @@ type CzPttToGtfsTests() =
         let root =
             Path.Combine(Path.GetTempPath(), $"jrutil-czptt-feed-info-{Guid.NewGuid():N}")
         try
-            Gtfs.gtfsFeedToFolder () root feed
+            StagingFixture.writeFeed root feed
             let lines = File.ReadAllLines(Path.Combine(root, "feed_info.txt"))
             Assert.IsTrue(lines.[0].Contains("feed_contact_email"))
             Assert.IsTrue(lines.[1].Contains("\"czptt:20251201T000000\""))
@@ -443,7 +445,7 @@ type CzPttToGtfsTests() =
         value.CzpttInformation.CzpttLocation.[0].CommercialTrafficType <- "Os"
         value.CzpttInformation.CzpttLocation.[1].CommercialTrafficType <- "RJ"
         value.CzpttInformation.CzpttLocation.[2].CommercialTrafficType <- "RJ"
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(2, feed.trips.Length)
         CollectionAssert.AreEquivalent(
             [| "Os 01234"; "RJ 01234" |],
@@ -468,7 +470,7 @@ type CzPttToGtfsTests() =
                 location "57016" "Nymburk" "08:20:00" ["0001"] None
                     [ "CZPassengerServiceNumber", "112" ]
             ] []
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(2, feed.trips.Length)
         CollectionAssert.AreEquivalent(
             [| "S1"; "S12" |],
@@ -506,7 +508,7 @@ type CzPttToGtfsTests() =
                 "CZCentralPTTNote", "17|CZ57076||CZ54357||0|"
                 "CZCentralPTTNote", "36|CZ57076||CZ54357||0|"
             ]
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(3, result.feed.trips.Length)
         let nadRoute = result.feed.routes |> Array.find (fun route -> route.routeType = "714")
         Assert.AreEqual(Some "S1 (NAD)", nadRoute.shortName)
@@ -600,7 +602,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[2].TimingAtLocation <- null
 
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         let inferred =
             result.feed.stopTimes
             |> Array.filter (fun call -> call.stopSequence = 3)
@@ -639,7 +641,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[2].TimingAtLocation <- null
 
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         let copied =
             result.feed.stopTimes
             |> Array.find (fun call ->
@@ -669,7 +671,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[0].TimingAtLocation <- null
 
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(0, result.feed.trips.Length)
         Assert.AreEqual(0, result.feed.stopTimes.Length)
         Assert.AreEqual(2, result.operationalCalls.Length)
@@ -691,7 +693,7 @@ type CzPttToGtfsTests() =
                     [ "CZAlternativeTransport", "1" ]
             ] []
 
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(2, result.feed.trips.Length)
         Assert.AreEqual(0, result.feed.transfers.Value.Length)
         Assert.IsTrue(
@@ -713,7 +715,7 @@ type CzPttToGtfsTests() =
             |> setCommercialType "84"
             |> setOperationalTrainNumber "363784"
         let feed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual("714", feed.routes.[0].routeType)
         Assert.AreEqual(Some "Os 363784 (NAD)", feed.routes.[0].shortName)
 
@@ -729,7 +731,7 @@ type CzPttToGtfsTests() =
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] []
         let feed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(2, feed.trips.Length)
         Assert.IsFalse(feed.routes |> Array.exists (fun route -> route.routeType = "714"))
         Assert.IsFalse(
@@ -764,7 +766,7 @@ type CzPttToGtfsTests() =
             |> setCore "000000016162"
             |> setOperationalTrainNumber "16162"
         let feed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ nad; train ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ nad; train ]).feed
         let nadRoute = feed.routes |> Array.find (fun route -> route.routeType = "714")
         let nadTrip = feed.trips |> Array.find (fun trip -> trip.routeId = nadRoute.id)
         let trainTrip =
@@ -825,7 +827,7 @@ type CzPttToGtfsTests() =
             |> setCore "000000306802"
             |> setOperationalTrainNumber "306802"
         let feed =
-            (CzPttToGtfs.convert
+            (convertMessages
                 catalog CzPttToGtfs.Gtfs [ train; closerLineTrain; nad ]).feed
         Assert.AreEqual(1, feed.transfers.Value.Length)
         let exactTransfer =
@@ -867,7 +869,7 @@ type CzPttToGtfsTests() =
             |> setOperationalTrainNumber "306802"
             |> setCalendarBitmap "11"
         let feed =
-            (CzPttToGtfs.convert
+            (convertMessages
                 catalog CzPttToGtfs.Gtfs
                 [ train "000000006802" "10"
                   train "000000106802" "01"
@@ -902,7 +904,7 @@ type CzPttToGtfsTests() =
             |> setCore "000000006563"
             |> setOperationalTrainNumber "06563"
         let feed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ nad; train ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ nad; train ]).feed
         let nadTrip =
             feed.trips
             |> Array.find (fun trip -> trip.shortName = Some "Vlak 16163")
@@ -958,9 +960,9 @@ type CzPttToGtfsTests() =
         value.CzpttInformation.CzpttLocation.[2].ResponsibleRu <- "54"
 
         let result =
-            CzPttToGtfs.convertWithOptions qualifiedCatalog {
+            CzPttToGtfs.convert qualifiedCatalog {
                 operationalPointMode = CzPttToGtfs.Gtfs
-            } [ value ]
+            } CzPttToGtfs.emptyPointNames [ value ]
         let names = result.feed.agencies |> Array.map (fun agency -> agency.name) |> Set
         Assert.IsTrue(Set.contains "České dráhy, a.s." names)
         Assert.IsTrue(Set.contains "Česko-německá dráha" names)
@@ -979,7 +981,7 @@ type CzPttToGtfsTests() =
                 location "57016" "Nymburk" "08:20:00" ["0001"] None
                     [ "CZPassengerServiceNumber", "112" ]
             ] []
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         let oldRoute = result.feed.routes |> Array.find (fun r -> r.shortName = Some "S1")
         let oldTrip = result.feed.trips |> Array.find (fun t -> t.routeId = oldRoute.id)
         let internalStopId = "czptt:stop:CZ:93001:unspecified"
@@ -1011,7 +1013,7 @@ type CzPttToGtfsTests() =
             ] []
         for index in 1 .. 4 do
             value.CzpttInformation.CzpttLocation.[index].ResponsibleRu <- "80"
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(2, result.feed.trips.Length)
         CollectionAssert.AreEquivalent(
             [| "S1"; "S12" |],
@@ -1036,9 +1038,9 @@ type CzPttToGtfsTests() =
             ] []
             |> setCommercialType "Os"
         let result =
-            CzPttToGtfs.convertWithOptions catalog {
+            CzPttToGtfs.convert catalog {
                 operationalPointMode = CzPttToGtfs.Gtfs
-            } [ value ]
+            } CzPttToGtfs.emptyPointNames [ value ]
         Assert.AreEqual(Some "Os 01234", result.feed.routes.[0].shortName)
         Assert.AreEqual(None, result.feed.czRoutes.Value.[0].publicLineNumber)
 
@@ -1057,8 +1059,8 @@ type CzPttToGtfsTests() =
             ] []
         for index in 1 .. 3 do
             value.CzpttInformation.CzpttLocation.[index].ResponsibleRu <- "80"
-        let gtfs = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
-        let sidecar = CzPttToGtfs.convert catalog CzPttToGtfs.Sidecar [ value ]
+        let gtfs = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
+        let sidecar = convertMessages catalog CzPttToGtfs.Sidecar [ value ]
         let internalStopId = "czptt:stop:CZ:93001:unspecified"
         Assert.AreEqual(2, gtfs.feed.trips.Length)
         Assert.AreEqual(2, sidecar.feed.trips.Length)
@@ -1087,7 +1089,7 @@ type CzPttToGtfsTests() =
                 location "54357" "Břeclav" "09:00:00" ["0001"] None []
             ] []
         let cleared =
-            CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ lineThenFallback ]
+            convertMessages catalog CzPttToGtfs.Gtfs [ lineThenFallback ]
         CollectionAssert.AreEqual(
             [| Some "101"; Some "101"; None; None |],
             cleared.operationalCalls |> Array.map (fun call -> call.activeLineCode))
@@ -1128,7 +1130,7 @@ type CzPttToGtfsTests() =
                     [ "CZPassengerServiceNumber", "101" ]
             ] []
         let activated =
-            CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ fallbackThenLine ]
+            convertMessages catalog CzPttToGtfs.Gtfs [ fallbackThenLine ]
         CollectionAssert.AreEqual(
             [| None; Some "101"; Some "101" |],
             activated.operationalCalls |> Array.map (fun call -> call.activeLineCode))
@@ -1164,7 +1166,7 @@ type CzPttToGtfsTests() =
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] [ "CZPassengerServiceNumber", "101" ]
         let rootFeed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ rootOnly ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ rootOnly ]).feed
         Assert.AreEqual(Some "S1", rootFeed.routes.[0].shortName)
 
     [<TestMethod>]
@@ -1179,7 +1181,7 @@ type CzPttToGtfsTests() =
                 location "53040" "Kadaň" "09:20:00" ["0001"] None []
             ] []
         for mode in [| CzPttToGtfs.Gtfs; CzPttToGtfs.Sidecar |] do
-            let result = CzPttToGtfs.convert catalog mode [ value ]
+            let result = convertMessages catalog mode [ value ]
             Assert.AreEqual(1, result.feed.trips.Length, string mode)
             Assert.AreEqual(Some "S1", result.feed.routes.[0].shortName, string mode)
             Assert.IsTrue(
@@ -1226,8 +1228,7 @@ type CzPttToGtfsTests() =
                 ] []
                 |> setCommercialType "Os"
             let feed =
-                (CzPttToGtfs.convertWithPointNames
-                    catalog CzPttToGtfs.Gtfs names [ value ]).feed
+                (CzPttToGtfs.convert catalog { operationalPointMode = CzPttToGtfs.Gtfs } names [ value ]).feed
             CollectionAssert.AreEquivalent(
                 [| "S1" |],
                 feed.routes |> Array.choose (fun route -> route.shortName))
@@ -1250,7 +1251,7 @@ type CzPttToGtfsTests() =
                 location "10002" "Shared station" "08:10:00" ["0001"] None []
                 location "10003" "Shared station" "08:20:00" ["0001"] None []
             ] []
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(Some "Shared station", feed.trips.[0].headsign)
         let stopNames =
             feed.stopTimes
@@ -1278,8 +1279,7 @@ type CzPttToGtfsTests() =
                     location "54129" "Source destination" "08:20:00" ["0001"] None []
                 ] []
             let feed =
-                (CzPttToGtfs.convertWithPointNames
-                    catalog CzPttToGtfs.Gtfs names [ value ]).feed
+                (CzPttToGtfs.convert catalog { operationalPointMode = CzPttToGtfs.Gtfs } names [ value ]).feed
             Assert.AreEqual(
                 Some "Vlak 01234",
                 feed.routes.[0].shortName)
@@ -1300,7 +1300,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[5].Location.CountryCodeIso <- "DE"
         let sourceFeed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.IsTrue(
             sourceFeed.stops
             |> Array.filter (fun stop -> stop.id.StartsWith("czptt:stop:CZ:76534"))
@@ -1324,9 +1324,7 @@ type CzPttToGtfsTests() =
                 "765347,Kraslice-Pod vlekem,50.340188,12.49709"
             |])
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None None None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
 
             let namesByIdentity =
                 result.operationalCalls
@@ -1382,11 +1380,9 @@ type CzPttToGtfsTests() =
         value.CzpttInformation.CzpttLocation.[1].Location.CountryCodeIso <- "DE"
 
         let first =
-            (CzPttToGtfs.convertWithPointNames
-                catalog CzPttToGtfs.Gtfs firstNames [ value ]).feed
+            (CzPttToGtfs.convert catalog { operationalPointMode = CzPttToGtfs.Gtfs } firstNames [ value ]).feed
         let second =
-            (CzPttToGtfs.convertWithPointNames
-                catalog CzPttToGtfs.Gtfs secondNames [ value ]).feed
+            (CzPttToGtfs.convert catalog { operationalPointMode = CzPttToGtfs.Gtfs } secondNames [ value ]).feed
 
         Assert.AreEqual(
             Some "Os 01234",
@@ -1417,9 +1413,9 @@ type CzPttToGtfsTests() =
             |> setCore "000000005678"
 
         let districtFeed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ cityDistricts ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ cityDistricts ]).feed
         let compoundFeed =
-            (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ compounds ]).feed
+            (convertMessages catalog CzPttToGtfs.Gtfs [ compounds ]).feed
 
         Assert.AreEqual(
             Some "Vlak 01234",
@@ -1441,7 +1437,7 @@ type CzPttToGtfsTests() =
                 location "57076" "Praha hl.n." "08:10:00" ["0001"] None []
                 location "57016" "Kolín" "08:05:00" ["0001"] None []
             ] []
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(0, result.feed.trips.Length)
         Assert.AreEqual(1, result.rejectedJourneys.Length)
 
@@ -1455,7 +1451,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[2].TimingAtLocation.Timing
         |> Array.iter (fun timing -> timing.Offset <- "1")
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         let feed = result.feed
         Assert.AreEqual(Some GtfsModel.NoService, feed.stopTimes.[0].dropoffType)
         Assert.AreEqual(Some GtfsModel.CoordinationWithDriver, feed.stopTimes.[0].pickupType)
@@ -1492,7 +1488,7 @@ type CzPttToGtfsTests() =
                     location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
                     location "57016" "Kolín" "08:20:00" ["0001"] None []
                 ] [ "CZCentralPTTNote", $"{code}|CZ57076||CZ57016||0|" ]
-            let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
             Assert.AreEqual(Some GtfsModel.OneOrMore, result.feed.trips.[0].bikesAllowed, code)
             CollectionAssert.AreEquivalent(
                 kinds,
@@ -1505,7 +1501,7 @@ type CzPttToGtfsTests() =
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] [ "CZCentralPTTNote", "36|CZ57076||CZ57016||0|" ]
-            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            |> fun value -> convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(Some GtfsModel.NoBicycles, prohibited.feed.trips.[0].bikesAllowed)
         CollectionAssert.AreEqual(
             [| "bicycle_transport_prohibited" |],
@@ -1520,7 +1516,7 @@ type CzPttToGtfsTests() =
                 location "57076" "Praha hl.n." "08:40:00" ["0001"] None []
                 location "57017" "Kutná Hora" "09:00:00" ["0001"] None []
             ] [ "CZCentralPTTNote", "36|CZ57076|1|CZ57017||0|" ]
-            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            |> fun value -> convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(None, repeated.feed.trips.[0].bikesAllowed)
         CollectionAssert.AreEqual(
             [| Some 3; Some 4 |],
@@ -1535,7 +1531,7 @@ type CzPttToGtfsTests() =
                 "CZCalendarPTTNote", "1|20251214|20251215|10|"
             ]
             |> setCalendarBitmap "11"
-            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            |> fun value -> convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(None, calendarLimited.feed.trips.[0].bikesAllowed)
         Assert.IsTrue(calendarLimited.features |> Array.exists (fun feature -> feature.kind = "bicycle_transport"))
 
@@ -1547,7 +1543,7 @@ type CzPttToGtfsTests() =
                     location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
                     location "57016" "Kolín" "08:20:00" ["0001"] None []
                 ] [ "CZCentralPTTNote", $"{code}|CZ57076||CZ57016||0|" ]
-                |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+                |> fun value -> convertMessages catalog CzPttToGtfs.Gtfs [ value ]
             Assert.AreEqual(Some "1", result.feed.trips.[0].wheelchairAccessible, code)
 
         let conflict =
@@ -1558,7 +1554,7 @@ type CzPttToGtfsTests() =
                 "CZCentralPTTNote", "22|CZ57076||CZ57016||0|"
                 "CZCentralPTTNote", "36|CZ57076||CZ57016||0|"
             ]
-            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            |> fun value -> convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(None, conflict.feed.trips.[0].bikesAllowed)
         Assert.IsTrue(conflict.idsDiagnostics |> Array.exists (fun value -> value.Contains("conflicting")))
 
@@ -1567,7 +1563,7 @@ type CzPttToGtfsTests() =
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] [ "CZCentralPTTNote", "36|missing" ]
-            |> fun value -> CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+            |> fun value -> convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(None, malformed.feed.trips.[0].bikesAllowed)
         Assert.AreEqual(1, malformed.notes.Length)
         Assert.IsFalse(malformed.notes.[0].resolved)
@@ -1584,7 +1580,7 @@ type CzPttToGtfsTests() =
         value.CzpttInformation.CzpttLocation.[0].TimingAtLocation.Timing
         |> Array.iter (fun timing -> timing.Offset <- "-1")
 
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(
             23.0 * 3600.0 + 58.0 * 60.0,
             result.feed.stopTimes.[0].arrivalTime.Value.ToDuration().TotalSeconds)
@@ -1602,7 +1598,7 @@ type CzPttToGtfsTests() =
                     [| { code = "54"; name = "České dráhy"; url = Some "www.cd.cz" } |]
         }
         let withCatalogUrl =
-            CzPttToGtfs.convert
+            convertMessages
                 catalogWithSchemelessUrl CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(
             Some "https://www.cd.cz",
@@ -1618,7 +1614,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[1].TimingAtLocation <- null
 
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(None, result.feed.stopTimes.[1].arrivalTime)
         Assert.AreEqual(None, result.feed.stopTimes.[1].departureTime)
         Assert.AreEqual(
@@ -1634,7 +1630,7 @@ type CzPttToGtfsTests() =
                 location "57076" "Praha hl.n." "08:00:00" ["0040"] None []
                 location "57016" "Kolín" "08:20:00" [] None []
             ] []
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(0, result.feed.trips.Length)
         Assert.AreEqual(0, result.operationalCalls.Length)
         Assert.AreEqual("no activity 0001 passenger call", result.rejectedJourneys.[0].reason)
@@ -1645,7 +1641,7 @@ type CzPttToGtfsTests() =
             message [
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
             ] []
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(0, result.feed.routes.Length)
         Assert.AreEqual(0, result.feed.trips.Length)
         Assert.AreEqual(0, result.feed.stopTimes.Length)
@@ -1666,7 +1662,7 @@ type CzPttToGtfsTests() =
                 location "57076" "Praha hl.n." "08:00:00" ["0001"] None []
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] [ "CZInconsistentTime", "1" ]
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(1, result.feed.trips.Length)
         Assert.AreEqual(0, result.rejectedJourneys.Length)
 
@@ -1681,7 +1677,7 @@ type CzPttToGtfsTests() =
             ] []
         let flagged = value.CzpttInformation.CzpttLocation.[1]
         flagged.TimingAtLocation.Timing.[1].Time <- "08:00:00.0000000+01:00"
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(1, result.feed.trips.Length)
         Assert.AreEqual(0, result.rejectedJourneys.Length)
         let corrected =
@@ -1710,7 +1706,7 @@ type CzPttToGtfsTests() =
             ] []
         value.CzpttInformation.CzpttLocation.[1].TimingAtLocation.Timing.[1].Time
             <- "08:01:00.0000000+01:00"
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(1, result.feed.trips.Length)
         let corrected =
             result.feed.stopTimes |> Array.find (fun call -> call.stopSequence = 2)
@@ -1729,7 +1725,7 @@ type CzPttToGtfsTests() =
                     ["CZInconsistentTime", "1"]
                 location "53244" "Velké Zboží" "08:05:00" ["0001"] None []
             ] []
-        let result = CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]
+        let result = convertMessages catalog CzPttToGtfs.Gtfs [ value ]
         Assert.AreEqual(0, result.feed.trips.Length)
         Assert.AreEqual(1, result.rejectedJourneys.Length)
 
@@ -1741,7 +1737,7 @@ type CzPttToGtfsTests() =
                     [ "CZPassengerServiceNumber", "101" ]
                 location "57016" "Kolín" "08:20:00" ["0001"] None []
             ] [ "CZIPTS", "11|CZ57076||CZ57016||" ]
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(2, feed.czTripStopZones.Value.Length)
         Assert.IsTrue(
             feed.czTripStopZones.Value
@@ -1762,7 +1758,7 @@ type CzPttToGtfsTests() =
                 "CZIPTS", "11|CZ57076||CZ57016||"
                 "CZIPTS", "12|CZ57076||CZ57016||"
             ]
-        let feed = (CzPttToGtfs.convert catalog CzPttToGtfs.Gtfs [ value ]).feed
+        let feed = (convertMessages catalog CzPttToGtfs.Gtfs [ value ]).feed
         Assert.AreEqual(4, feed.czTripStopZones.Value.Length)
         Assert.IsTrue(feed.stops |> Array.forall (fun stop -> stop.zoneId.IsNone))
 
@@ -1788,13 +1784,9 @@ type CzPttToGtfsTests() =
             let options: CzPttToGtfs.ConversionOptions = {
                 operationalPointMode = CzPttToGtfs.Gtfs
             }
-            CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
-                CzPttBundle.MemoryBacked catalog options input memoryOutput
-                (Some sr70) None None None (fun _ _ -> ())
+            CzPttBundle.convert CzPttBundle.MemoryBacked catalog options input memoryOutput (Some sr70) None None (fun _ _ -> ())
             |> ignore
-            CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
-                CzPttBundle.SpillBacked catalog options input spillOutput
-                (Some sr70) None None None (fun _ _ -> ())
+            CzPttBundle.convert CzPttBundle.SpillBacked catalog options input spillOutput (Some sr70) None None (fun _ _ -> ())
             |> ignore
             let memoryFiles =
                 Directory.EnumerateFiles(memoryOutput)
@@ -1844,10 +1836,7 @@ type CzPttToGtfsTests() =
             |])
             let phases = ResizeArray<string>()
             let result =
-                CzPttBundle.writeSidecarsWithProgress
-                    catalog CzPttToGtfs.Gtfs input output (Some sr70) None
-                    None None
-                    (fun name state -> phases.Add($"{name}:{state}"))
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) None None (fun name state -> phases.Add($"{name}:{state}"))
             Assert.AreEqual(1, result.acceptedPaIds.Length)
             let praha =
                 result.feed.stops
@@ -1930,7 +1919,7 @@ type CzPttToGtfsTests() =
             let packageOptions: CzPttPackage.Options = {
                 catalog = catalog
                 conversion = { operationalPointMode = CzPttToGtfs.Gtfs }
-                sr70Path = Some sr70; sr70Name20Path = None; osmPath = None; osmAliasesPath = None
+                sr70Path = Some sr70; osmPath = None; osmAliasesPath = None
                 diagnosticsOutput = Some diagnostics; diagnosticTraces = false }
             CzPttPackage.write packageOptions input production (fun _ _ -> ()) |> ignore
             JrUtil.Serving.Validation.validatePackage production |> ignore
@@ -1977,9 +1966,7 @@ type CzPttToGtfsTests() =
             writer.Close()
             File.WriteAllLines(sr70, [| "57076,Praha hl.n.,50.083,14.435" |])
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output (Some sr70) None
-                    None None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
             let czech =
                 result.feed.stops
                 |> Array.filter (fun stop -> stop.id.StartsWith("czptt:stop:CZ:"))
@@ -2052,9 +2039,7 @@ type CzPttToGtfsTests() =
                 """{"AT:33333":"osm:node:3"}""")
 
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output None None
-                    (Some pbf) (Some aliases)
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output None (Some pbf) (Some aliases) (fun _ _ -> ())
             Assert.AreEqual(3, result.coordinateDiagnostics.osmGapFills.Length)
             CollectionAssert.AreEquivalent(
                 [| "AT:11111"; "AT:22222"; "AT:33333" |],
@@ -2107,9 +2092,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
             Assert.AreEqual(
                 2,
                 result.coordinateDiagnostics.authoritativeSr70Resolutions.Length)
@@ -2163,9 +2146,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
             Assert.AreEqual(1, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.AreEqual(1, result.coordinateDiagnostics.estimatedResolutions.Length)
             CollectionAssert.Contains(
@@ -2238,9 +2219,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
             Assert.AreEqual(
                 0,
                 result.coordinateDiagnostics.unresolvedPassengerPointIds.Length)
@@ -2302,9 +2281,7 @@ type CzPttToGtfsTests() =
             |]
             File.WriteAllText(aliases, """{"AT:44444":"osm:node:2"}""")
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) (Some aliases)
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) (Some aliases) (fun _ _ -> ())
             Assert.AreEqual(1, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.AreEqual(
                 "reviewed_alias",
@@ -2355,9 +2332,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
             Assert.AreEqual(1, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.AreEqual(
                 "normalized_exact_name",
@@ -2397,9 +2372,7 @@ type CzPttToGtfsTests() =
             |]
 
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
             Assert.IsFalse(
                 result.coordinateDiagnostics.osmGapFills
                 |> Array.exists (fun resolution ->
@@ -2484,9 +2457,7 @@ type CzPttToGtfsTests() =
                 writeMessage (Path.Combine(input, denseFile)) dense
                 writeMessage (Path.Combine(input, sparseFile)) sparse
                 let result =
-                    CzPttBundle.writeSidecars
-                        catalog CzPttToGtfs.Gtfs input output
-                        (Some sr70) None None None
+                    CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
                 let stop =
                     result.feed.stops
                     |> Array.find (fun candidate ->
@@ -2543,9 +2514,7 @@ type CzPttToGtfsTests() =
                 "10002,Anchor B,50.0,14.2"
             |])
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None None None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
             CollectionAssert.Contains(
                 result.coordinateDiagnostics.estimatedResolutions
                 |> Array.map (fun resolution -> resolution.sourceLocationId),
@@ -2585,9 +2554,7 @@ type CzPttToGtfsTests() =
                 "10002,Passenger B,50.0,14.2"
             |])
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None None None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
             Assert.IsFalse(
                 result.coordinateDiagnostics.estimatedResolutions
                 |> Array.exists (fun resolution ->
@@ -2666,9 +2633,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.writeSidecars
-                    catalog CzPttToGtfs.Gtfs input output
-                    (Some sr70) None (Some pbf) None
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttToGtfs.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
             Assert.AreEqual(3, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.IsTrue(
                 result.coordinateDiagnostics.osmGapFills
