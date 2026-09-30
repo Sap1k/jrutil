@@ -83,13 +83,13 @@ type RegionalGtfsOverlayTests() =
     let execute auditDate policy gvdYear binding basePath output =
         (RegionalGtfsOverlay.compile {
             auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
-            bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output
+            bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }).aggregate
 
     let executeAll policy gvdYear bindings basePath output =
         RegionalGtfsOverlay.compile {
             auditDate = None; policyPath = policy; gvdYear = gvdYear
-            bindings = bindings; baseBundle = productionBase basePath; outputBundle = output
+            bindings = bindings; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }
 
     let policyJson = """{

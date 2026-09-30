@@ -55,10 +55,6 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
             box (match options.conversion.operationalPointMode with
                  | CzPttToGtfs.Gtfs -> "gtfs"
                  | CzPttToGtfs.Sidecar -> "sidecar")
-        diagnostics.["block_mode"] <-
-            box (match options.conversion.blockMode with
-                 | CzPttToGtfs.Blocks -> "blocks"
-                 | CzPttToGtfs.NoBlocks -> "none")
         diagnostics.["accepted_pa_count"] <- box result.acceptedPaIds.Length
         diagnostics.["rejected_journeys"] <- box result.rejectedJourneys
         diagnostics.["cancelled_pa_ids"] <- box result.cancelledPaIds

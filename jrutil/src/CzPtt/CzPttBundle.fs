@@ -1496,7 +1496,6 @@ let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
     writeSidecarsWithProgressAndOptions
         catalog {
             operationalPointMode = mode
-            blockMode = CzPttToGtfs.Blocks
         } inputPath outputDirectory sr70Path sr70Name20Path osmPath
         osmAliasesPath progress
 

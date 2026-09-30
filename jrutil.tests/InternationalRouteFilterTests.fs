@@ -94,34 +94,34 @@ type InternationalRouteFilterTests() =
                 stopLocationSources = [||]
         }
 
-    let classify batch overrides =
-        applyInternationalRoutePolicy RegionalAdjacent overrides batch
+    let classify batch =
+        applyInternationalRoutePolicy RegionalAdjacent batch
 
     [<TestMethod>]
     member _.``Keep-all preserves backward-compatible conversion``() =
         let source = syntheticRoute "UA" 1000m 500m false City false
-        let result = applyInternationalRoutePolicy KeepAll [||] source
+        let result = applyInternationalRoutePolicy KeepAll source
         assertEqual source.routes.Length result.batch.routes.Length
         assertEqual 0 result.decisions.Length
 
     [<TestMethod>]
     member _.``Short neighboring route is retained even when mislabeled city``() =
-        let decision = (classify (syntheticRoute "DE" 114m 44m false City false) [||]).decisions |> Array.exactlyOne
+        let decision = (classify (syntheticRoute "DE" 114m 44m false City false)).decisions |> Array.exactlyOne
         assertEqual true decision.keep
         assertEqual "regional_adjacent" decision.reason
 
     [<TestMethod>]
     member _.``Integrated route uses relaxed envelope``() =
-        let retained = (classify (syntheticRoute "A" 180m 70m true International false) [||]).decisions |> Array.exactlyOne
-        let rejected = (classify (syntheticRoute "A" 180m 70m false International false) [||]).decisions |> Array.exactlyOne
+        let retained = (classify (syntheticRoute "A" 180m 70m true International false)).decisions |> Array.exactlyOne
+        let rejected = (classify (syntheticRoute "A" 180m 70m false International false)).decisions |> Array.exactlyOne
         assertEqual true retained.keep
         assertEqual false rejected.keep
         assertEqual "trip_span_exceeds_limit" rejected.reason
 
     [<TestMethod>]
     member _.``Long neighboring and non-neighboring routes are rejected``() =
-        let vienna = (classify (syntheticRoute "AT" 133m 84m false International false) [||]).decisions |> Array.exactlyOne
-        let ukraine = (classify (syntheticRoute "UA" 80m 20m false Regional false) [||]).decisions |> Array.exactlyOne
+        let vienna = (classify (syntheticRoute "AT" 133m 84m false International false)).decisions |> Array.exactlyOne
+        let ukraine = (classify (syntheticRoute "UA" 80m 20m false Regional false)).decisions |> Array.exactlyOne
         assertEqual "trip_span_exceeds_limit" vienna.reason
         assertEqual "non_adjacent_country" ukraine.reason
 
@@ -139,13 +139,13 @@ type InternationalRouteFilterTests() =
                     missingKm.tripStops |> Seq.toArray
                     |> Array.map (fun call -> if call.stopId = 300L then { call with kilometer = None } else call)
         }
-        assertEqual "foreign_only_trip" ((classify foreignOnly [||]).decisions |> Array.exactlyOne).reason
-        assertEqual "missing_timetable_kilometres" ((classify missingKm [||]).decisions |> Array.exactlyOne).reason
+        assertEqual "foreign_only_trip" ((classify foreignOnly).decisions |> Array.exactlyOne).reason
+        assertEqual "missing_timetable_kilometres" ((classify missingKm).decisions |> Array.exactlyOne).reason
 
     [<TestMethod>]
     member _.``Passing foreign stop does not make a domestic route international``() =
         let decision =
-            (classify (syntheticRoute "UA" 1000m 500m false Regional true) [||]).decisions
+            (classify (syntheticRoute "UA" 1000m 500m false Regional true)).decisions
             |> Array.exactlyOne
         assertEqual true decision.keep
         assertEqual "domestic" decision.reason
@@ -172,7 +172,7 @@ type InternationalRouteFilterTests() =
                 tripStops = Array.append (source.tripStops |> Seq.toArray) foreignCalls
         }
 
-        let result = classify mixed [||]
+        let result = classify mixed
         let decision = result.decisions |> Array.exactlyOne
 
         assertEqual true decision.keep
@@ -215,58 +215,20 @@ type InternationalRouteFilterTests() =
                         value.routeId = fst routeKey
                         && (value.tripId = 1L || value.tripId = 3L))
         }
-        let decision = (classify batch [||]).decisions |> Array.exactlyOne
+        let decision = (classify batch).decisions |> Array.exactlyOne
         assertEqual true decision.keep
         assertEqual "domestic" decision.reason
 
     [<TestMethod>]
-    member _.``Overrides take precedence and rejected route dependents are pruned``() =
+    member _.``Rejected route dependents are pruned``() =
         let source = syntheticRoute "UA" 1000m 500m false City false
-        let keepOverride = [|
-            { routeId = fst routeKey; routeDistinction = snd routeKey
-              decision = KeepRoute; reason = "reviewed regional exception" }
-        |]
-        let kept = classify source keepOverride
-        assertEqual true (kept.decisions |> Array.exactlyOne).keep
-
-        let dropped = classify source [||]
+        let dropped = classify source
         assertEqual 0 dropped.batch.routes.Length
         assertEqual 0 dropped.batch.trips.Length
         assertEqual 0 dropped.batch.tripStops.Count
         assertEqual 0 dropped.batch.routeStops.Length
         assertEqual 0 dropped.batch.routeIntegrations.Length
         assertEqual 0 dropped.batch.stops.Length
-
-    [<TestMethod>]
-    member _.``Global overrides may belong to another fix-jdf batch``() =
-        let source = syntheticRoute "UA" 1000m 500m false City false
-        let otherBatchOverride = [|
-            { routeId = "other-batch"; routeDistinction = 1
-              decision = KeepRoute; reason = "reviewed elsewhere" }
-        |]
-
-        let result = classify source otherBatchOverride
-
-        assertEqual false (result.decisions |> Array.exactlyOne).keep
-        validateInternationalRouteOverrides
-            (set [routeKey; ("other-batch", 1)]) otherBatchOverride
-        Assert.ThrowsExactly<ArgumentException>(fun () ->
-            validateInternationalRouteOverrides (set [routeKey]) otherBatchOverride)
-        |> ignore
-
-    [<TestMethod>]
-    member _.``Override CSV rejects conflicting decisions``() =
-        let path = Path.Combine(Path.GetTempPath(), "jrutil-route-overrides-" + Guid.NewGuid().ToString("N") + ".csv")
-        try
-            File.WriteAllLines(path, [|
-                "route_id,route_distinction,decision,reason"
-                "586001,1,keep,first review"
-                "586001,1,drop,second review"
-            |])
-            Assert.ThrowsExactly<ArgumentException>(fun () -> loadInternationalRouteOverrides path |> ignore)
-            |> ignore
-        finally
-            File.Delete(path)
 
     [<TestMethod>]
     member _.``Rejected route bundle has diagnostics manifest metadata and no dangling rows``() =
@@ -297,7 +259,7 @@ type InternationalRouteFilterTests() =
 }}"""
             File.WriteAllText(descriptorPath, descriptor)
             JrUtil.JdfBundle.writeBundleWithPolicy
-                descriptorPath "test-commit" false RegionalAdjacent [||] zipPath output
+                descriptorPath "test-commit" RegionalAdjacent zipPath output
 
             let gtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView output (Path.Combine(root, "compiler-view"))
             assertEqual 1 (File.ReadAllLines(Path.Combine(gtfs, "routes.txt")).Length)

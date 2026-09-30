@@ -8,8 +8,6 @@ open System.Collections.Generic
 open System.Globalization
 open System.IO
 open System.IO.Compression
-open System.Diagnostics
-open System.Reflection
 open System.Text.RegularExpressions
 open System.Security.Cryptography
 open System.Text
@@ -684,27 +682,6 @@ let capability policy name =
     | _ -> { mode = "disabled"; priority = 0 }
 
 let enabled policy name = (capability policy name).mode <> "disabled"
-
-let currentCommit () =
-    try
-        let rec findRepository (directory: DirectoryInfo) =
-            if isNull directory then None
-            elif Directory.Exists(Path.Combine(directory.FullName, ".git")) || File.Exists(Path.Combine(directory.FullName, ".git")) then Some directory.FullName
-            else findRepository directory.Parent
-        let info = ProcessStartInfo("git", "rev-parse HEAD")
-        info.RedirectStandardOutput <- true
-        info.RedirectStandardError <- true
-        info.UseShellExecute <- false
-        info.CreateNoWindow <- true
-        findRepository (DirectoryInfo(AppContext.BaseDirectory))
-        |> Option.iter (fun path -> info.WorkingDirectory <- path)
-        use childProcess = Process.Start(info)
-        let value = childProcess.StandardOutput.ReadToEnd().Trim()
-        childProcess.WaitForExit()
-        if childProcess.ExitCode = 0 && value.Length = 40 then value
-        else
-            Assembly.GetExecutingAssembly().GetName().Version.ToString()
-    with _ -> Assembly.GetExecutingAssembly().GetName().Version.ToString()
 
 type StopGroup = {
     groupId: string

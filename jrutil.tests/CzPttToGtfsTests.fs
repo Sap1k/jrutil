@@ -740,39 +740,6 @@ type CzPttToGtfsTests() =
         Assert.AreEqual(4, feed.transfers.Value.[0].transferType)
 
     [<TestMethod>]
-    member _.``No blocks still separates rail replacement mode runs``() =
-        let value =
-            message [
-                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "57050" "Poříčany" "08:10:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "112"
-                      "CZAlternativeTransport", "1" ]
-                location "57016" "Kolín" "08:20:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101"
-                      "CZAlternativeTransport", "0" ]
-                location "54357" "Břeclav" "09:00:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-            ] []
-        let result =
-            CzPttToGtfs.convertWithOptions catalog {
-                operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.NoBlocks
-            } [ value ]
-        Assert.AreEqual(3, result.feed.trips.Length)
-        CollectionAssert.AreEquivalent(
-            [| "100"; "714" |],
-            result.feed.routes |> Array.map (fun route -> route.routeType) |> Array.distinct)
-        Assert.IsTrue(
-            result.feed.trips |> Array.forall (fun trip -> trip.blockId.IsNone))
-        Assert.IsTrue(
-            result.feed.routes
-            |> Array.exists (fun route -> route.shortName = Some "S12 (NAD)"))
-        CollectionAssert.AreEquivalent(
-            [| 2; 2 |],
-            result.feed.transfers.Value |> Array.map (fun transfer -> transfer.transferType))
-
-    [<TestMethod>]
     member _.``Separate NAD trip matches a continuing train by passenger line``() =
         let train =
             message [
@@ -965,69 +932,6 @@ type CzPttToGtfsTests() =
                 && Some stopTime.stopId = transfer.toStopId))
 
     [<TestMethod>]
-    member _.``No blocks combines unique labels into one trip``() =
-        let value =
-            message [
-                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "57050" "Poříčany" "08:10:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "112" ]
-                location "57016" "Nymburk" "08:20:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "112" ]
-                location "54357" "Břeclav" "09:00:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "54358" "Lanžhot" "09:10:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-            ] []
-        let result =
-            CzPttToGtfs.convertWithOptions catalog {
-                operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.NoBlocks
-            } [ value ]
-        Assert.AreEqual(1, result.feed.trips.Length)
-        Assert.AreEqual(None, result.feed.trips.[0].blockId)
-        Assert.AreEqual(0, result.feed.transfers.Value.Length)
-        Assert.AreEqual(Some "S1/S12", result.feed.routes.[0].shortName)
-        Assert.AreEqual(None, result.feed.routes.[0].longName)
-        Assert.AreEqual(
-            Some "S1/S12", result.feed.czRoutes.Value.[0].publicLineNumber)
-        Assert.IsTrue(
-            result.operationalCalls
-            |> Array.forall (fun call ->
-                call.generatedTripIds = [| result.feed.trips.[0].id |]))
-
-    [<TestMethod>]
-    member _.``No blocks combines lines fallbacks and operators``() =
-        let value =
-            message [
-                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "57050" "Poříčany" "08:10:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "57016" "Nymburk" "08:20:00" ["0001"] None []
-                location "54357" "Břeclav" "09:00:00" ["0001"] None []
-            ] [ "CZIPTS", "11|CZ57076||CZ54357||" ]
-            |> setCommercialType "Os"
-        value.CzpttInformation.CzpttLocation.[1].ResponsibleRu <- "80"
-        value.CzpttInformation.CzpttLocation.[2].ResponsibleRu <- "80"
-        value.CzpttInformation.CzpttLocation.[3].ResponsibleRu <- "54"
-        let result =
-            CzPttToGtfs.convertWithOptions catalog {
-                operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.NoBlocks
-            } [ value ]
-        Assert.AreEqual(Some "S1/Os 01234", result.feed.routes.[0].shortName)
-        let routeAgency = result.feed.routes.[0].agencyId.Value
-        let composite =
-            result.feed.agencies
-            |> Array.find (fun value -> value.id = Some routeAgency)
-        Assert.AreEqual("České dráhy / DB", composite.name)
-        Assert.IsTrue(result.feed.czTripStopZones.Value.Length > 0)
-        Assert.IsTrue(
-            result.feed.czTripStopZones.Value
-            |> Array.forall (fun zone -> zone.tripId = result.feed.trips.[0].id))
-
-    [<TestMethod>]
     member _.``Agency display names omit spaced dash qualifiers``() =
         let qualifiedCatalog = {
             catalog with
@@ -1056,12 +960,10 @@ type CzPttToGtfsTests() =
         let result =
             CzPttToGtfs.convertWithOptions qualifiedCatalog {
                 operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.NoBlocks
             } [ value ]
         let names = result.feed.agencies |> Array.map (fun agency -> agency.name) |> Set
         Assert.IsTrue(Set.contains "České dráhy, a.s." names)
         Assert.IsTrue(Set.contains "Česko-německá dráha" names)
-        Assert.IsTrue(Set.contains "České dráhy, a.s. / Česko-německá dráha" names)
         Assert.IsFalse(names |> Seq.exists (fun name -> name.Contains(" - ")))
 
     [<TestMethod>]
@@ -1122,28 +1024,6 @@ type CzPttToGtfsTests() =
                 && adjustment.reason = "coalesced-with-operator-boundary"))
 
     [<TestMethod>]
-    member _.``No blocks selects the highest service route type``() =
-        let value =
-            message [
-                location "57076" "Praha hl.n." "08:00:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "57050" "Poříčany" "08:10:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-                location "57016" "Nymburk" "08:20:00" ["0001"] None
-                    [ "CZPassengerServiceNumber", "101" ]
-            ] []
-        value.CzpttInformation.CzpttLocation.[0].CommercialTrafficType <- "Os"
-        value.CzpttInformation.CzpttLocation.[1].CommercialTrafficType <- "R"
-        value.CzpttInformation.CzpttLocation.[2].CommercialTrafficType <- "R"
-        let result =
-            CzPttToGtfs.convertWithOptions catalog {
-                operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.NoBlocks
-            } [ value ]
-        Assert.AreEqual("103", result.feed.routes.[0].routeType)
-        Assert.AreEqual(Some "b45309", result.feed.routes.[0].color)
-
-    [<TestMethod>]
     member _.``Unknown catalog lines use the train designation fallback``() =
         let value =
             message [
@@ -1158,7 +1038,6 @@ type CzPttToGtfsTests() =
         let result =
             CzPttToGtfs.convertWithOptions catalog {
                 operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.NoBlocks
             } [ value ]
         Assert.AreEqual(Some "Os 01234", result.feed.routes.[0].shortName)
         Assert.AreEqual(None, result.feed.czRoutes.Value.[0].publicLineNumber)
@@ -1908,7 +1787,6 @@ type CzPttToGtfsTests() =
             |])
             let options: CzPttToGtfs.ConversionOptions = {
                 operationalPointMode = CzPttToGtfs.Gtfs
-                blockMode = CzPttToGtfs.Blocks
             }
             CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
                 CzPttBundle.MemoryBacked catalog options input memoryOutput
@@ -2051,7 +1929,7 @@ type CzPttToGtfsTests() =
             let diagnostics = Path.Combine(root, "diagnostics")
             let packageOptions: CzPttPackage.Options = {
                 catalog = catalog
-                conversion = { operationalPointMode = CzPttToGtfs.Gtfs; blockMode = CzPttToGtfs.Blocks }
+                conversion = { operationalPointMode = CzPttToGtfs.Gtfs }
                 sr70Path = Some sr70; sr70Name20Path = None; osmPath = None; osmAliasesPath = None
                 diagnosticsOutput = Some diagnostics; diagnosticTraces = false }
             CzPttPackage.write packageOptions input production (fun _ _ -> ()) |> ignore
