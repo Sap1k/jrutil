@@ -8,7 +8,9 @@ open System.Security.Cryptography
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open JrUtil.RegionalOverlay
 open JrUtil.RegionalOverlay.Model
-open JrUtil.RegionalOverlay.Support
+open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.OutputIds
 
 [<TestClass>]
 type RegionalOverlayStorageTests() =

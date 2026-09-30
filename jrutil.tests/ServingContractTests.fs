@@ -77,7 +77,7 @@ type ServingContractTests() =
 
     [<TestMethod>]
     member _.``Serving modes follow basic and extended GTFS route types``() =
-        let mode = JrUtil.Serving.PackageWriter.servingMode
+        let mode = JrUtil.Serving.PackageBaseRelations.servingMode
         Assert.AreEqual("bus", mode 202, "National coach")
         Assert.AreEqual("bus", mode 704)
         Assert.AreEqual("metro", mode 401)

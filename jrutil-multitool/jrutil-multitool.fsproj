@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Context.fs" />
+    <Compile Include="Commands/PackageCommands.fs" />
+    <Compile Include="Commands/ConvertCommands.fs" />
+    <Compile Include="Commands/JdfCommands.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

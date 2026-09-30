@@ -147,7 +147,7 @@ type JdfBundleTests() =
             osmWay 12L [|1L;11L|] ["highway","residential"] :> OsmGeo
             osmWay 13L [|4L;14L|] ["highway","residential"] :> OsmGeo|]
         File.WriteAllText(routing+".manifest.json",JsonSerializer.Serialize(
-            {|filter_schema=JdfBundle.routingEnvelopePolicy;source_key="fixture"
+            {|filter_schema=JdfBundleReview.routingEnvelopePolicy;source_key="fixture"
               output={|bytes=FileInfo(routing).Length|}|}))
         let sha=
             use stream=File.OpenRead(input)
@@ -244,11 +244,11 @@ type JdfBundleTests() =
                 File.WriteAllText(
                     routingPbf + ".manifest.json",
                     JsonSerializer.Serialize(manifest))
-            writeManifest JdfBundle.routingEnvelopePolicy
-            JdfBundle.validateRoutingPbfManifest routingPbf
+            writeManifest JdfBundleReview.routingEnvelopePolicy
+            JdfBundleReview.validateRoutingPbfManifest routingPbf
             writeManifest "jdf-routing-envelope-v1"
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.validateRoutingPbfManifest routingPbf)
+                JdfBundleReview.validateRoutingPbfManifest routingPbf)
             |> ignore
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -258,13 +258,13 @@ type JdfBundleTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-bundle-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
-            let sha, bytes = JdfBundle.directoryTreeIdentity fixturePath
+            let sha, bytes = JdfBundleInput.directoryTreeIdentity fixturePath
             let descriptorPath = Path.Combine(root, "snapshot.json")
             descriptor descriptorPath "directory-tree" sha bytes
             let first = Path.Combine(root, "first")
             let second = Path.Combine(root, "second")
-            JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath first |> ignore
-            JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath second |> ignore
+            JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath first |> ignore
+            JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath second |> ignore
 
             JrUtil.Serving.Validation.validatePackage first |> ignore
             JrUtil.Serving.Validation.validatePackage second |> ignore
@@ -324,11 +324,11 @@ type JdfBundleTests() =
             }
             let input = Path.Combine(root, "jdf")
             Jdf.jdfBatchDirWriter () (Jdf.FsPath input) modified
-            let sha, bytes = JdfBundle.directoryTreeIdentity input
+            let sha, bytes = JdfBundleInput.directoryTreeIdentity input
             let descriptorPath = Path.Combine(root, "snapshot.json")
             descriptor descriptorPath "directory-tree" sha bytes
             let output = Path.Combine(root, "bundle")
-            JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } input output |> ignore
+            JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } input output |> ignore
 
             let bindings =
                 JrUtil.Serving.PackageReader.readTextRows
@@ -372,7 +372,7 @@ type JdfBundleTests() =
             let output = Path.Combine(root, "invalid")
             descriptor descriptorPath "directory-tree" (String.replicate 64 "0") 0L
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath output |> ignore)
+                JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath output |> ignore)
             |> ignore
             assertEqual false (Directory.Exists(output))
 
@@ -385,7 +385,7 @@ type JdfBundleTests() =
                 |> fun value -> value.ToLowerInvariant()
             descriptor descriptorPath "zip" zipSha (FileInfo(zipPath).Length)
             let zipOutput = Path.Combine(root, "zip")
-            JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } zipPath zipOutput |> ignore
+            JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } zipPath zipOutput |> ignore
             assertEqual true (File.Exists(Path.Combine(zipOutput, "manifest.json")))
 
             let unsafeZip = Path.Combine(root, "unsafe.zip")
@@ -400,7 +400,7 @@ type JdfBundleTests() =
             descriptor descriptorPath "zip" unsafeSha (FileInfo(unsafeZip).Length)
             let unsafeOutput = Path.Combine(root, "unsafe")
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } unsafeZip unsafeOutput |> ignore)
+                JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } unsafeZip unsafeOutput |> ignore)
             |> ignore
             assertEqual false (Directory.Exists(unsafeOutput))
         finally
@@ -411,14 +411,14 @@ type JdfBundleTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-bundle-no-post-candidates-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
-            let sha, bytes = JdfBundle.directoryTreeIdentity fixturePath
+            let sha, bytes = JdfBundleInput.directoryTreeIdentity fixturePath
             let descriptorPath = Path.Combine(root, "snapshot.json")
             descriptor descriptorPath "directory-tree" sha bytes
             let output = Path.Combine(root, "bundle")
             let missingRoutingPbf = Path.Combine(root, "missing-routing.osm.pbf")
             let error =
                 Assert.ThrowsExactly<ArgumentException>(fun () ->
-                    JdfBundle.execute { JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit"; routingPbfPath=Some missingRoutingPbf } fixturePath output |> ignore)
+                    JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit"; routingPbfPath=Some missingRoutingPbf } fixturePath output |> ignore)
             StringAssert.Contains(error.Message, "JrutilPostCandidateEvidence.txt")
             assertEqual false (Directory.Exists(output))
         finally
@@ -438,7 +438,7 @@ type JdfBundleTests() =
             File.WriteAllText(reviewStops,string firstStop+Environment.NewLine)
             let diagnostics=Path.Combine(root,"diagnostics")
             let output=Path.Combine(root,"bundle")
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             reviewStopsPath=Some reviewStops
                             diagnosticsOutput=Some diagnostics}
             JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input output |> ignore
@@ -461,18 +461,18 @@ type JdfBundleTests() =
             let phases=ResizeArray<string>()
             JdfPostInferenceEvaluator.resetEvaluatorEntryCount()
             JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             maximumWorkers=3;memoryBudgetBytes=1L
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence
                             progress=fun value -> phases.Add(value.phase)}
             let result=JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"must-not-be-created"))
             match result with
-            | JdfBundle.CaptureCompleted(manifest,metrics) ->
+            | JdfBundleModel.CaptureCompleted(manifest,metrics) ->
                 Assert.IsTrue(manifest.routePointEvidenceCount>0L)
                 Assert.IsTrue(metrics.estimatedEvidenceBytes>0L)
                 assertEqual
-                    (metrics.estimatedEvidenceBytes+JdfBundle.PostEvidenceOutputSafetyReserveBytes)
+                    (metrics.estimatedEvidenceBytes+JdfBundleModel.PostEvidenceOutputSafetyReserveBytes)
                     metrics.atomicOutputHeadroomBytes
                 Assert.IsTrue(metrics.peakSpillBytes>=metrics.currentSpillBytes)
                 assertEqual 3 metrics.maximumWorkers
@@ -547,7 +547,7 @@ type JdfBundleTests() =
             Assert.IsTrue(expanded.routingEvidenceCount>=baseline.routingEvidenceCount)
             assertEqual expanded.routingEvidenceCount routed
             assertEqual 0L derivedSpill
-            let estimated=JdfBundle.estimatePostEvidenceOutputBytes expanded
+            let estimated=JdfBundleModel.estimatePostEvidenceOutputBytes expanded
             let expected =
                 expanded.observationCount*384L
                 + expanded.routePointCount*320L
@@ -618,12 +618,12 @@ type JdfBundleTests() =
 
             let evidence=Path.Combine(root,"evidence")
             let export=Path.Combine(root,"context-calls.parquet")
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence
                             exportPostContextCallsPath=Some export}
             match JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"unused")) with
-            | JdfBundle.CaptureCompleted(manifest,_) ->
+            | JdfBundleModel.CaptureCompleted(manifest,_) ->
                 let parquet=readParquet export
                 assertEqual manifest.packId parquet.CustomMetadata.["obehy.pack_id"]
                 assertEqual "post_context_calls" parquet.CustomMetadata.["obehy.relation"]
@@ -635,7 +635,7 @@ type JdfBundleTests() =
                 Assert.IsTrue(tripIds |> Set.forall(fun value -> value.StartsWith("jdf:trip:")))
             | _ -> Assert.Fail("Capture-only execution did not return CaptureCompleted")
             Assert.IsFalse(Directory.GetFiles(root,"context-calls.parquet.tmp-*").Length>0)
-            let bundleOptions={JdfBundle.defaultBundleOptions with
+            let bundleOptions={JdfBundleModel.defaultBundleOptions with
                                   exportPostContextCallsPath=Some(Path.Combine(root,"other.parquet"))}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.execute { bundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"live")) |> ignore) |> ignore
@@ -649,12 +649,12 @@ type JdfBundleTests() =
         try
             let descriptorPath,input,routing=routedCaptureFixture root
             let evidence=Path.Combine(root,"evidence")
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence}
             JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"unused")) |> ignore
             let output=Path.Combine(root,"features")
-            JdfBundle.exportPostInferenceFeatures evidence None output
+            JdfBundleEvidence.exportPostInferenceFeatures evidence None output
             use store=JdfPostEvidenceStore.openValidatedStore
                           JdfPostEvidenceStore.noIdentityExpectation evidence
             use expected=JdfPostInferenceEvaluator.evaluateWithDiagnostics true store
@@ -674,7 +674,7 @@ type JdfBundleTests() =
             assertEqual first.candidateId (string row.["candidate_id"])
             Assert.IsTrue(File.Exists(Path.Combine(output,"policy.json")))
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.exportPostInferenceFeatures evidence None output) |> ignore
+                JdfBundleEvidence.exportPostInferenceFeatures evidence None output) |> ignore
         finally
             if Directory.Exists(root) then Directory.Delete(root,true)
 
@@ -747,12 +747,12 @@ type JdfBundleTests() =
             let descriptorPath,input,routing=routedCaptureFixture root
             let capture name region =
                 let evidence=Path.Combine(root,name)
-                let options={JdfBundle.defaultBundleOptions with
+                let options={JdfBundleModel.defaultBundleOptions with
                                 postInferenceEvidenceOnly=true
                                 capturePostInferenceEvidencePath=Some evidence
                                 captureRestriction=region}
                 match JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,name+"-unused")) with
-                | JdfBundle.CaptureCompleted(manifest,_) -> evidence,manifest
+                | JdfBundleModel.CaptureCompleted(manifest,_) -> evidence,manifest
                 | _ -> failwith "Capture-only execution did not return CaptureCompleted"
             let region=
                 {JdfPostEvidence.noCaptureRestriction with
@@ -768,13 +768,13 @@ type JdfBundleTests() =
             Assert.IsTrue(regionManifest.contextCount>0L)
             Assert.IsTrue(regionManifest.contextCount<fullManifest.contextCount)
             for evidence in [|regionEvidence;excludedEvidence|] do
-                let replayOptions={JdfBundle.defaultBundleOptions with
+                let replayOptions={JdfBundleModel.defaultBundleOptions with
                                       postInferenceEvidencePath=Some evidence}
                 let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                     JdfBundle.execute { replayOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool" } input (Path.Combine(root,"bundle")) |> ignore)
                 StringAssert.Contains(error.Message,"Restricted post-inference evidence")
                 Assert.IsFalse(Directory.Exists(Path.Combine(root,"bundle")))
-            let liveOptions={JdfBundle.defaultBundleOptions with
+            let liveOptions={JdfBundleModel.defaultBundleOptions with
                                 captureRestriction=region}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.execute { liveOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"live")) |> ignore) |> ignore
@@ -863,7 +863,7 @@ type JdfBundleTests() =
             Directory.CreateDirectory(collision) |> ignore
             let sentinel=Path.Combine(collision,"owned.txt")
             File.WriteAllText(sentinel,"preserve")
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             maximumWorkers=4;memoryBudgetBytes=1L
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some collision}
@@ -891,7 +891,7 @@ type JdfBundleTests() =
                 use stream=File.OpenRead(input)
                 Security.Cryptography.SHA256.HashData(stream) |> Convert.ToHexString
                 |> _.ToLowerInvariant()
-            let snapshot:JdfBundle.SnapshotDescriptor = {
+            let snapshot:JdfBundleModel.SnapshotDescriptor = {
                 sourceId="national-jdf";retrievedAt="2026-07-18T12:00:00+02:00"
                 retrievalMethod="fixture";sourceUri=None;licence="synthetic-test-data"
                 payloadKind="zip";payloadSha256=inputSha;payloadBytes=FileInfo(input).Length }
@@ -907,7 +907,7 @@ type JdfBundleTests() =
                     preflight=ignore
                     progress=fun _ _ _ _ -> () }
                 use captured=JdfPostEvidence.captureToStore captureOptions graph value
-                JdfBundle.writePostEvidenceStore snapshot "test-tool"
+                JdfBundleEvidence.writePostEvidenceStore snapshot "test-tool"
                     (Path.Combine(root,name)) routing captured (fun _ _ _ -> ())
             let baseline=Path.Combine(root,"one-worker-memory")
             let relativeFiles=Array.append JdfPostInference.RequiredEvidenceFiles [|"manifest.json"|]
@@ -935,7 +935,7 @@ type JdfBundleTests() =
         try
             let descriptorPath,input,routing=routedCaptureFixture root
             let evidence=Path.Combine(root,"evidence")
-            let captureOptions={JdfBundle.defaultBundleOptions with
+            let captureOptions={JdfBundleModel.defaultBundleOptions with
                                     maximumWorkers=3;memoryBudgetBytes=1L
                                     postInferenceEvidenceOnly=true
                                     capturePostInferenceEvidencePath=Some evidence}
@@ -988,10 +988,10 @@ type JdfBundleTests() =
 
             let liveOutput=Path.Combine(root,"live")
             let replayOutput=Path.Combine(root,"replay")
-            let liveOptions={JdfBundle.defaultBundleOptions with
+            let liveOptions={JdfBundleModel.defaultBundleOptions with
                                 maximumWorkers=3;memoryBudgetBytes=1L}
             JdfBundle.execute { liveOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input liveOutput |> ignore
-            let replayOptions={JdfBundle.defaultBundleOptions with
+            let replayOptions={JdfBundleModel.defaultBundleOptions with
                                   memoryBudgetBytes=1L
                                   postInferenceEvidencePath=Some evidence}
             JdfBundle.execute { replayOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool" } input replayOutput |> ignore
@@ -1035,16 +1035,16 @@ type JdfBundleTests() =
             Assert.IsTrue(match loaded.scorer with JdfPostInferencePolicy.LearnedScorer _ -> true | _ -> false)
             let evidence=Path.Combine(root,"evidence")
             JdfBundle.execute
-                {JdfBundle.defaultBundleOptions with
+                {JdfBundleModel.defaultBundleOptions with
                     maximumWorkers=3;memoryBudgetBytes=1L;postInferenceEvidenceOnly=true
                     capturePostInferenceEvidencePath=Some evidence; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing} input (Path.Combine(root,"capture-unused")) |> ignore
             let liveOutput=Path.Combine(root,"live")
             let replayOutput=Path.Combine(root,"replay")
             JdfBundle.execute
-                {JdfBundle.defaultBundleOptions with
+                {JdfBundleModel.defaultBundleOptions with
                     maximumWorkers=3;memoryBudgetBytes=1L;postInferencePolicyPath=Some policyPath; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing} input liveOutput |> ignore
             JdfBundle.execute
-                {JdfBundle.defaultBundleOptions with
+                {JdfBundleModel.defaultBundleOptions with
                     memoryBudgetBytes=1L;postInferenceEvidencePath=Some evidence
                     postInferencePolicyPath=Some policyPath; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"} input replayOutput |> ignore
             JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
@@ -1075,7 +1075,7 @@ type JdfBundleTests() =
         try
             let descriptorPath,input,routing=routedCaptureFixture root
             let evidence=Path.Combine(root,"evidence")
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence}
             JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"unused")) |> ignore
@@ -1100,7 +1100,7 @@ type JdfBundleTests() =
         try
             let descriptorPath,input,routing=routedCaptureFixture root
             let baseline=Path.Combine(root,"baseline")
-            let options={JdfBundle.defaultBundleOptions with
+            let options={JdfBundleModel.defaultBundleOptions with
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some baseline}
             JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"unused")) |> ignore
@@ -1175,7 +1175,7 @@ type JdfBundleTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-bundle-evidence-identity-" + Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
-            let sha, bytes = JdfBundle.directoryTreeIdentity fixturePath
+            let sha, bytes = JdfBundleInput.directoryTreeIdentity fixturePath
             let descriptorPath = Path.Combine(root, "snapshot.json")
             descriptor descriptorPath "directory-tree" sha bytes
             let evidencePath=Path.Combine(root,"evidence")
@@ -1197,7 +1197,7 @@ type JdfBundleTests() =
                 files=evidenceFiles |> Array.map(fun path ->
                     {JdfPostInference.EvidenceFileManifest.path=path;sha256=emptyHash;bytes=0L
                      rows=0L;schemaFingerprint="test"}) }
-            let options={ JdfBundle.defaultBundleOptions with postInferenceEvidencePath=Some evidencePath }
+            let options={ JdfBundleModel.defaultBundleOptions with postInferenceEvidencePath=Some evidencePath }
             let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath (Path.Combine(root,"bundle")) |> ignore)
             StringAssert.Contains(error.Message,"different merged JDF")
@@ -1654,7 +1654,7 @@ type JdfBundleTests() =
                   unresolvedContexts=0;authoredPositions=1;sameStopBlocks=0
                   distinctPairChoices=0;unresolvedBlockEdges=0
                   physicalResolutions=1;sideResolutions=0;centroidResolutions=0 })
-            let plan=JdfToGtfs.postEstimationPlanFromInferenceResult result
+            let plan=JdfPostPlan.postEstimationPlanFromInferenceResult result
             assertEqual 1 plan.calls.Count
             assertEqual 1 plan.authored.Count
             assertEqual "id:7" (plan.authored |> Seq.exactlyOne |> _.Key |> snd)

@@ -771,15 +771,15 @@ type RegionalGtfsOverlayTests() =
 
     [<TestMethod>]
     member _.``Czech stop-name abbreviations match their verbose IDS JMK forms``() =
-        let rank left right = JrUtil.RegionalOverlay.Support.stopNameMatchRank left right
+        let rank left right = JrUtil.RegionalOverlay.Names.stopNameMatchRank left right
         Assert.IsTrue(rank "Ochoz u Brna, obecní úřad" "Ochoz u Brna,ObÚ" |> Option.isSome)
         Assert.IsTrue(rank "Bílovice nad Svitavou, železniční stanice" "Bílovice n.Svit.,žel.st." |> Option.isSome)
         Assert.IsTrue(rank "Moravský Krumlov, náměstí" "Moravský Krumlov,nám." |> Option.isSome)
         Assert.IsTrue(rank "Svatobořice-Mistřín, restaurace" "Svatobořice-Mistřín,rest." |> Option.isSome)
         Assert.IsTrue(rank "Ochoz u Brna, obecní úřad" "Ochoz u Brna, železniční stanice" |> Option.isNone)
-        Assert.IsTrue(JrUtil.RegionalOverlay.Support.compatibleModeClasses "trolleybus" "bus")
-        Assert.IsTrue(JrUtil.RegionalOverlay.Support.structurallyCompatibleRouteLabels "H4" "H")
-        Assert.IsFalse(JrUtil.RegionalOverlay.Support.structurallyCompatibleRouteLabels "25" "2")
+        Assert.IsTrue(JrUtil.RegionalOverlay.Names.compatibleModeClasses "trolleybus" "bus")
+        Assert.IsTrue(JrUtil.RegionalOverlay.Names.structurallyCompatibleRouteLabels "H4" "H")
+        Assert.IsFalse(JrUtil.RegionalOverlay.Names.structurallyCompatibleRouteLabels "25" "2")
 
     [<TestMethod>]
     member _.``Combined PID and IDS JMK overlay is order independent and preserves JMK metadata``() =

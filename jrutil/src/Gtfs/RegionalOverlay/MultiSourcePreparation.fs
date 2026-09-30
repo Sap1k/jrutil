@@ -13,6 +13,9 @@ open System.Text.RegularExpressions
 
 open JrUtil.RegionalOverlay.Types
 open JrUtil.RegionalOverlay.Model
+open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.StopGroups
 open JrUtil.RegionalOverlay.Support
 open JrUtil.RegionalOverlay.Policy
 

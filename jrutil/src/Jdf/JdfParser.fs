@@ -10,7 +10,6 @@ open System.Text
 open NodaTime
 open NodaTime.Text
 
-open JrUtil.Utils
 open JrUtil.CsvParser
 
 let jdfDatePattern = LocalDatePattern.CreateWithInvariantCulture("ddMMyyyy")

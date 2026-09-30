@@ -13,8 +13,8 @@ open System.Text.Json
 open JrUtil.Serving
 
 type Options = {
-    catalog: CzPttToGtfs.CatalogSnapshot
-    conversion: CzPttToGtfs.ConversionOptions
+    catalog: CzPttModel.CatalogSnapshot
+    conversion: CzPttModel.ConversionOptions
     sr70Path: string option
     osmPath: string option
     osmAliasesPath: string option
@@ -52,8 +52,8 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
         diagnostics.["schema_version"] <- box 1
         diagnostics.["operational_points"] <-
             box (match options.conversion.operationalPointMode with
-                 | CzPttToGtfs.Gtfs -> "gtfs"
-                 | CzPttToGtfs.Sidecar -> "sidecar")
+                 | CzPttModel.Gtfs -> "gtfs"
+                 | CzPttModel.Sidecar -> "sidecar")
         diagnostics.["accepted_pa_count"] <- box result.acceptedPaIds.Length
         diagnostics.["rejected_journeys"] <- box result.rejectedJourneys
         diagnostics.["cancelled_pa_ids"] <- box result.cancelledPaIds

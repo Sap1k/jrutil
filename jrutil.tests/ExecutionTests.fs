@@ -146,7 +146,7 @@ type ExecutionTests() =
     member _.``Bounded parallel map preserves input order``() =
         let results =
             [0..11]
-            |> JrUtil.Utils.mapParallelOrderedBatches 4 (fun value ->
+            |> JrUtil.ParallelUtils.mapParallelOrderedBatches 4 (fun value ->
                 Thread.Sleep((3 - value % 4) * 5)
                 value * value)
             |> Seq.toArray
@@ -167,7 +167,7 @@ type ExecutionTests() =
             finally
                 lock gate (fun () -> running <- running - 1)
         [0..19]
-        |> JrUtil.Utils.mapParallelOrderedBatches 3 work
+        |> JrUtil.ParallelUtils.mapParallelOrderedBatches 3 work
         |> Seq.iter ignore
         Assert.IsTrue(maximum <= 3, $"Observed {maximum} concurrent workers")
         Assert.IsTrue(maximum > 1, "The test did not observe concurrent execution")
@@ -179,7 +179,7 @@ type ExecutionTests() =
         let processing =
             Task.Run(fun () ->
                 [0..3]
-                |> JrUtil.Utils.mapParallelOrderedBatches 2 (fun value ->
+                |> JrUtil.ParallelUtils.mapParallelOrderedBatches 2 (fun value ->
                     if value = 1 then releaseSecond.Wait()
                     if value = 2 then thirdStarted.Set()
                     value)
@@ -196,7 +196,7 @@ type ExecutionTests() =
     member _.``Bounded parallel map reports failures in input order``() =
         let values =
             [0..3]
-            |> JrUtil.Utils.mapParallelOrderedBatches 3 (fun value ->
+            |> JrUtil.ParallelUtils.mapParallelOrderedBatches 3 (fun value ->
                 if value = 1 then raise (InvalidOperationException("first"))
                 if value = 2 then raise (InvalidOperationException("second"))
                 value)
@@ -211,7 +211,7 @@ type ExecutionTests() =
         use thirdStarted = new ManualResetEventSlim(false)
         let values =
             [0..7]
-            |> JrUtil.Utils.mapParallelOrderedAdaptive
+            |> JrUtil.ParallelUtils.mapParallelOrderedAdaptive
                 4 2 (1024L * GiB) 64L (fun _ -> 1L) ignore ignore (fun value ->
                     if value = 2 then thirdStarted.Set()
                     Thread.Sleep(20)
@@ -231,7 +231,7 @@ type ExecutionTests() =
         let mutable started = 0
         let values =
             [0..99]
-            |> JrUtil.Utils.mapParallelOrderedAdaptive
+            |> JrUtil.ParallelUtils.mapParallelOrderedAdaptive
                 2 2 (1024L * GiB) 1024L (fun _ -> 1L) ignore ignore (fun value ->
                     Interlocked.Increment(&started) |> ignore
                     Thread.Sleep(5)
@@ -248,7 +248,7 @@ type ExecutionTests() =
         let mutable maximum = 0
         let values =
             [0..7]
-            |> JrUtil.Utils.mapParallelOrderedAdaptive
+            |> JrUtil.ParallelUtils.mapParallelOrderedAdaptive
                 6 4 (1024L * GiB) 64L (fun _ -> 1L) ignore ignore (fun value ->
                     lock gate (fun () ->
                         active <- active + 1
@@ -273,7 +273,7 @@ type ExecutionTests() =
     member _.``Adaptive map admits one oversized input``() =
         let result =
             [0; 1; 2]
-            |> JrUtil.Utils.mapParallelOrderedAdaptive
+            |> JrUtil.ParallelUtils.mapParallelOrderedAdaptive
                 3 3 (1024L * GiB) 10L
                 (fun value -> if value = 1 then 20L else 4L)
                 ignore ignore id
@@ -285,7 +285,7 @@ type ExecutionTests() =
         use secondStarted = new ManualResetEventSlim(false)
         let values =
             [0; 1]
-            |> JrUtil.Utils.mapParallelOrderedAdaptive
+            |> JrUtil.ParallelUtils.mapParallelOrderedAdaptive
                 2 2 (1024L * GiB) 10L (fun _ -> 8L) ignore ignore (fun value ->
                     if value = 1 then secondStarted.Set()
                     value)
@@ -307,7 +307,7 @@ type ExecutionTests() =
         try
             File.WriteAllText(destination, "old")
             Assert.ThrowsExactly<InvalidOperationException>(fun () ->
-                JrUtil.Utils.writeAtomicFile destination (fun temporary ->
+                JrUtil.FileUtils.writeAtomicFile destination (fun temporary ->
                     File.WriteAllText(temporary, "partial")
                     raise (InvalidOperationException("stop"))))
             |> ignore

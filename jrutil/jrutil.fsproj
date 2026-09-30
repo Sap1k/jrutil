@@ -12,6 +12,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="src/DateUtils.fs" />
+    <Compile Include="src/FileUtils.fs" />
+    <Compile Include="src/ParallelUtils.fs" />
+    <Compile Include="src/CliArgs.fs" />
+    <Compile Include="src/Logging.fs" />
     <Compile Include="src/Utils.fs" />
     <Compile Include="src/Core/Hashing.fs" />
     <Compile Include="src/Core/Memory.fs" />
@@ -38,6 +43,13 @@
     <Compile Include="src/Gtfs/RegionalOverlay/DateSet.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Model.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Runtime.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Values.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/Names.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/GtfsFiles.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/GtfsRows.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/TripScoring.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/StopGroups.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/OutputIds.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Support.fs" />
     <Compile Include="src/Serving/Schema.fs" />
     <Compile Include="src/Serving/Identity.fs" />
@@ -56,6 +68,11 @@
     <Compile Include="src/Serving/RouteStopWriter.fs" />
     <Compile Include="src/Serving/FeatureWriter.fs" />
     <Compile Include="src/Serving/BindingWriter.fs" />
+    <Compile Include="src/Serving/PackageRows.fs" />
+    <Compile Include="src/Serving/PackageBaseRelations.fs" />
+    <Compile Include="src/Serving/PackageGtfsRelations.fs" />
+    <Compile Include="src/Serving/PackageBindingRelations.fs" />
+    <Compile Include="src/Serving/PackageSemanticRelations.fs" />
     <Compile Include="src/Serving/PackageWriter.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Shapes.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Policy.fs" />
@@ -80,21 +97,43 @@
     <Compile Include="src/Jdf/Jdf109To110.fs" />
     <Compile Include="src/Jdf/Jdf.fs" />
     <Compile Include="src/Jdf/JdfStopReconciliation.fs" />
+    <Compile Include="src/Jdf/JdfTripStopSpool.fs" />
     <Compile Include="src/Jdf/JdfMerger.fs" />
     <Compile Include="src/Jdf/JdfFixups.fs" />
+    <Compile Include="src/GeoData/OsmStops.fs" />
     <Compile Include="src/GeoData/Osm.fs" />
     <Compile Include="src/Jdf/JdfPostScorer.fs" />
     <Compile Include="src/Jdf/JdfPostInferencePolicy.fs" />
     <Compile Include="src/Jdf/JdfPostInference.fs" />
     <Compile Include="src/Jdf/JdfPostEvidence.fs" />
     <Compile Include="src/Jdf/JdfPostEvidenceStore.fs" />
+    <Compile Include="src/Jdf/JdfPostEvidenceReader.fs" />
+    <Compile Include="src/Jdf/JdfPostPolicyEvaluation.fs" />
+    <Compile Include="src/Jdf/JdfPostSideGroups.fs" />
     <Compile Include="src/Jdf/JdfPostInferenceEvaluator.fs" />
+    <Compile Include="src/Jdf/JdfGtfsRules.fs" />
+    <Compile Include="src/Jdf/JdfPostPlan.fs" />
+    <Compile Include="src/Jdf/JdfCalendar.fs" />
+    <Compile Include="src/Jdf/JdfInternationalFilter.fs" />
     <Compile Include="src/Jdf/JdfToGtfs.fs" />
+    <Compile Include="src/Jdf/JdfBundleModel.fs" />
+    <Compile Include="src/Jdf/JdfBundleInput.fs" />
+    <Compile Include="src/Jdf/JdfBundleTables.fs" />
+    <Compile Include="src/Jdf/JdfBundleEvidence.fs" />
+    <Compile Include="src/Jdf/JdfBundleManifest.fs" />
+    <Compile Include="src/Jdf/JdfBundleReview.fs" />
     <Compile Include="src/Jdf/JdfBundle.fs" />
     <Compile Include="src/GeoData/ExternalCsv.fs" />
+    <Compile Include="src/Jdf/JdfFix.fs" />
     <Compile Include="src/CzPtt/CzPtt.fs" />
     <Compile Include="src/CzPtt/CzPttMerger.fs" />
+    <Compile Include="src/CzPtt/CzPttModel.fs" />
+    <Compile Include="src/CzPtt/CzPttNormalize.fs" />
+    <Compile Include="src/CzPtt/CzPttEntities.fs" />
+    <Compile Include="src/CzPtt/CzPttTransfers.fs" />
+    <Compile Include="src/CzPtt/CzPttAgencies.fs" />
     <Compile Include="src/CzPtt/CzPttToGtfs.fs" />
+    <Compile Include="src/CzPtt/CzPttCoordinates.fs" />
     <Compile Include="src/CzPtt/CzPttBundle.fs" />
     <Compile Include="src/CzPtt/CzPttPackage.fs" />
   </ItemGroup>

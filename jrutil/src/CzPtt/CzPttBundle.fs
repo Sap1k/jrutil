@@ -19,6 +19,7 @@ open Parquet.Schema
 open Parquet.Serialization
 
 open JrUtil
+open JrUtil.CzPttCoordinates
 
 let mutable private activeSpillBytes = 0L
 let currentSpillBytes () = activeSpillBytes
@@ -96,7 +97,7 @@ let private paId (message: CzPttXml.CzpttcisMessage) =
     CzPtt.timetableIdentifier message CzPttXml.ObjectType.Pa
     |> CzPtt.identifierStr
 
-let private idsRole (catalog: CzPttToGtfs.CatalogSnapshot) code =
+let private idsRole (catalog: CzPttModel.CatalogSnapshot) code =
     catalog.ids
     |> Array.tryFind (fun record -> record.code = code)
     |> Option.map (fun record ->
@@ -108,347 +109,13 @@ let private idsRole (catalog: CzPttToGtfs.CatalogSnapshot) code =
                     RegexOptions.CultureInvariant))
         if fareZone then "fare_zone" else "coverage")
 
-let private idsSystem (catalog: CzPttToGtfs.CatalogSnapshot) code =
+let private idsSystem (catalog: CzPttModel.CatalogSnapshot) code =
     catalog.ids
     |> Array.tryFind (fun record -> record.code = code)
     |> Option.map (fun record ->
         let parts = record.abbreviation.Split('_')
         if parts.Length > 1 then parts.[0] else record.abbreviation)
 
-type private Sr70CoordinateIndex = {
-    coordinates: Map<string * string, double * double>
-    names: CzPttToGtfs.PointNameIndex
-    conflictingCodes: string array
-    invalidCodes: string array
-}
-
-let private loadSr70Coordinates path =
-    match path with
-    | None -> {
-        coordinates = Map.empty
-        names = Map.empty
-        conflictingCodes = [||]
-        invalidCodes = [||]
-      }
-    | Some file ->
-        let parsed =
-            CsvFile.Parse(File.ReadAllText(file), hasHeaders = false).Rows
-            |> Seq.choose (fun row ->
-                let fields = row.Columns
-                if fields.Length < 1 || fields.[0].Length < 5 then None
-                else
-                    let code = fields.[0].Substring(0, 5)
-                    let name =
-                        if fields.Length < 2 then None
-                        else
-                            let value = fields.[1].Trim()
-                            if String.IsNullOrWhiteSpace(value) || value = "-"
-                            then None
-                            else Some value
-                    if fields.Length < 4 then Some (code, name, None)
-                    else
-                        match Double.TryParse(
-                                  fields.[fields.Length - 2],
-                                  NumberStyles.Float,
-                                  CultureInfo.InvariantCulture),
-                              Double.TryParse(
-                                  fields.[fields.Length - 1],
-                                  NumberStyles.Float,
-                                  CultureInfo.InvariantCulture) with
-                        | (true, latitude), (true, longitude)
-                            when latitude >= -90. && latitude <= 90.
-                                 && longitude >= -180. && longitude <= 180. ->
-                            Some (code, name, Some (latitude, longitude))
-                        | _ -> Some (code, name, None))
-            |> Seq.toArray
-        let grouped =
-            parsed
-            |> Seq.choose (fun (code, _, coordinates) ->
-                coordinates |> Option.map (fun value -> code, value))
-            |> Seq.groupBy fst
-            |> Seq.map (fun (code, values) ->
-                code, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
-            |> Seq.toArray
-        let invalidCodes =
-            parsed
-            |> Seq.choose (fun (code, _, coordinates) ->
-                if coordinates.IsNone then Some code else None)
-            |> Seq.distinct
-            |> Seq.sort
-            |> Seq.toArray
-        {
-            coordinates =
-                grouped
-                |> Seq.choose (fun (code, coordinates) ->
-                    if coordinates.Length = 1
-                       && not (Array.contains code invalidCodes)
-                    then Some (("CZ", code), coordinates.[0])
-                    else None)
-                |> Map
-            names =
-                parsed
-                |> Seq.choose (fun (code, name, _) ->
-                    name |> Option.map (fun value -> code, value))
-                |> Seq.groupBy fst
-                |> Seq.choose (fun (code, values) ->
-                    let names = values |> Seq.map snd |> Seq.distinct |> Seq.toArray
-                    if names.Length = 1 then Some (("CZ", code), names.[0])
-                    else None)
-                |> Map
-            conflictingCodes =
-                grouped
-                |> Seq.choose (fun (code, coordinates) ->
-                    if coordinates.Length > 1 then Some code else None)
-                |> Seq.sort
-                |> Seq.toArray
-            invalidCodes = invalidCodes
-        }
-
-type private OsmCandidate = {
-    objectId: string
-    countryCode: string option
-    plc: string option
-    names: string array
-    latitude: double
-    longitude: double
-}
-
-type private SelectedCoordinate = {
-    latitude: double
-    longitude: double
-    source: string
-    objectId: string option
-    matchMethod: string
-}
-
-type private EstimateCandidate = {
-    identity: string * string
-    latitude: double
-    longitude: double
-    methodName: string
-    anchorTier: int
-    callSpan: int
-    anchorDistance: double
-    serviceDays: int
-    paId: string
-    sourceSequence: int
-}
-
-let private optionalTag name (node: Node) =
-    let mutable value = null
-    if not (isNull node.Tags) && node.Tags.TryGetValue(name, &value)
-    then Option.ofObj value |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    else None
-
-let private normalizedName (value: string) =
-    let transliterated =
-        value
-            .Replace("ß", "ss")
-            .Replace("ẞ", "SS")
-            .Replace("Ł", "L")
-            .Replace("ł", "l")
-            .Replace("Ø", "O")
-            .Replace("ø", "o")
-            .Replace("Æ", "AE")
-            .Replace("æ", "ae")
-    let decomposed = transliterated.Normalize(NormalizationForm.FormD)
-    let withoutMarks =
-        decomposed
-        |> Seq.filter (fun character ->
-            Globalization.CharUnicodeInfo.GetUnicodeCategory(character)
-            <> Globalization.UnicodeCategory.NonSpacingMark)
-        |> Seq.toArray
-        |> String
-    Regex.Replace(withoutMarks, @"[^\p{L}\p{N}]+", " ")
-        .Trim().ToUpperInvariant()
-
-let private railwayNameCore (value: string) =
-    let withoutOperationalQualifier =
-        Regex.Replace(value, @"\s*\([^)]*\)\s*$", "")
-    let removable =
-        Set.ofList [
-            "Bf"; "Fbf"; "Gr"; "Hp"; "Hst"; "N"; "Nz"; "Pzs"; "S"; "St";
-            "Z"; "Zast"; "Zastavka"
-        ]
-        |> Set.map normalizedName
-    let tokens =
-        (normalizedName withoutOperationalQualifier)
-            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-        |> Array.toList
-    let rec trimSuffix values =
-        match List.tryLast values with
-        | Some token when
-            Set.contains token removable
-            || Regex.IsMatch(token, @"^R[0-9]+$") ->
-            values |> List.take (values.Length - 1) |> trimSuffix
-        | _ -> values
-    match trimSuffix tokens with
-    | [] -> normalizedName value
-    | values -> String.concat " " values
-
-let private editSimilarity (left: string) (right: string) =
-    if left = right then 1.
-    elif String.IsNullOrEmpty(left) || String.IsNullOrEmpty(right) then 0.
-    else
-        let previous = Array.init (right.Length + 1) id
-        let current = Array.zeroCreate<int> (right.Length + 1)
-        for leftIndex = 1 to left.Length do
-            current.[0] <- leftIndex
-            for rightIndex = 1 to right.Length do
-                let substitution =
-                    if left.[leftIndex - 1] = right.[rightIndex - 1] then 0 else 1
-                current.[rightIndex] <-
-                    min
-                        (min
-                            (current.[rightIndex - 1] + 1)
-                            (previous.[rightIndex] + 1))
-                        (previous.[rightIndex - 1] + substitution)
-            Array.blit current 0 previous 0 current.Length
-        1. - float previous.[right.Length] / float (max left.Length right.Length)
-
-let private nameSimilarity (left: string) (right: string) =
-    let leftFull = normalizedName left
-    let rightFull = normalizedName right
-    let leftCore = railwayNameCore left
-    let rightCore = railwayNameCore right
-    let compact (value: string) = value.Replace(" ", "")
-    [|
-        editSimilarity leftFull rightFull
-        editSimilarity leftCore rightCore
-        editSimilarity (compact leftCore) (compact rightCore)
-    |]
-    |> Array.max
-
-let private protectedFuzzyNameTokens =
-    [
-        "Ost"; "West"; "Nord"; "Süd"; "Mitte"
-        "východ"; "západ"; "sever"; "jih"; "juh"; "střed"
-        "Wschód"; "Zachód"; "Północ"; "Południe"; "Górna"; "Dolna"
-        "město"; "mesto"; "miasto"; "centrum"
-    ]
-    |> Seq.map normalizedName
-    |> Set
-
-let private fuzzyQualifierCompatible (expected: string) (candidate: string) =
-    let tokens value =
-        (normalizedName value).Split(
-            ' ',
-            StringSplitOptions.RemoveEmptyEntries)
-    let required =
-        tokens expected
-        |> Array.filter (fun token -> Set.contains token protectedFuzzyNameTokens)
-    let available = tokens candidate
-    required
-    |> Array.forall (fun requiredToken ->
-        available
-        |> Array.exists (fun candidateToken ->
-            candidateToken = requiredToken
-            || candidateToken.StartsWith(
-                requiredToken,
-                StringComparison.Ordinal)))
-
-let private normalizedCountryCode (value: string) =
-    match value.Trim().ToUpperInvariant() with
-    | "AUT" -> "AT"
-    | "CZE" -> "CZ"
-    | "DEU" -> "DE"
-    | "POL" -> "PL"
-    | "SVK" -> "SK"
-    | country -> country
-
-let private loadOsmCandidates path =
-    match path with
-    | None -> [||]
-    | Some file ->
-        use stream = File.OpenRead(file)
-        new PBFOsmStreamSource(stream)
-        |> Seq.choose (function
-            | :? Node as node
-                when node.Id.HasValue
-                     && node.Latitude.HasValue
-                     && node.Longitude.HasValue ->
-                let railway = optionalTag "railway" node
-                let publicTransport = optionalTag "public_transport" node
-                let isRailwayLocation =
-                    railway
-                    |> Option.exists (fun value ->
-                        value = "station" || value = "halt" || value = "stop")
-                    || publicTransport
-                       |> Option.exists (fun value ->
-                           value = "station" || value = "stop_position")
-                if not isRailwayLocation then None
-                else
-                    let plc =
-                        optionalTag "ref:EU:PLC" node
-                        |> Option.bind (fun value ->
-                            let compact =
-                                Regex.Replace(value, @"\s+", "").ToUpperInvariant()
-                            if Regex.IsMatch(compact, @"^[A-Z]{2}[0-9]{5}$")
-                            then Some compact
-                            else None)
-                    let country =
-                        plc
-                        |> Option.map (fun value -> value.Substring(0, 2))
-                        |> Option.orElseWith (fun () ->
-                            optionalTag "addr:country" node
-                            |> Option.orElseWith (fun () ->
-                                optionalTag "is_in:country_code" node)
-                            |> Option.map normalizedCountryCode)
-                    let names =
-                        [|
-                            optionalTag "name" node
-                            optionalTag "official_name" node
-                            optionalTag "alt_name" node
-                            optionalTag "short_name" node
-                            optionalTag "loc_name" node
-                            optionalTag "old_name" node
-                            optionalTag "uic_name" node
-                            optionalTag "name:cs" node
-                            optionalTag "name:de" node
-                            optionalTag "name:pl" node
-                            optionalTag "name:sk" node
-                        |]
-                        |> Array.choose id
-                        |> Array.map (fun value -> value.Trim())
-                        |> Array.filter (String.IsNullOrWhiteSpace >> not)
-                        |> Array.distinct
-                    Some {
-                        objectId = $"osm:node:{node.Id.Value}"
-                        countryCode = country
-                        plc = plc
-                        names = names
-                        latitude = node.Latitude.Value
-                        longitude = node.Longitude.Value
-                    }
-            | _ -> None)
-        |> Seq.sortBy (fun value -> value.objectId)
-        |> Seq.toArray
-
-let private loadAliases path =
-    match path with
-    | None -> Map.empty
-    | Some file when not (File.Exists(file)) -> Map.empty
-    | Some file ->
-        use document = JsonDocument.Parse(File.ReadAllText(file))
-        let root =
-            if document.RootElement.ValueKind <> JsonValueKind.Object then
-                document.RootElement
-            else
-                match document.RootElement.TryGetProperty("aliases") with
-                | true, value -> value
-                | _ -> document.RootElement
-        if root.ValueKind <> JsonValueKind.Object then Map.empty
-        else
-            root.EnumerateObject()
-            |> Seq.choose (fun property ->
-                if property.Value.ValueKind = JsonValueKind.String
-                then property.Value.GetString() |> Option.ofObj
-                     |> Option.map (fun value -> property.Name, value)
-                else None)
-            |> Map
-
-let private distanceMeters (latitude1, longitude1) (latitude2, longitude2) =
-    Geo.haversineMetres latitude1 longitude1 latitude2 longitude2
 
 /// Convert CZPTT messages into a feed plus operational and source-metadata
 /// sidecars; `outputDirectory` is private scratch for the sidecar spools.
@@ -527,7 +194,7 @@ let convert storagePolicy catalog options inputPath outputDirectory
     let ambiguous = HashSet<string>()
     let corridorRejected = HashSet<string>()
     let conflicts =
-        ResizeArray<CzPttToGtfs.CoordinateConflictDiagnostic>()
+        ResizeArray<CzPttModel.CoordinateConflictDiagnostic>()
     let osmByPlcIndex =
         osmCandidates
         |> Seq.choose (fun candidate ->
@@ -566,14 +233,14 @@ let convert storagePolicy catalog options inputPath outputDirectory
     let osmByPlc (country: string, code: string) =
         let expected = (country + code).ToUpperInvariant()
         Map.tryFind expected osmByPlcIndex |> Option.defaultValue [||]
-    let journeys: CzPttToGtfs.OperationalCall array array =
+    let journeys: CzPttModel.OperationalCall array array =
         rawResult.operationalCalls
         |> Seq.groupBy (fun call -> call.paId)
         |> Seq.map (fun (_, calls) ->
             calls |> Seq.sortBy (fun call -> call.sourceSequence) |> Seq.toArray)
         |> Seq.toArray
     let occurrencesByIdentity:
-            Map<string * string, (CzPttToGtfs.OperationalCall array * int) array> =
+            Map<string * string, (CzPttModel.OperationalCall array * int) array> =
         journeys
         |> Seq.collect (fun calls ->
             calls
@@ -649,15 +316,15 @@ let convert storagePolicy catalog options inputPath outputDirectory
             "normalized_railway_name", fun () -> coreNameCandidates identity
             "normalized_fuzzy_name", fun () -> fuzzyNameCandidates identity
         |]
-    let departureTime (call: CzPttToGtfs.OperationalCall) =
+    let departureTime (call: CzPttModel.OperationalCall) =
         call.departureSeconds |> Option.orElse call.arrivalSeconds
-    let arrivalTime (call: CzPttToGtfs.OperationalCall) =
+    let arrivalTime (call: CzPttModel.OperationalCall) =
         call.arrivalSeconds |> Option.orElse call.departureSeconds
     let edgePlausibility
             (leftCoordinate: double * double)
-            (leftCall: CzPttToGtfs.OperationalCall)
+            (leftCall: CzPttModel.OperationalCall)
             (rightCoordinate: double * double)
-            (rightCall: CzPttToGtfs.OperationalCall) =
+            (rightCall: CzPttModel.OperationalCall) =
         match departureTime leftCall, arrivalTime rightCall with
         | Some left, Some right when right > left ->
             let maximumMeters =
@@ -826,11 +493,11 @@ let convert storagePolicy catalog options inputPath outputDirectory
                     selectedCoordinates <- Map.add identity coordinate withoutCurrent
                 | None ->
                     selectedCoordinates <- withoutCurrent
-    let callTime (call: CzPttToGtfs.OperationalCall) =
+    let callTime (call: CzPttModel.OperationalCall) =
         call.arrivalSeconds |> Option.orElse call.departureSeconds
     let coordinateForCall
             (selected: Map<string * string, SelectedCoordinate>)
-            (call: CzPttToGtfs.OperationalCall) =
+            (call: CzPttModel.OperationalCall) =
         Map.tryFind (call.countryCode, call.primaryCode) selected
     let serviceDaysByPa =
         messages
@@ -848,7 +515,7 @@ let convert storagePolicy catalog options inputPath outputDirectory
         |> Set
     let estimateCandidates
             (identity: string * string)
-            (calls: CzPttToGtfs.OperationalCall array)
+            (calls: CzPttModel.OperationalCall array)
             index =
         let currentCall = calls.[index]
         match callTime currentCall with
@@ -1001,7 +668,7 @@ let convert storagePolicy catalog options inputPath outputDirectory
         |> Seq.map (fun (countryCode, identities) ->
             let points = identities |> Seq.toArray
             let pointSet = points |> Set
-            let summary: CzPttToGtfs.CoordinateCountrySummary = {
+            let summary: CzPttModel.CoordinateCountrySummary = {
                 countryCode = countryCode
                 pointCount = points.Length
                 stopCount =
@@ -1025,7 +692,7 @@ let convert storagePolicy catalog options inputPath outputDirectory
     let diagnostic value =
         let country, code = value
         let coordinate = selectedCoordinates.[value]
-        let result: CzPttToGtfs.CoordinateResolutionDiagnostic = {
+        let result: CzPttModel.CoordinateResolutionDiagnostic = {
             sourceLocationId = $"{country}:{code}"
             countryCode = country
             primaryCode = code
@@ -1034,7 +701,7 @@ let convert storagePolicy catalog options inputPath outputDirectory
             coordinateMatchMethod = coordinate.matchMethod
         }
         result
-    let coordinateDiagnostics: CzPttToGtfs.CoordinateDiagnostics = {
+    let coordinateDiagnostics: CzPttModel.CoordinateDiagnostics = {
         resolutionMethod = "sr70-authoritative-then-osm-then-route-estimate"
         resolvedPointCount = resolvedPointIdentities.Count
         resolvedStopCount =
@@ -1483,4 +1150,3 @@ let convert storagePolicy catalog options inputPath outputDirectory
     progress "write-ids-trip-projection" "completed"
 
     result
-

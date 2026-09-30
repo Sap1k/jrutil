@@ -15,6 +15,11 @@ open JrUtil.GtfsModel
 open JrUtil.RegionalOverlay.Types
 open JrUtil.RegionalOverlay.Model
 open JrUtil.RegionalOverlay.Runtime
+open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.GtfsRows
+open JrUtil.RegionalOverlay.TripScoring
+open JrUtil.RegionalOverlay.StopGroups
 open JrUtil.RegionalOverlay.Support
 open JrUtil.RegionalOverlay
 

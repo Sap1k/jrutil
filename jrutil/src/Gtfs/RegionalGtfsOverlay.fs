@@ -72,10 +72,10 @@ let private executeMultiple (options: CompilationOptions) =
         diagnosticTraces = options.diagnosticTraces }
     let perSource = Dictionary<string, OverlayResult>(System.StringComparer.Ordinal)
     for sourceId in combined.sourceIds do
-        let sourceTrips = source.tripRows |> Array.filter (fun row -> Support.sourceIdentity prepared.binding.sourceId row = sourceId)
+        let sourceTrips = source.tripRows |> Array.filter (fun row -> Values.sourceIdentity prepared.binding.sourceId row = sourceId)
         let matched = matches.bindings |> Seq.filter (fun value -> value.sourceId = sourceId) |> Seq.map (fun value -> value.sourceTripId) |> Seq.distinct |> Seq.length
-        let ambiguous = matches.unresolvedPending |> Array.filter (fun value -> Support.sourceIdentity prepared.binding.sourceId source.tripsById.[value.sourceTripId] = sourceId) |> Array.map (fun value -> value.sourceTripId) |> Array.distinct |> Array.length
-        let sourceGroups = source.stopGroups |> Array.filter (fun group -> Support.sourceIdentity prepared.binding.sourceId group.members.[0] = sourceId)
+        let ambiguous = matches.unresolvedPending |> Array.filter (fun value -> Values.sourceIdentity prepared.binding.sourceId source.tripsById.[value.sourceTripId] = sourceId) |> Array.map (fun value -> value.sourceTripId) |> Array.distinct |> Array.length
+        let sourceGroups = source.stopGroups |> Array.filter (fun group -> Values.sourceIdentity prepared.binding.sourceId group.members.[0] = sourceId)
         let matchedGroups = sourceGroups |> Array.filter (fun group -> source.stopGroupMatches.ContainsKey(group.groupId)) |> Array.length
         perSource.[sourceId] <- {
             outputPath = result.outputPath

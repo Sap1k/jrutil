@@ -440,7 +440,7 @@ type JdfMergerTests() =
 
     [<TestMethod>]
     member this.``Validity is bounded to the current GVD from the reference date``() =
-        let gvdStart, gvdEnd = Utils.gvdBounds 2026
+        let gvdStart, gvdEnd = DateUtils.gvdBounds 2026
         let reference = LocalDate(2026, 9, 29)
         let resolved =
             this.mergedValidity(
@@ -452,7 +452,7 @@ type JdfMergerTests() =
 
     [<TestMethod>]
     member this.``Past starts are clamped to the GVD start``() =
-        let gvdStart, gvdEnd = Utils.gvdBounds 2026
+        let gvdStart, gvdEnd = DateUtils.gvdBounds 2026
         let resolved =
             this.mergedValidity(
                 [ false, LocalDate(2024, 12, 15), LocalDate(2026, 12, 12) ],

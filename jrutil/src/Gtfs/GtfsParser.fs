@@ -7,7 +7,8 @@ open System
 open Microsoft.FSharp.Reflection
 open NodaTime
 
-open JrUtil.Utils
+open JrUtil.DateUtils
+open JrUtil.FileUtils
 open JrUtil.ReflectionUtils
 open JrUtil.CsvParser
 open JrUtil.GtfsModelMeta

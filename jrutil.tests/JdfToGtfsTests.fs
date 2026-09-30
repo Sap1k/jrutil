@@ -25,7 +25,7 @@ type JdfToGtfsTests() =
     /// The production streaming conversion, materialized for assertions.
     let convert (source: JdfModel.JdfBatch) =
         let preparation =
-            JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar (JdfToGtfs.prepareGtfsCalendar source) source
+            JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar (JdfCalendar.prepareGtfsCalendar source) source
         let stopTimes = JdfToGtfs.getStreamingBundleStopTimes preparation |> Seq.toArray
         let feed =
             JdfToGtfs.finishStreamingFeedWithUniqueCalendars preparation
@@ -259,10 +259,10 @@ type JdfToGtfsTests() =
             dateFrom = Some route.timetableValidFrom; dateTo = Some route.timetableValidTo; note = None }
         let prepared =
             { source with trips = [| first; second |]; serviceNotes = [| note; { note with tripId = second.id } |] }
-            |> JdfToGtfs.prepareGtfsCalendarWithWorkers 4
+            |> JdfCalendar.prepareGtfsCalendarWithWorkers 4
         assertEqual
-            (set [JdfToGtfs.jdfTripId first.routeId first.routeDistinction first.id
-                  JdfToGtfs.jdfTripId second.routeId second.routeDistinction second.id])
+            (set [JdfGtfsRules.jdfTripId first.routeId first.routeDistinction first.id
+                  JdfGtfsRules.jdfTripId second.routeId second.routeDistinction second.id])
             prepared.tripsToDelete
         Assert.IsTrue(prepared.schedules.IsEmpty)
 
@@ -289,7 +289,7 @@ type JdfToGtfsTests() =
                            yield { note with tripId = trips.[index].id } |]
         let expanded = { source with trips = trips; tripStops = calls; serviceNotes = notes }
         let unique workers =
-            let calendar = JdfToGtfs.prepareGtfsCalendarWithWorkers workers expanded
+            let calendar = JdfCalendar.prepareGtfsCalendarWithWorkers workers expanded
             JdfToGtfs.finishStreamingFeedWithUniqueCalendars
                 (JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar calendar expanded) Set.empty
         let legacy = unique 1
@@ -333,7 +333,7 @@ type JdfToGtfsTests() =
         let after = (convert border).stopTimes
         assertEqual (before |> Array.map key) (after |> Array.map key)
         let isBorderCall (call: GtfsModel.StopTime) =
-            let prefix = JdfToGtfs.jdfStopId borderStop
+            let prefix = JdfGtfsRules.jdfStopId borderStop
             call.stopId = prefix || call.stopId.StartsWith(prefix + ":")
         let borderCalls = after |> Array.filter isBorderCall
         Assert.IsTrue(borderCalls.Length > 0)
@@ -348,13 +348,13 @@ type JdfToGtfsTests() =
         let sourceRoute = (batch ()).routes.[0]
         let colors mode publicLineNumber =
             { sourceRoute with transportMode = mode }
-            |> JdfToGtfs.getGtfsRouteColors publicLineNumber
+            |> JdfGtfsRules.getGtfsRouteColors publicLineNumber
 
         assertEqual (Some "0076a3", Some "ffffff")
                     (colors JdfModel.Bus None)
         let classifiedBusColors routeType =
             { sourceRoute with transportMode = JdfModel.Bus; routeType = routeType }
-            |> JdfToGtfs.getGtfsRouteColors None
+            |> JdfGtfsRules.getGtfsRouteColors None
         assertEqual (Some "004f71", Some "ffffff")
                     (classifiedBusColors JdfModel.International)
         assertEqual (Some "004f71", Some "ffffff")
@@ -387,7 +387,7 @@ type JdfToGtfsTests() =
     [<TestMethod>]
     member _.``Extended bus types reserve coach for long-distance routes``() =
         let route = (batch ()).routes.[0]
-        let routeType value = { route with routeType = value } |> JdfToGtfs.getGtfsRouteType
+        let routeType value = { route with routeType = value } |> JdfGtfsRules.getGtfsRouteType
         assertEqual "704" (routeType JdfModel.City)
         assertEqual "704" (routeType JdfModel.CityAndAdjacent)
         assertEqual "701" (routeType JdfModel.Regional)
@@ -400,18 +400,18 @@ type JdfToGtfsTests() =
     member _.``Reviewed transport mode rule requires every guard``() =
         let source = batch ()
         let route = { source.routes.[0] with id = "915001"; agencyId = "61974757"; transportMode = JdfModel.Bus }
-        let rule: JdfToGtfs.TransportModeRule = {
+        let rule: JdfGtfsRules.TransportModeRule = {
             agencyId = "61974757"; routeIdFrom = 915001; routeIdTo = 915019
             publicLineFrom = 1; publicLineTo = 19; expectedMode = JdfModel.Bus
             effectiveMode = JdfModel.Tram; reason = "reviewed Ostrava tram family" }
         let corrected, decisions =
-            JdfToGtfs.applyTransportModeRules { sha256 = None; rules = [| rule |] }
+            JdfGtfsRules.applyTransportModeRules { sha256 = None; rules = [| rule |] }
                 { source with routes = [| route |]; routeIntegrations = [||] }
         assertEqual JdfModel.Tram corrected.routes.[0].transportMode
         assertEqual true (decisions |> Array.exactlyOne).corrected
 
         let unchanged, mismatch =
-            JdfToGtfs.applyTransportModeRules { sha256 = None; rules = [| rule |] }
+            JdfGtfsRules.applyTransportModeRules { sha256 = None; rules = [| rule |] }
                 { source with routes = [| { route with transportMode = JdfModel.Trolleybus } |]; routeIntegrations = [||] }
         assertEqual JdfModel.Trolleybus unchanged.routes.[0].transportMode
         assertEqual false (mismatch |> Array.exactlyOne).corrected
@@ -423,7 +423,7 @@ type JdfToGtfsTests() =
             File.WriteAllText(path,
                 "agency_id,route_id_from,route_id_to,public_line_from,public_line_to,expected_mode,effective_mode,reason\n"
                 + "61974757,915001,915019,1,19,A,E,Reviewed Ostrava tram family\n")
-            let loaded = JdfToGtfs.loadTransportModeRules path
+            let loaded = JdfGtfsRules.loadTransportModeRules path
             let rule = loaded.rules |> Array.exactlyOne
             assertEqual true loaded.sha256.IsSome
             assertEqual "61974757" rule.agencyId
@@ -452,10 +452,10 @@ type JdfToGtfsTests() =
         }
         assertEqual
             None
-            ((JdfToGtfs.getPublicLineNumbers ambiguous).["586001", 1])
+            ((JdfGtfsRules.getPublicLineNumbers ambiguous).["586001", 1])
         assertEqual
             None
-            ((JdfToGtfs.getPublicLineNumbers malformed).["BUS-1", 1])
+            ((JdfGtfsRules.getPublicLineNumbers malformed).["BUS-1", 1])
 
     [<TestMethod>]
     member _.``JDF conversion normalizes zones and preserves both post forms``() =
@@ -681,7 +681,7 @@ type JdfToGtfsTests() =
             true, name, LocalDate(2026, 3, 1)
             false, name, LocalDate(2026, 4, 1)
             true, name, LocalDate(2026, 5, 1) ]
-        let grouping = JdfToGtfs.getRouteGrouping versions
+        let grouping = JdfGtfsRules.getRouteGrouping versions
         let idOf distinction = grouping.routeIds.[struct ("586001", distinction)]
         assertEqual [ "jdf:route:586001"; "jdf:route:586001:detour"; "jdf:route:586001:detour"
                       "jdf:route:586001"; "jdf:route:586001:detour" ]
@@ -692,7 +692,7 @@ type JdfToGtfsTests() =
             |> Array.sortBy (fun route -> route.id)
         assertEqual [| "jdf:route:586001"; "jdf:route:586001:detour" |] (routes |> Array.map (fun route -> route.id))
         assertEqual (Some "ffffff") routes.[0].textColor
-        assertEqual (Some JdfToGtfs.detourTextColor) routes.[1].textColor
+        assertEqual (Some JdfGtfsRules.detourTextColor) routes.[1].textColor
         assertEqual routes.[0].color routes.[1].color
 
     [<TestMethod>]
@@ -700,7 +700,7 @@ type JdfToGtfsTests() =
         let versions = this.routeVersions [
             false, "Old name", LocalDate(2026, 1, 1)
             false, "New name", LocalDate(2026, 6, 1) ]
-        let grouping = JdfToGtfs.getRouteGrouping versions
+        let grouping = JdfGtfsRules.getRouteGrouping versions
         assertEqual "jdf:route:586001" grouping.routeIds.[struct ("586001", 1)]
         let renamed = grouping.routeIds.[struct ("586001", 2)]
         Assert.IsTrue(
@@ -711,10 +711,10 @@ type JdfToGtfsTests() =
     member _.``Detour text falls back to dark orange on light route colours``() =
         let route = (batch ()).routes |> Array.find (fun route -> route.id = "586001")
         let metro = { route with transportMode = JdfModel.Metro; detour = true }
-        let color, textColor = JdfToGtfs.getGtfsRouteColorsWithDetour (Some "B") metro
+        let color, textColor = JdfGtfsRules.getGtfsRouteColorsWithDetour (Some "B") metro
         assertEqual (Some "fbaf33") color
-        assertEqual (Some JdfToGtfs.detourFallbackTextColor) textColor
-        Assert.IsTrue(JdfToGtfs.contrastRatio JdfToGtfs.detourFallbackTextColor "fbaf33" >= 3.0)
+        assertEqual (Some JdfGtfsRules.detourFallbackTextColor) textColor
+        Assert.IsTrue(JdfGtfsRules.contrastRatio JdfGtfsRules.detourFallbackTextColor "fbaf33" >= 3.0)
 
     [<TestMethod>]
     member _.``Route stop keys stay unique across versions of one route``() =

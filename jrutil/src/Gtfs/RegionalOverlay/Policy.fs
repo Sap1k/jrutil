@@ -13,6 +13,8 @@ open JrUtil.GtfsModel
 
 open JrUtil.RegionalOverlay.Types
 open JrUtil.RegionalOverlay.Model
+open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.StopGroups
 open JrUtil.RegionalOverlay.Support
 
 let loadPolicy path =
