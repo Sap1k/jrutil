@@ -85,6 +85,11 @@
     <Compile Include="src/Gtfs/RegionalOverlay/TripMatching.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Projection.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Reports.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BundleOutput.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BundleCalls.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BundleGtfs.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BundleTransfers.fs" />
+    <Compile Include="src/Gtfs/RegionalOverlay/BundleExtensions.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/BundleWriter.fs" />
     <Compile Include="src/Gtfs/RegionalGtfsOverlay.fs" />
     <Compile Include="src/Jdf/JdfParser.fs" />
