@@ -51,6 +51,15 @@ let loadPolicy path =
 
 let private namespaced sourceId value = sourceId + ":" + value
 
+/// Translate a profile's stop-group ID into the combined input's group ID.
+/// Flat groups ("group:NODE:name") come from the namespaced overlay_group_id
+/// and single stops ("stop:ID") from a namespaced stop ID; parent stations are
+/// namespaced directly.
+let internal combinedStopGroupId sourceId (value: string) =
+    if value.StartsWith("group:", StringComparison.Ordinal) then "group:" + namespaced sourceId value
+    elif value.StartsWith("stop:", StringComparison.Ordinal) then "stop:" + namespaced sourceId (value.Substring(5))
+    else namespaced sourceId value
+
 let private rewriteId sourceId column (row: CsvRow) =
     let value = rowValue row column
     if not (String.IsNullOrWhiteSpace(value)) then
@@ -216,7 +225,7 @@ let private writeCombinedOverrides destination (preparedBindings: (string * Sour
                     let path = resolveRelative policyPath configuredPath
                     for row in csvRows (Path.GetDirectoryName(path)) (Path.GetFileName(path)) do
                         let copy = cloneRow row
-                        copy.["source_id"] <- namespaced binding.sourceId (rowValue row "source_id")
+                        copy.["source_id"] <- combinedStopGroupId binding.sourceId (rowValue row "source_id")
                         yield copy
         }
         writeRows output columns rows

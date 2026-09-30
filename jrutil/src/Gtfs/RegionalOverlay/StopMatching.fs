@@ -57,6 +57,10 @@ let matchStops ({
         | namespaceName ->
             addDiagnostic prepared.diagnostics "stop_override_namespace_unsupported" value.sourceId namespaceName
             [||]
+    let sourceGroupIds = sourceStopGroups |> Array.map (fun group -> group.groupId) |> HashSet
+    for KeyValue(sourceId, _) in stopOverrideBySource do
+        if not (sourceGroupIds.Contains(sourceId)) then
+            addDiagnostic prepared.diagnostics "stop_override_source_missing" sourceId "No scheduled source stop group has this ID"
     let stopGroupMatches = Dictionary<string, string>(StringComparer.Ordinal)
     let stopMatchMethods = Dictionary<string, string>(StringComparer.Ordinal)
     let stopMatchDistances = Dictionary<string, float>(StringComparer.Ordinal)

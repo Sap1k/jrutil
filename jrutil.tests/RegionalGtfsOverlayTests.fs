@@ -192,7 +192,7 @@ type RegionalGtfsOverlayTests() =
         ZipFile.CreateFromDirectory(sourceDir, sourceZip)
         let policy = Path.Combine(root, "policy.json")
         write policy policyJson
-        write (Path.Combine(root, "stops.csv")) "source_namespace,source_id,target_namespace,target_id,valid_from,valid_to,review_note\npid-stop-group,group:N:beta,jdf-stop-place-name,Beta,20251214,20261212,Stable target name test\n"
+        write (Path.Combine(root, "stops.csv")) "source_namespace,source_id,target_namespace,target_id,valid_from,valid_to,review_note\npid-stop-group,group:B1:beta,jdf-stop-place-name,Beta,20251214,20261212,Stable target name test\n"
         let descriptor = Path.Combine(root, "descriptor.json")
         write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
         basePath, sourceZip, descriptor, policy
@@ -266,6 +266,9 @@ type RegionalGtfsOverlayTests() =
             let result = execute None policy 2026 binding basePath output1
             Assert.AreEqual(5, result.matchedTrips)
             Assert.AreEqual(2, result.selectedShapes)
+            // The fixture's reviewed override names the flat PID group "group:B1:beta".
+            let betaMatch = File.ReadAllLines(diagnosticPath output1 "events" "stop_group_matches.csv") |> Array.find (fun line -> line.Contains("\"pid-gtfs:sb\""))
+            Assert.IsTrue(betaMatch.Contains("reviewed_override"), betaMatch)
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "stop_context_inference.csv").Contains("trip_context_unique"))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "trip_candidate_scores.csv").Contains("pattern_nearest"))
             let diagnosticEvents = File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv")
