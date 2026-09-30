@@ -45,23 +45,15 @@ def source_label(observation_ids: str) -> str:
     return ", ".join(sorted(set(kinds))) or "?"
 
 
-def policy_picks(assignments, side_groups):
-    """Current-policy post per context: the selected post (Physical) or the side group's representative (Side)."""
-    groups = side_groups.select(
-        pl.col("side_group_id").alias("selected_side_group_id"),
-        pl.col("representative_hypothesis_id"),
-        pl.col("member_hypothesis_ids"),
-    )
+def policy_picks(assignments):
+    """Current-policy post per context: the selected post, if any."""
     return assignments.select(
-        "context_id", pl.col("resolution").alias("baseline_resolution"), "selected_hypothesis_id", "selected_side_group_id"
-    ).join(groups, on="selected_side_group_id", how="left").select(
-        "context_id", "baseline_resolution",
-        pl.coalesce("selected_hypothesis_id", "representative_hypothesis_id").alias("baseline_pick"),
-        pl.col("member_hypothesis_ids").fill_null("").alias("baseline_members"),
+        "context_id", pl.col("resolution").alias("baseline_resolution"),
+        pl.col("selected_hypothesis_id").alias("baseline_pick"),
     )
 
 
-def build(candidates, decisions, hypotheses, contexts, assignments, side_groups, names, disagreement_stops=150,
+def build(candidates, decisions, hypotheses, contexts, assignments, names, disagreement_stops=150,
           include_stops: str = ""):
     include = re.compile("|".join(p for p in (TERMINAL_NAME, include_stops) if p), re.IGNORECASE)
     per_stop = candidates.group_by("stop_id").agg(
@@ -72,7 +64,7 @@ def build(candidates, decisions, hypotheses, contexts, assignments, side_groups,
         pl.when(pl.col("model_resolution") == "Area").then(pl.col("area_probability")).otherwise(pl.col("post_probability")).alias("probability"),
         "model_published", "model_resolution"
     ).join(
-        policy_picks(assignments, side_groups), on="context_id", how="left",
+        policy_picks(assignments), on="context_id", how="left",
     ).join(
         contexts.select(
             "context_id", jdf_stop_number("gtfs_stop_place_id").alias("stop_id"), "line_id", "direction",
@@ -108,7 +100,7 @@ def build(candidates, decisions, hypotheses, contexts, assignments, side_groups,
         movements = (
             joined.filter(pl.col("stop_id") == stop_id)
             .group_by("line_id", "direction", "same_stop_block_role", "context_previous_stop_id",
-                      "context_next_stop_id", "model_pick", "baseline_pick", "baseline_members", "baseline_resolution", "model_published", "model_resolution")
+                      "context_next_stop_id", "model_pick", "baseline_pick", "baseline_resolution", "model_published", "model_resolution")
             .agg(pl.len().alias("contexts"), pl.col("probability").mean())
             .sort("line_id", "direction", "context_previous_stop_id")
         )
@@ -128,7 +120,6 @@ def build(candidates, decisions, hypotheses, contexts, assignments, side_groups,
                  "fromId": row["context_previous_stop_id"], "toId": row["context_next_stop_id"],
                  "model": index.get(row["model_pick"]), "p": round(row["probability"], 3),
                  "published": bool(row["model_published"]), "model_resolution": row["model_resolution"], "baseline": index.get(row["baseline_pick"]),
-                 "group": [index[h] for h in row["baseline_members"].split(";") if h in index],
                  "resolution": row["baseline_resolution"], "n": row["contexts"]}
                 for row in movements.iter_rows(named=True)
             ],
@@ -138,14 +129,14 @@ def build(candidates, decisions, hypotheses, contexts, assignments, side_groups,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("candidates", "decisions", "hypotheses", "contexts", "assignments", "side-groups", "merged-jdf", "output"):
+    for name in ("candidates", "decisions", "hypotheses", "contexts", "assignments", "merged-jdf", "output"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--title", default="Ústecký post review")
     parser.add_argument("--include-stops", default="", help="extra regex of stop names to always include")
     args = parser.parse_args(argv)
     stops = build(
         pl.read_parquet(args.candidates), pl.read_parquet(args.decisions), pl.read_parquet(args.hypotheses),
-        pl.read_parquet(args.contexts), pl.read_parquet(args.assignments), pl.read_parquet(args.side_groups),
+        pl.read_parquet(args.contexts), pl.read_parquet(args.assignments),
         stop_names(args.merged_jdf), include_stops=args.include_stops,
     )
     template = Path(__file__).with_name("review_map.html").read_text(encoding="utf8")

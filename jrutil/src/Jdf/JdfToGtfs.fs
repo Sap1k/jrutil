@@ -392,13 +392,7 @@ let private getGtfsStopTimeRowsInternal
         let result = Dictionary<int64, DerivedPostSelection>()
         if postPlan.calls.Count > 0 then
             let usable = orderedCalls |> Array.filter callIsUsable
-            let patternHash =
-                if usable.Length = 0 then completePatternHash usable
-                else
-                    match postPlan.tripPatternHashes.TryGetValue(
-                              struct (routeId, routeDistinction, usable.[0].tripId)) with
-                    | true, value -> value
-                    | _ -> completePatternHash usable
+            let patternHash = completePatternHash usable
             let direction = if usable.Length > 0 && Jdf.tripIsReverse usable.[0].tripId then 1 else 0
             let mutable start = 0
             while start < usable.Length do

@@ -53,64 +53,6 @@ let RequiredEvidenceFiles = [|
     "route_point_evidence.parquet"
 |]
 
-type SameStopPairChoice = {
-    candidateId:string
-    ordinaryScore:float
-    ordinaryGeometry:float
-    individualMargin:float
-    independentlyPublishable:bool
-}
-
-type SameStopBlockFacts = {
-    contextCount:int
-    leftAssignmentKind:string
-    rightAssignmentKind:string
-    leftMovementFamilyId:string
-    rightMovementFamilyId:string
-    leftResolution:string
-    rightResolution:string
-    leftCandidateId:string option
-    rightCandidateId:string option
-}
-
-let sameStopDistinctnessEligible facts =
-    facts.contextCount=2
-    && facts.leftAssignmentKind="unlabelled"
-    && facts.rightAssignmentKind="unlabelled"
-    && facts.leftMovementFamilyId<>facts.rightMovementFamilyId
-    && facts.leftResolution="Physical"
-    && facts.rightResolution="Physical"
-    && facts.leftCandidateId.IsSome
-    && facts.leftCandidateId=facts.rightCandidateId
-
-let selectDistinctSameStopPair (policy:SameStopPairPolicy)
-                               (left:SameStopPairChoice array)
-                               (right:SameStopPairChoice array) =
-    let eligible values =
-        let gated =
-            values
-            |> Array.filter(fun value ->
-                value.independentlyPublishable
-                && value.ordinaryScore>=policy.minimumIndividualScore
-                && value.individualMargin>=policy.minimumIndividualMargin)
-        if gated.Length=0 then [||] else
-        let bestScore=gated |> Array.maxBy _.ordinaryScore |> _.ordinaryScore
-        let scoreTies=gated |> Array.filter(fun value -> abs(value.ordinaryScore-bestScore)<=1e-12)
-        let bestGeometry=scoreTies |> Array.maxBy _.ordinaryGeometry |> _.ordinaryGeometry
-        scoreTies
-        |> Array.filter(fun value -> abs(value.ordinaryGeometry-bestGeometry)<=1e-12)
-        |> Array.sortBy _.candidateId
-    if not policy.enabled then None else
-    let left=eligible left
-    let right=eligible right
-    seq {
-        for leftChoice in left do
-            for rightChoice in right do
-                if leftChoice.candidateId<>rightChoice.candidateId then
-                    yield leftChoice.candidateId,rightChoice.candidateId
-    }
-    |> Seq.sortBy id |> Seq.tryHead
-
 type EvidenceFileManifest = {
     path: string
     sha256: string
@@ -378,13 +320,6 @@ type ConsolidatedPostHypothesis = {
     latitude:float;longitude:float
 }
 
-type GlobalPostSideGroup = {
-    sideGroupId:string;stopId:int64;mode:string;corridorFaceId:string
-    memberHypothesisIds:string array;representativeHypothesisId:string
-    sector:string;latitude:float;longitude:float
-    compactnessMetres:float;support:int
-}
-
 type ContextPostAssignment = {
     contextId:string;stopId:int64;mode:string;lineId:string;routeDistinction:int
     direction:int;patternHash:string;patternPosition:int
@@ -392,7 +327,7 @@ type ContextPostAssignment = {
     assignmentKind:string;authoredPostKey:string option;sameStopBlockId:string option
     sameStopBlockRole:string;movementFamilyId:string;resolution:string
     selectedLocationId:string option;selectedHypothesisId:string option
-    selectedSideGroupId:string option;score:float option;margin:float option
+    score:float option;margin:float option
 }
 
 type AuthoredPostPosition = {
@@ -418,18 +353,15 @@ type PostInferenceDiagnosticScore = {
 
 type PostInferenceCounters = {
     contextCount:int;candidateStopCount:int
-    unresolvedContexts:int;authoredPositions:int;sameStopBlocks:int
-    distinctPairChoices:int;unresolvedBlockEdges:int
+    unresolvedContexts:int;authoredPositions:int
 }
 
 type PostInferenceResult(hypotheses:ConsolidatedPostHypothesis array,
-                         sideGroups:GlobalPostSideGroup array,
                          assignments:IReplayableRowStore<ContextPostAssignment>,
                          authoredPositions:AuthoredPostPosition array,
                          diagnosticScores:IReplayableRowStore<PostInferenceDiagnosticScore>,
                          counters:PostInferenceCounters) =
     member _.Hypotheses=hypotheses
-    member _.SideGroups=sideGroups
     member _.Assignments=assignments
     member _.AuthoredPositions=authoredPositions
     member _.DiagnosticScores=diagnosticScores
@@ -584,14 +516,6 @@ let combinedSupportAdjustment (policy:PostInferencePolicyV2) sourceAdjustment mo
 let contradictoryContext (policy:PostInferencePolicyV2) score lead =
     score>=policy.consensus.minimumPerContextScore
     && lead>=policy.consensus.minimumPerContextLead
-
-let sideResolutionEligible (policy:PostInferencePolicyV2)
-                           plausibleCandidateCount distinctFaceCount
-                           conflictingAlternative ordinaryGroupCount contextCount compactnessMetres =
-    plausibleCandidateCount>0 && distinctFaceCount=1 && not conflictingAlternative
-    && (ordinaryGroupCount<=policy.sideGroups.maximumOrdinaryGroups
-        || contextCount>=policy.sideGroups.additionalGroupMinimumContexts)
-    && compactnessMetres<=policy.sideGroups.maximumCompactnessMetres
 
 let authoredResolutionEligible (policy:PostInferencePolicyV2)
                                relevantContextCount physicalContextCount

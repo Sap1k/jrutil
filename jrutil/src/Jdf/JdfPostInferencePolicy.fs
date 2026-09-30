@@ -94,22 +94,10 @@ type SpatialIsolationPolicy = {
     maximumAdjustment: float
 }
 
-type SideGroupPolicy = {
-    maximumOrdinaryGroups: int
-    maximumCompactnessMetres: float
-    additionalGroupMinimumContexts: int
-}
-
 type AuthoredResolutionPolicy = {
     minimumPhysicalScore: float
     minimumPhysicalMargin: float
     requireUnanimousContexts: bool
-}
-
-type SameStopPairPolicy = {
-    enabled: bool
-    minimumIndividualScore: float
-    minimumIndividualMargin: float
 }
 
 type PostInferencePolicyV2 = {
@@ -124,9 +112,7 @@ type PostInferencePolicyV2 = {
     establishedPost: EstablishedPostPolicy
     alternativeCorridors: AlternativeCorridorPolicy
     modality: ModalityPolicy
-    sideGroups: SideGroupPolicy
     authoredResolution: AuthoredResolutionPolicy
-    sameStopPairs: SameStopPairPolicy
 }
 
 let conservativeRoutedV4 = {
@@ -170,18 +156,10 @@ let conservativeRoutedV4 = {
         estimatedSupportAdjustment=0.03
         conflictAdjustment = -0.05
         maximumCombinedSupportingAdjustment=0.10 }
-    sideGroups={
-        maximumOrdinaryGroups=2
-        maximumCompactnessMetres=75.0
-        additionalGroupMinimumContexts=2 }
     authoredResolution={
         minimumPhysicalScore=0.75
         minimumPhysicalMargin=0.20
         requireUnanimousContexts=true }
-    sameStopPairs={
-        enabled=true
-        minimumIndividualScore=0.70
-        minimumIndividualMargin=0.15 }
 }
 
 let private jsonOptions =
@@ -286,14 +264,8 @@ let validatePolicy capturedHorizon (policy:PostInferencePolicyV2) =
     if modality.explicitSupportAdjustment+modality.estimatedSupportAdjustment
        < modality.maximumCombinedSupportingAdjustment then ()
 
-    positiveCount "side_groups.maximum_ordinary_groups" policy.sideGroups.maximumOrdinaryGroups
-    positive "side_groups.maximum_compactness_metres" policy.sideGroups.maximumCompactnessMetres
-    positiveCount "side_groups.additional_group_minimum_contexts" policy.sideGroups.additionalGroupMinimumContexts
-
     unitInterval "authored_resolution.minimum_physical_score" policy.authoredResolution.minimumPhysicalScore
     unitInterval "authored_resolution.minimum_physical_margin" policy.authoredResolution.minimumPhysicalMargin
-    unitInterval "same_stop_pairs.minimum_individual_score" policy.sameStopPairs.minimumIndividualScore
-    unitInterval "same_stop_pairs.minimum_individual_margin" policy.sameStopPairs.minimumIndividualMargin
     policy
 
 let validatePolicyForEvidence capturedHorizon capturedMaximumVariants policy =

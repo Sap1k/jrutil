@@ -35,10 +35,7 @@ type JdfBundleTests() =
                             materialRoutedAdvantage=0.10}
             consensus={baseline.consensus with minimumContexts=3;minimumWinningShare=1.0}
             alternativeCorridors={baseline.alternativeCorridors with
-                                      absoluteTieMetres=25.0;relativeTieFraction=0.05}
-            sideGroups={baseline.sideGroups with
-                            maximumCompactnessMetres=35.0
-                            additionalGroupMinimumContexts=3} }
+                                      absoluteTieMetres=25.0;relativeTieFraction=0.05} }
 
     let descriptor path kind sha bytes =
         File.WriteAllText(path,
@@ -918,7 +915,6 @@ type JdfBundleTests() =
                 value.memberObservationIds |> Array.contains "100-obsolete"))
             Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.assignmentKind="authored"))
             Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.sameStopBlockId.IsSome))
-            Assert.IsTrue(first.Counters.sameStopBlocks>0)
             Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.resolution="Centroid"))
             Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.resolution<>"Centroid"))
             Assert.IsTrue(firstDiagnostics |> Array.exists(fun value -> value.alternativeCorridorCount>1))
@@ -929,11 +925,9 @@ type JdfBundleTests() =
             Assert.IsTrue(firstDiagnostics |> Array.exists(fun value ->
                 value.signedLateralOffset |> Option.exists(fun offset -> offset>0.0)))
             assertEqual first.Hypotheses second.Hypotheses
-            assertEqual first.SideGroups second.SideGroups
             assertEqual first.AuthoredPositions second.AuthoredPositions
             assertEqual first.Counters second.Counters
             assertEqual first.Hypotheses publicationOnly.Hypotheses
-            assertEqual first.SideGroups publicationOnly.SideGroups
             assertEqual first.AuthoredPositions publicationOnly.AuthoredPositions
             assertEqual first.Counters publicationOnly.Counters
             assertEqual firstAssignments
@@ -1149,8 +1143,6 @@ type JdfBundleTests() =
         assertEqual 0.67 policy.consensus.minimumWinningShare
         assertEqual 0.0 policy.alternativeCorridors.absoluteTieMetres
         assertEqual 0.02 policy.alternativeCorridors.relativeTieFraction
-        assertEqual 75.0 policy.sideGroups.maximumCompactnessMetres
-        assertEqual 2 policy.sideGroups.additionalGroupMinimumContexts
 
 
     [<TestMethod>]
@@ -1163,15 +1155,15 @@ type JdfBundleTests() =
             JdfPostInferencePolicy.writePolicy path baseline
             assertEqual baseline ((JdfPostInferencePolicy.loadPolicyWithScorer path).policy)
             use document=JsonDocument.Parse(File.ReadAllText(path))
-            Assert.IsTrue(document.RootElement.TryGetProperty("same_stop_pairs") |> fst)
-            Assert.IsFalse(document.RootElement.TryGetProperty("sameStopPairs") |> fst)
+            Assert.IsTrue(document.RootElement.TryGetProperty("authored_resolution") |> fst)
+            Assert.IsFalse(document.RootElement.TryGetProperty("authoredResolution") |> fst)
             let invalid={baseline with consolidation={baseline.consolidation with maximumDiameterMetres=Double.PositiveInfinity}}
             let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfPostInferencePolicy.validatePolicy JdfPostInference.CaptureRoutedExcessHorizonMetres invalid |> ignore)
             StringAssert.Contains(error.Message,"finite")
-            let invalidPair={baseline with sameStopPairs={baseline.sameStopPairs with minimumIndividualMargin=1.01}}
+            let invalidAuthored={baseline with authoredResolution={baseline.authoredResolution with minimumPhysicalMargin=1.01}}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfPostInferencePolicy.validatePolicy JdfPostInference.CaptureRoutedExcessHorizonMetres invalidPair |> ignore)
+                JdfPostInferencePolicy.validatePolicy JdfPostInference.CaptureRoutedExcessHorizonMetres invalidAuthored |> ignore)
             |> ignore
         finally
             Directory.Delete(root,true)
@@ -1373,16 +1365,6 @@ type JdfBundleTests() =
         Assert.AreEqual(0.09,JdfPostInference.combinedSupportAdjustment modality 0.06 0.07,1e-12)
         Assert.AreEqual(-0.08,JdfPostInference.combinedSupportAdjustment modality 0.0 -0.5,1e-12)
 
-        let sideGroups={baseline with sideGroups={maximumOrdinaryGroups=1
-                                                  maximumCompactnessMetres=20.0
-                                                  additionalGroupMinimumContexts=3}}
-        Assert.IsTrue(JdfPostInference.sideResolutionEligible sideGroups 2 1 false 1 1 20.0)
-        Assert.IsFalse(JdfPostInference.sideResolutionEligible sideGroups 2 1 false 2 2 20.0)
-        Assert.IsTrue(JdfPostInference.sideResolutionEligible sideGroups 2 1 false 2 3 20.0)
-        Assert.IsFalse(JdfPostInference.sideResolutionEligible sideGroups 2 1 false 1 1 21.0)
-        Assert.IsFalse(JdfPostInference.sideResolutionEligible sideGroups 2 2 false 1 1 10.0)
-        Assert.IsFalse(JdfPostInference.sideResolutionEligible sideGroups 2 1 true 1 1 10.0)
-
         let authored={baseline with authoredResolution={minimumPhysicalScore=0.8
                                                         minimumPhysicalMargin=0.2
                                                         requireUnanimousContexts=true}}
@@ -1395,50 +1377,6 @@ type JdfBundleTests() =
         Assert.IsTrue(JdfPostInference.authoredResolutionEligible
             {authored with authoredResolution={authored.authoredResolution with requireUnanimousContexts=false}}
             2 1 1 [|0.9,Some 0.3|])
-
-    [<TestMethod>]
-    member _.``Same-stop distinctness only breaks a publishable ordinary tie``() =
-        let policy=JdfPostInferencePolicy.conservativeRoutedV4.sameStopPairs
-        let choice candidate score geometry margin publishable:JdfPostInference.SameStopPairChoice = {
-            candidateId=candidate;ordinaryScore=score;ordinaryGeometry=geometry
-            individualMargin=margin;independentlyPublishable=publishable }
-        let tied=[|choice "a" 0.8 0.7 0.2 true;choice "b" 0.8 0.7 0.2 true|]
-        assertEqual (Some("a","b")) (JdfPostInference.selectDistinctSameStopPair policy tied tied)
-        let better=[|choice "a" 0.9 0.7 0.2 true;choice "b" 0.8 0.7 0.2 true|]
-        assertEqual None (JdfPostInference.selectDistinctSameStopPair policy better better)
-        let geometryWinner=[|choice "a" 0.8 0.8 0.2 true;choice "b" 0.8 0.7 0.2 true|]
-        assertEqual None (JdfPostInference.selectDistinctSameStopPair policy geometryWinner geometryWinner)
-        let gated=[|choice "a" 0.8 0.7 0.2 true;choice "b" 0.8 0.7 0.2 false|]
-        assertEqual None (JdfPostInference.selectDistinctSameStopPair policy gated gated)
-        let belowScore=[|choice "a" (policy.minimumIndividualScore-0.01) 0.7 0.2 true
-                         choice "b" (policy.minimumIndividualScore-0.01) 0.7 0.2 true|]
-        assertEqual None (JdfPostInference.selectDistinctSameStopPair policy belowScore belowScore)
-        let belowMargin=[|choice "a" 0.8 0.7 (policy.minimumIndividualMargin-0.01) true
-                          choice "b" 0.8 0.7 (policy.minimumIndividualMargin-0.01) true|]
-        assertEqual None (JdfPostInference.selectDistinctSameStopPair policy belowMargin belowMargin)
-        assertEqual (Some("a","b"))
-                    (JdfPostInference.selectDistinctSameStopPair policy (Array.rev tied) (Array.rev tied))
-        assertEqual None (JdfPostInference.selectDistinctSameStopPair {policy with enabled=false} tied tied)
-
-        let ordinary:JdfPostInference.SameStopBlockFacts = {
-            contextCount=2;leftAssignmentKind="unlabelled";rightAssignmentKind="unlabelled"
-            leftMovementFamilyId="left";rightMovementFamilyId="right"
-            leftResolution="Physical";rightResolution="Physical"
-            leftCandidateId=Some "a";rightCandidateId=Some "a" }
-        Assert.IsTrue(JdfPostInference.sameStopDistinctnessEligible ordinary)
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible {ordinary with contextCount=3})
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible
-            {ordinary with leftAssignmentKind="authored"})
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible
-            {ordinary with rightAssignmentKind="authored"})
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible
-            {ordinary with rightMovementFamilyId="left"})
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible
-            {ordinary with rightResolution="Side"})
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible
-            {ordinary with rightCandidateId=Some "b"})
-        Assert.IsFalse(JdfPostInference.sameStopDistinctnessEligible
-            {ordinary with leftCandidateId=None;rightCandidateId=None})
 
     [<TestMethod>]
     member _.``Replayable row stores repeat and clean deterministic binary spills``() =
@@ -1502,7 +1440,7 @@ type JdfBundleTests() =
                 assignmentKind=kind;authoredPostKey=authoredKey;sameStopBlockId=None
                 sameStopBlockRole="through";movementFamilyId="family"
                 resolution="Physical";selectedLocationId=Some locationId
-                selectedHypothesisId=Some "h1";selectedSideGroupId=None
+                selectedHypothesisId=Some "h1"
                 score=Some 0.9;margin=Some 0.3 }
             let assignmentStore=
                 JdfPostInference.ReplayableRowStore<JdfPostInference.ContextPostAssignment>.Create(
@@ -1533,12 +1471,11 @@ type JdfBundleTests() =
                   latitude=Some 50.0;longitude=Some 14.0 }
             let result=new JdfPostInference.PostInferenceResult(
                 [|hypothesis|],
-                [||],assignmentStore,
+                assignmentStore,
                 [|authoredPosition|],
                 diagnosticStore,
                 { contextCount=2;candidateStopCount=1
-                  unresolvedContexts=0;authoredPositions=1;sameStopBlocks=0
-                  distinctPairChoices=0;unresolvedBlockEdges=0 })
+                  unresolvedContexts=0;authoredPositions=1 })
             Assert.IsTrue(assignmentStore.CurrentSpillBytes>0L)
             Assert.IsTrue(diagnosticStore.CurrentSpillBytes>0L)
             let plan=JdfPostPlan.postEstimationPlanFromInferenceResult result

@@ -62,15 +62,6 @@ type internal ReplayDecision = {
     latitude:float option;longitude:float option
 }
 
-type internal ReplayJointCandidate = {
-    candidateId:string;corridorFaceId:string option;score:float;geometry:float;margin:float
-    latitude:float option;longitude:float option
-}
-
-type internal ReplayPolicyCounters = {
-    sameStopBlocks:int;distinctPairChoices:int;unresolvedBlockEdges:int
-}
-
 type internal ReplayContextColumns = {
     ids:string array;stops:string array;modes:string array;lines:string array
     distinctions:int array;directions:int array;patterns:string array;positions:int array

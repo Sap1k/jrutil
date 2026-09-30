@@ -109,7 +109,6 @@
     <Compile Include="src/Jdf/JdfPostEvidenceStore.fs" />
     <Compile Include="src/Jdf/JdfPostEvidenceReader.fs" />
     <Compile Include="src/Jdf/JdfPostPolicyEvaluation.fs" />
-    <Compile Include="src/Jdf/JdfPostSideGroups.fs" />
     <Compile Include="src/Jdf/JdfPostInferenceEvaluator.fs" />
     <Compile Include="src/Jdf/JdfGtfsRules.fs" />
     <Compile Include="src/Jdf/JdfPostPlan.fs" />

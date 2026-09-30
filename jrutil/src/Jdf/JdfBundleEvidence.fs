@@ -546,27 +546,11 @@ let exportPostInferenceFeatures evidencePath policyPath outputPath =
                 strings 4 (fun value -> String.Join(";",value.memberObservationIds))
                 writeEvidenceMappedNullableValues group fields 5 rows (fun value -> Some value.latitude)
                 writeEvidenceMappedNullableValues group fields 6 rows (fun value -> Some value.longitude))
-        let sideGroupFields = [|
-            text "side_group_id";field<int64> "stop_id" false;text "mode";text "corridor_face_id"
-            text "member_hypothesis_ids";text "representative_hypothesis_id";text "sector"
-            number "latitude";number "longitude";number "compactness_metres";integer "support" |]
-        write "side_groups.parquet" sideGroupFields result.SideGroups
-            (fun group fields (rows:JdfPostInference.GlobalPostSideGroup array) ->
-                let strings index mapping = writeEvidenceMappedStrings group fields index rows mapping
-                strings 0 _.sideGroupId
-                writeEvidenceMappedValues group fields 1 rows _.stopId
-                strings 2 _.mode; strings 3 _.corridorFaceId
-                strings 4 (fun value -> String.Join(";",value.memberHypothesisIds))
-                strings 5 _.representativeHypothesisId; strings 6 _.sector
-                writeEvidenceMappedNullableValues group fields 7 rows (fun value -> Some value.latitude)
-                writeEvidenceMappedNullableValues group fields 8 rows (fun value -> Some value.longitude)
-                writeEvidenceMappedNullableValues group fields 9 rows (fun value -> Some value.compactnessMetres)
-                writeEvidenceMappedValues group fields 10 rows _.support)
         let assignmentFields = [|
             text "context_id";field<int64> "stop_id" false;text "mode";text "line_id"
             text "assignment_kind";text "authored_post_key";text "same_stop_block_role"
             text "movement_family_id";text "resolution";text "selected_location_id"
-            text "selected_hypothesis_id";text "selected_side_group_id";number "score";number "margin" |]
+            text "selected_hypothesis_id";number "score";number "margin" |]
         write "assignments.parquet" assignmentFields (result.Assignments.ReadRows())
             (fun group fields (rows:JdfPostInference.ContextPostAssignment array) ->
                 let strings index mapping = writeEvidenceMappedStrings group fields index rows mapping
@@ -578,9 +562,8 @@ let exportPostInferenceFeatures evidencePath policyPath outputPath =
                 optionalText 5 _.authoredPostKey; strings 6 _.sameStopBlockRole
                 strings 7 _.movementFamilyId; strings 8 _.resolution
                 optionalText 9 _.selectedLocationId; optionalText 10 _.selectedHypothesisId
-                optionalText 11 _.selectedSideGroupId
-                writeEvidenceMappedNullableValues group fields 12 rows _.score
-                writeEvidenceMappedNullableValues group fields 13 rows _.margin)
+                writeEvidenceMappedNullableValues group fields 11 rows _.score
+                writeEvidenceMappedNullableValues group fields 12 rows _.margin)
         JdfPostInferencePolicy.writePolicy (Path.Combine(temporary,"policy.json")) policy
         Directory.Move(temporary,outputFull)
     finally

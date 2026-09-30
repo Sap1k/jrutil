@@ -283,7 +283,6 @@ let internal evaluateReplayPolicy capturedHorizon
                       (if alternativeApplies row then row.alternativeCorridorCount else 1),
                       (not(alternativeApplies row) || row.tiedCorridorsAgree))))
         |> Map.ofSeq
-    let jointCandidates=Dictionary<struct(int64*string),ReplayJointCandidate array>()
     let ordinaryDecisions =
         evaluated
         |> Array.groupBy(fun (row,_,_,_,_) -> row.stopId,row.movementFamilyId)
@@ -340,9 +339,6 @@ let internal evaluateReplayPolicy capturedHorizon
             let establishedStrong =
                 JdfPostInference.establishedPostStrong policy established establishedRunner
                     geometryMargin contradictory alternatives alternativesAgree
-            // Same-stop preference is a joint tie-break between candidates
-            // that have already passed these ordinary gates; it must never
-            // make an otherwise ineligible candidate publishable.
             let physical =
                 JdfPostInference.physicalResolutionEligible policy {
                     finalScore=final;margin=margin;routedAdvantage=routedAdvantage
@@ -351,68 +347,6 @@ let internal evaluateReplayPolicy capturedHorizon
                     establishedStrong=establishedStrong
                     hasAlternativeCorridors=alternatives;alternativesAgree=alternativesAgree }
             if physical then
-                let tiedCandidates =
-                    candidateScores
-                    |> Array.filter(fun (_,otherGeometry,otherFinal,_,_,_,_) ->
-                        abs(otherFinal-final)<=1e-12 && abs(otherGeometry-geometry)<=1e-12)
-                    |> Array.choose(fun (other,otherGeometry,otherFinal,otherRouted,otherFaces,
-                                          otherAlternatives,otherAlternativesAgree) ->
-                        let lower =
-                            candidateScores
-                            |> Array.tryFind(fun (_,candidateGeometry,candidateFinal,_,_,_,_) ->
-                                candidateFinal<otherFinal-1e-12
-                                || (abs(candidateFinal-otherFinal)<=1e-12
-                                    && candidateGeometry<otherGeometry-1e-12))
-                        let individualMargin =
-                            lower
-                            |> Option.map(fun (_,_,candidateFinal,_,_,_,_) -> otherFinal-candidateFinal)
-                            |> Option.defaultValue otherFinal
-                        let otherWinnerSupport =
-                            winnerCounts |> Array.tryFind(fun (value,_) -> value=other)
-                            |> Option.map snd |> Option.defaultValue 0
-                        let otherWinnerShare =
-                            if contexts.Length=0 then 0.0
-                            else float otherWinnerSupport/float contexts.Length
-                        let otherContradictory =
-                            winners |> Array.exists(fun (candidateValue,_,score,_,lead,_,_,_) ->
-                                candidateValue<>other && score>=policy.consensus.minimumPerContextScore
-                                && lead>=policy.consensus.minimumPerContextLead)
-                        let otherConsensus =
-                            contexts.Length>=policy.consensus.minimumContexts
-                            && otherWinnerShare>=policy.consensus.minimumWinningShare
-                            && not otherContradictory
-                        let otherEstablished = externalSupport |> Map.tryFind other |> Option.defaultValue 0
-                        let otherEstablishedRunner =
-                            externalSupport |> Seq.filter(fun pair -> pair.Key<>other)
-                            |> Seq.map(fun pair -> pair.Value) |> Seq.sortDescending
-                            |> Seq.tryHead |> Option.defaultValue 0
-                        let otherEstablishedStrong =
-                            JdfPostInference.establishedPostStrong policy otherEstablished
-                                otherEstablishedRunner 0.0 otherContradictory
-                                otherAlternatives otherAlternativesAgree
-                        let otherMaterialRouted =
-                            match lower with
-                            | Some(_,lowerGeometry,_,lowerRouted,_,_,_) ->
-                                otherRouted-lowerRouted>=policy.resolution.materialRoutedAdvantage
-                                && otherGeometry-lowerGeometry>= -0.000001
-                            | None -> otherRouted>=policy.resolution.materialRoutedAdvantage
-                        let independentlyPublishable =
-                            otherFinal>=policy.resolution.minimumPhysicalScore
-                            && (individualMargin>=policy.resolution.minimumPhysicalMargin
-                                || otherMaterialRouted)
-                            && not otherContradictory
-                            && (contexts.Length<policy.consensus.minimumContexts
-                                || otherConsensus || otherEstablishedStrong)
-                            && (not otherAlternatives || otherAlternativesAgree)
-                        if independentlyPublishable
-                           && otherFinal>=policy.sameStopPairs.minimumIndividualScore
-                           && individualMargin>=policy.sameStopPairs.minimumIndividualMargin then
-                            let latitude,longitude=coordinates other
-                            Some { candidateId=other;corridorFaceId=otherFaces |> Seq.tryHead
-                                   score=otherFinal;geometry=otherGeometry;margin=individualMargin
-                                   latitude=latitude;longitude=longitude }
-                        else None)
-                jointCandidates.[struct(stopId,familyId)]<-tiedCandidates
                 let latitude,longitude=coordinates candidate
                 { stopId=stopId;movementFamilyId=familyId;mode=first.mode;lineId=first.lineId;role=first.role
                   resolution="Physical";candidateId=Some candidate;corridorFaceId=faces |> Seq.tryHead
@@ -420,105 +354,13 @@ let internal evaluateReplayPolicy capturedHorizon
                   score=Some final;margin=Some margin;unsafePhysical=alternatives && not alternativesAgree
                   latitude=latitude;longitude=longitude }
             else
-                let _,topGeometry,_,_,_,_,_=candidateScores.[0]
-                let plausible=candidateScores |> Array.filter(fun (_,geometry,final,_,_,_,_) ->
-                    JdfPostInference.plausibleCandidate policy topGeometry geometry final)
-                let plausibleFaces=plausible |> Seq.collect(fun (_,_,_,_,values,_,_) -> values) |> Set
-                let conflictingAlternative =
-                    plausible |> Array.exists(fun (_,_,_,_,_,hasAlternatives,agrees) -> hasAlternatives && not agrees)
-                let plausibleCoordinates =
-                    plausible |> Array.choose(fun (id,_,_,_,_,_,_) ->
-                        match coordinates id with Some lat,Some lon -> Some(lat,lon) | _ -> None)
-                let compactness =
-                    seq {
-                        for left in plausibleCoordinates do
-                            for right in plausibleCoordinates do
-                                let leftLat,leftLon=left
-                                let rightLat,rightLon=right
-                                let dlat=(leftLat-rightLat)*111_320.0
-                                let dlon=(leftLon-rightLon)*111_320.0*Math.Cos((leftLat+rightLat)*Math.PI/360.0)
-                                yield Math.Sqrt(dlat*dlat+dlon*dlon)
-                    } |> Seq.append [0.0] |> Seq.max
-                if JdfPostInference.sideResolutionEligible policy plausible.Length plausibleFaces.Count
-                       conflictingAlternative plausibleFaces.Count contexts.Length compactness then
-                    let latitude,longitude=coordinates candidate
-                    { stopId=stopId;movementFamilyId=familyId;mode=first.mode;lineId=first.lineId;role=first.role
-                      resolution="Side";candidateId=None;corridorFaceId=plausibleFaces |> Seq.tryHead
-                      representativeCandidateId=Some candidate
-                      score=Some final;margin=Some margin;unsafePhysical=false
-                      latitude=latitude;longitude=longitude }
-                else
-                    { stopId=stopId;movementFamilyId=familyId;mode=first.mode;lineId=first.lineId;role=first.role
-                      resolution="Centroid";candidateId=None;corridorFaceId=None
-                      representativeCandidateId=None
-                      score=None;margin=None;unsafePhysical=false;latitude=None;longitude=None })
-    let decisionsByFamily =
-        ordinaryDecisions
-        |> Array.mapi(fun index value -> struct(value.stopId,value.movementFamilyId),(index,value))
-        |> Map.ofArray
-    let mutable sameStopBlocks=0
-    let mutable distinctPairChoices=0
-    let mutable unresolvedBlockEdges=0
-    if policy.sameStopPairs.enabled then
-        rows
-        |> Array.groupBy _.sameStopBlockId
-        |> Array.choose(fun (blockId,blockRows) -> blockId |> Option.map(fun value -> value,blockRows))
-        |> Array.sortBy fst
-        |> Array.iter(fun (_,blockRows) ->
-            sameStopBlocks<-sameStopBlocks+1
-            let contexts = blockRows |> Array.distinctBy _.contextId
-            if contexts.Length<>2 then unresolvedBlockEdges<-unresolvedBlockEdges+1 else
-            let left,right=contexts.[0],contexts.[1]
-            match decisionsByFamily |> Map.tryFind(struct(left.stopId,left.movementFamilyId)),
-                  decisionsByFamily |> Map.tryFind(struct(right.stopId,right.movementFamilyId)) with
-            | Some(leftIndex,leftDecision),Some(rightIndex,rightDecision)
-                when JdfPostInference.sameStopDistinctnessEligible {
-                         contextCount=contexts.Length
-                         leftAssignmentKind=left.assignmentKind
-                         rightAssignmentKind=right.assignmentKind
-                         leftMovementFamilyId=left.movementFamilyId
-                         rightMovementFamilyId=right.movementFamilyId
-                         leftResolution=leftDecision.resolution
-                         rightResolution=rightDecision.resolution
-                         leftCandidateId=leftDecision.candidateId
-                         rightCandidateId=rightDecision.candidateId } ->
-                    let leftChoices =
-                        match jointCandidates.TryGetValue(struct(left.stopId,left.movementFamilyId)) with
-                        | true,values -> values | _ -> [||]
-                    let rightChoices =
-                        match jointCandidates.TryGetValue(struct(right.stopId,right.movementFamilyId)) with
-                        | true,values -> values | _ -> [||]
-                    let policyChoices values =
-                        values |> Array.map(fun value ->
-                            ({ candidateId=value.candidateId;ordinaryScore=value.score
-                               ordinaryGeometry=value.geometry;individualMargin=value.margin
-                               independentlyPublishable=true }
-                             : JdfPostInference.SameStopPairChoice))
-                    let pair =
-                        JdfPostInference.selectDistinctSameStopPair policy.sameStopPairs
-                            (policyChoices leftChoices) (policyChoices rightChoices)
-                        |> Option.bind(fun (leftId,rightId) ->
-                            match leftChoices |> Array.tryFind(fun value -> value.candidateId=leftId),
-                                  rightChoices |> Array.tryFind(fun value -> value.candidateId=rightId) with
-                            | Some leftChoice,Some rightChoice -> Some(leftChoice,rightChoice)
-                            | _ -> None)
-                    match pair with
-                    | Some(leftChoice,rightChoice) ->
-                        let replace decision choice =
-                            { decision with candidateId=Some choice.candidateId
-                                            representativeCandidateId=Some choice.candidateId
-                                            corridorFaceId=choice.corridorFaceId
-                                            score=Some choice.score;margin=Some choice.margin
-                                            latitude=choice.latitude;longitude=choice.longitude }
-                        ordinaryDecisions.[leftIndex]<-replace leftDecision leftChoice
-                        ordinaryDecisions.[rightIndex]<-replace rightDecision rightChoice
-                        distinctPairChoices<-distinctPairChoices+1
-                    | None -> unresolvedBlockEdges<-unresolvedBlockEdges+1
-            | _ -> () )
+                { stopId=stopId;movementFamilyId=familyId;mode=first.mode;lineId=first.lineId;role=first.role
+                  resolution="Centroid";candidateId=None;corridorFaceId=None
+                  representativeCandidateId=None
+                  score=None;margin=None;unsafePhysical=false;latitude=None;longitude=None })
     ordinaryDecisions
     |> Array.sortBy(fun value -> value.stopId,value.mode,value.lineId,value.movementFamilyId),
-    { sameStopBlocks=sameStopBlocks;distinctPairChoices=distinctPairChoices
-      unresolvedBlockEdges=unresolvedBlockEdges },hypothesisDetails
+    hypothesisDetails
 
 [<Literal>]
 let internal LearnedExcessCapMetres = 1000.0
