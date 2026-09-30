@@ -17,17 +17,6 @@ open JrUtil.CsvMetadata
 exception CsvParseException of msg: string
 with override this.Message = this.msg
 
-let dateTimeParser (formats: string array) (instr: string) =
-    let (success, res) =
-        DateTime.TryParseExact(
-            instr, formats,
-            CultureInfo.InvariantCulture,
-            DateTimeStyles.None)
-    if not success
-    then raise (CsvParseException
-                 (sprintf "Invalid value for DateTime: %s" instr))
-    else res |> box
-
 let rec colParserForBase colParserFor (colType: Type) =
     // Ifs are probably better than a match expression here
     let parseMethod = colType.GetMethod("CsvParse")

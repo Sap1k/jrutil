@@ -20,12 +20,7 @@ open JrUtil.GeoData.Common
 open JrUtil.Utils
 
 let regionsSimplifiedFile = __SOURCE_DIRECTORY__ + "/../../data/cz_regions.json.gz"
-let townsWithRegionsFile = __SOURCE_DIRECTORY__ + "/../../data/cz_towns_regions.csv"
 let townsFile = __SOURCE_DIRECTORY__ + "/../../data/cz_towns.json.gz"
-
-type TownWithRegion = CsvProvider<
-    HasHeaders = false,
-    Schema = "id(int), name(string), regionLau1(string), regionId(string)">
 
 // Sometimes names of towns in timetables don't match official town names,
 // sometimes even multiple names are used across different timetables. This
@@ -47,10 +42,6 @@ let czechRegionPolygons =
             feature.Attributes.["code"] :?> string,
             polygonWgs84ToEtrs89Ex (feature.Geometry :?> _))
         |> Map
-
-let townsWithRegions =
-    memoizeVoidFunc <| fun () ->
-        TownWithRegion.Load(townsWithRegionsFile)
 
 let czechTownsPolygons =
     memoizeVoidFunc <| fun () ->

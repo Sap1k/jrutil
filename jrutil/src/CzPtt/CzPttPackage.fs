@@ -16,7 +16,6 @@ type Options = {
     catalog: CzPttToGtfs.CatalogSnapshot
     conversion: CzPttToGtfs.ConversionOptions
     sr70Path: string option
-    sr70Name20Path: string option
     osmPath: string option
     osmAliasesPath: string option
     diagnosticsOutput: string option
@@ -41,9 +40,9 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
     Directory.CreateDirectory(scratch) |> ignore
     try
         let result =
-            CzPttBundle.writeSidecarsWithStorageAndProgressAndOptions
+            CzPttBundle.convert
                 CzPttBundle.SpillBacked options.catalog options.conversion inputPath scratch
-                options.sr70Path options.sr70Name20Path options.osmPath options.osmAliasesPath progress
+                options.sr70Path options.osmPath options.osmAliasesPath progress
         progress "prepare-package-input" "started"
         let feed = result.feed |> Gtfs.deduplicateCalendar |> Gtfs.fillStandardRequiredFields
         let standard, czech = Gtfs.feedTables feed

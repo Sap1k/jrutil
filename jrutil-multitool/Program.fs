@@ -67,7 +67,6 @@ Options:
     --catalog-snapshot=FILE     Offline KADR catalog snapshot JSON for CZPTT
     --operational-points=VALUE  CZPTT internal points: gtfs (default) or sidecar
     --sr70=FILE                 SR70 CSV snapshot for CZPTT point names and coordinates
-    --sr70-name20=FILE          Companion SR70 Název20 CSV for fallback route names
     --osm-pbf=FILE              Shared regional OSM PBF for CZPTT coordinate gaps
     --osm-aliases=FILE          Reviewed CZPTT identity-to-OSM-object aliases
     --progress-events           Emit versioned JRUTIL_PROGRESS JSON lines
@@ -297,23 +296,10 @@ let main (args: string array) =
         let sr70Path = optArgValue args "--sr70"
         let osmPath = optArgValue args "--osm-pbf"
         let osmAliasesPath = optArgValue args "--osm-aliases"
-        let sr70Name20Path =
-            optArgValue args "--sr70-name20"
-            |> Option.orElseWith (fun () ->
-                sr70Path
-                |> Option.map (fun path ->
-                    Path.Combine(
-                        Path.GetDirectoryName(Path.GetFullPath(path)),
-                        "SR70_Nazev20.csv")))
         sr70Path
         |> Option.iter (fun path ->
             if not (File.Exists(path)) then
                 invalidArg "--sr70" $"SR70 snapshot does not exist: {path}")
-        sr70Name20Path
-        |> Option.iter (fun path ->
-            if not (File.Exists(path)) then
-                invalidArg "--sr70-name20"
-                    $"SR70 Název20 companion snapshot does not exist: {path}")
         osmPath
         |> Option.iter (fun path ->
             if not (File.Exists(path)) then
@@ -417,7 +403,14 @@ let main (args: string array) =
                            |> Option.defaultValue [])
                         @ (event.detail |> Option.map (fun value -> [ "detail", box value ])
                            |> Option.defaultValue []))
-                let bundleOptions: JdfBundle.BundleExecutionOptions = {
+                let bundleOptions: JdfBundle.BundleOptions = {
+                    snapshotDescriptorPath = argValue args "--snapshot-descriptor"
+                    converterVersion = argValue args "--converter-version"
+                    internationalPolicy = internationalRoutePolicy
+                    transportModeRules = transportModeRules
+                    estimatedPosts = routedPostInference
+                    routingPbfPath = routingPbf
+                    diagnosticPostLabels = argFlagSet args "--diagnostic-post-labels"
                     maximumWorkers = min 8 bundlePlan.resolvedWorkers
                     memoryBudgetBytes = bundlePlan.memoryBudgetBytes
                     reviewStopsPath = optArgValue args "--post-review-stops"
@@ -447,17 +440,7 @@ let main (args: string array) =
                 }
                 phase "jdf-to-bundle" "write-bundle" "started"
                 let bundleResult =
-                    JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                        (argValue args "--snapshot-descriptor")
-                        (argValue args "--converter-version")
-                        internationalRoutePolicy
-                        transportModeRules
-                        routedPostInference
-                        routingPbf
-                        (argFlagSet args "--diagnostic-post-labels")
-                        bundleOptions
-                        (argValue args "<JDF-input>")
-                        (argValue args "<bundle-out-dir>")
+                    JdfBundle.execute bundleOptions (argValue args "<JDF-input>") (argValue args "<bundle-out-dir>")
                 match bundleResult with
                 | JdfBundle.CaptureCompleted(manifest,metrics) ->
                     phase "jdf-to-bundle" "capture-post-inference-evidence" "completed"
@@ -502,7 +485,6 @@ let main (args: string array) =
                     catalog = CzPttToGtfs.loadCatalogSnapshot (argValue args "--catalog-snapshot")
                     conversion = { operationalPointMode = operationalPointMode }
                     sr70Path = sr70Path
-                    sr70Name20Path = sr70Name20Path
                     osmPath = osmPath
                     osmAliasesPath = osmAliasesPath
                     diagnosticsOutput = optArgValue args "--diagnostics-out"

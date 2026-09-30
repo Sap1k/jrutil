@@ -50,6 +50,3 @@ let getUnionSerializer = memoize <| fun (unionType: Type) ->
                 failwithf "No string value for union case %A of %A"
                           caseTag unionType)
         caseStr
-
-let serializeUnion<'u> (u: 'u) =
-    (getUnionSerializer typeof<'u>) u

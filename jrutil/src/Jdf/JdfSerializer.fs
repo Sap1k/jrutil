@@ -18,15 +18,6 @@ let rec jdfColSerializerFor colType =
     else
         colSerializerForBase jdfColSerializerFor colType
 
-let getJdfSerializer<'r> =
-    let rowSerializer = getRowSerializer<'r> jdfColSerializerFor
-    fun (records: 'r seq) ->
-        String.Join("\r\n",
-            records
-            |> Seq.map (fun r ->
-                "\"" + String.Join("\",\"", rowSerializer (box r)) + "\";"))
-        + "\r\n"
-
 let getJdfRecordWriter<'r> =
     let rowSerializer = getRowSerializer<'r> jdfColSerializerFor
     fun (writer: TextWriter) (record: 'r) ->

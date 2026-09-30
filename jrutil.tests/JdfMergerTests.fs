@@ -68,7 +68,7 @@ type JdfMergerTests() =
     }
 
     let merge batches =
-        let merger = JdfMerger.JdfMerger(JdfMerger.MergeStopsByName)
+        let merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsByName)
         batches |> Seq.iter merger.add
         merger
 
@@ -241,7 +241,7 @@ type JdfMergerTests() =
     member _.``By-ID strategy does not reconcile distinct IDs``() =
         let first = stop 100L "Ústí n.L." (Some "hl.nádr.") None [||]
         let second = stop 200L "Ústí nad Labem" (Some "Hlavní nádraží") None [||]
-        let merger = JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
+        let merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
         merger.add(emptyBatch [| first; second |] [||] [||])
         assertEqual 2 merger.batch.stops.Length
         assertEqual 0L merger.stopMergeStatistics.candidateComparisons

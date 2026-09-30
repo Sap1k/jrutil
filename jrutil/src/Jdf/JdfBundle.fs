@@ -113,7 +113,16 @@ type BundleProgressEvent = {
     workingSetBytes: int64
 }
 
-type BundleExecutionOptions = {
+type BundleOptions = {
+    /// Retrieval provenance and input checksum JSON
+    snapshotDescriptorPath: string
+    /// Exact JrUtil version or commit recorded as the package compiler
+    converterVersion: string
+    internationalPolicy: JdfToGtfs.InternationalRoutePolicy
+    transportModeRules: JdfToGtfs.TransportModeRuleSet
+    estimatedPosts: bool
+    routingPbfPath: string option
+    diagnosticPostLabels: bool
     maximumWorkers: int
     memoryBudgetBytes: int64
     reviewStopsPath: string option
@@ -131,7 +140,15 @@ type BundleExecutionOptions = {
     gvdYear: int option
 }
 
-let defaultBundleExecutionOptions = {
+/// Callers must set snapshotDescriptorPath and converterVersion.
+let defaultBundleOptions = {
+    snapshotDescriptorPath = ""
+    converterVersion = ""
+    internationalPolicy = JdfToGtfs.KeepAll
+    transportModeRules = JdfToGtfs.emptyTransportModeRules
+    estimatedPosts = true
+    routingPbfPath = None
+    diagnosticPostLabels = false
     maximumWorkers = 1
     memoryBudgetBytes = Int64.MaxValue
     reviewStopsPath = None
@@ -158,7 +175,7 @@ let private logPhaseResources phase (timer: Stopwatch) =
         currentProcess.WorkingSet64, currentProcess.PeakWorkingSet64, GC.GetTotalMemory(false),
         memory.FragmentedBytes)
 
-let private reportProgress (options: BundleExecutionOptions) (timer: Stopwatch)
+let private reportProgress (options: BundleOptions) (timer: Stopwatch)
                            phase state completed total unit detail activeWorkers =
     use currentProcess = Process.GetCurrentProcess()
     currentProcess.Refresh()
@@ -2292,11 +2309,11 @@ let private writePostReviewGeoJson path selectorsPath
     writer.WriteEndObject()
     writer.Flush()
 
-let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion 
+let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion
                                                    (internationalPolicy:JdfToGtfs.InternationalRoutePolicy)
                                                    transportModeRules
                                                    routingPbfPath
-                                                   (executionOptions:BundleExecutionOptions)
+                                                   (executionOptions:BundleOptions)
                                                    inputPath evidencePath =
     if String.IsNullOrWhiteSpace(converterVersion) then
         invalidArg "converterVersion" "Converter version is required"
@@ -2338,8 +2355,6 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
                 sourceBatch
         progress "prepare-calendar" "completed" (int64 sourceBatch.trips.Length)
                  (Some(int64 sourceBatch.trips.Length)) "trips" None 0
-        let sourceRouteKeys =
-            sourceBatch.routes |> Seq.map(fun route -> route.id,route.idDistinction) |> Set
         let filterResult =
             JdfToGtfs.applyInternationalRoutePolicyWithCalendarWorkersAndProgress
                 executionOptions.maximumWorkers
@@ -2427,14 +2442,14 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
               peakSpillBytes=captured.PeakSpillBytes
               maximumWorkers=executionOptions.maximumWorkers }))
 
-let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
-                                      (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
-                                      (transportModeRules: JdfToGtfs.TransportModeRuleSet)
-                                      estimatedPosts
-                                      (routingPbfPath: string option)
-                                      diagnosticPostLabels
-                                      (executionOptions: BundleExecutionOptions)
-                                      inputPath outputPath =
+let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPath =
+    let snapshotDescriptorPath = executionOptions.snapshotDescriptorPath
+    let converterVersion = executionOptions.converterVersion
+    let internationalPolicy = executionOptions.internationalPolicy
+    let transportModeRules = executionOptions.transportModeRules
+    let estimatedPosts = executionOptions.estimatedPosts
+    let routingPbfPath = executionOptions.routingPbfPath
+    let diagnosticPostLabels = executionOptions.diagnosticPostLabels
     if String.IsNullOrWhiteSpace(converterVersion) then invalidArg "converterVersion" "Converter version is required"
     let rawProgress=executionOptions.progress
     let progressGate=Dictionary<string,int64>(StringComparer.Ordinal)
@@ -2572,10 +2587,6 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion
                               (Some (int64 sourceBatch.trips.Length)) "trips"
             started "filter-international" (Some (int64 sourceBatch.routes.Length)) "routes"
             Log.Information("Bundle phase: applying international trip policy")
-            let sourceRouteKeys =
-                sourceBatch.routes
-                |> Seq.map (fun route -> route.id, route.idDistinction)
-                |> Set
             let sourceTransportModes =
                 sourceBatch.routes
                 |> Seq.map (fun route -> (route.id, route.idDistinction), route.transportMode)
@@ -2906,7 +2917,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion
             Log.Information("Bundle phase: creating manifest")
             let manifestText =
                 serializeJson (fun stream ->
-                    writeManifest stream descriptor converterVersion 
+                    writeManifest stream descriptor converterVersion
                                   internationalPolicy filterResult.decisions transportModeRules
                                   transportModeDecisions preparation.postPlan routingPbfPath
                                   (executionOptions.postInferenceEvidencePath |> Option.orElse liveEvidenceTemporaryDirectory)
@@ -2977,83 +2988,39 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion
             elif Directory.Exists(path) then Log.Error("Inference evidence retained at {EvidencePath}", path))
     BundleCompleted
 
-let writeBundleWithPolicyAndMemory releaseStopTimesAfterMaterialization
-                                   snapshotDescriptorPath converterVersion 
-                                   internationalPolicy 
-                                   inputPath outputPath =
-    // Stop times are always streamed directly to GTFS. Keep the public wrapper
-    // for source compatibility, but the old materialization switch no longer
-    // changes bundle behavior.
-    ignore releaseStopTimesAfterMaterialization
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
-                              internationalPolicy JdfToGtfs.emptyTransportModeRules
-                              true None false defaultBundleExecutionOptions
-                              inputPath outputPath |> ignore
-
-let writeBundleWithPolicy snapshotDescriptorPath converterVersion 
-                          internationalPolicy inputPath outputPath =
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
-                              internationalPolicy JdfToGtfs.emptyTransportModeRules
-                              true None false defaultBundleExecutionOptions
-                              inputPath outputPath |> ignore
-
-let writeBundleWithRoutedPostInference snapshotDescriptorPath converterVersion 
-                                       internationalPolicy transportModeRules
-                                       estimatedPosts routingPbfPath diagnosticPostLabels inputPath outputPath =
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
-                              internationalPolicy transportModeRules
-                              estimatedPosts routingPbfPath diagnosticPostLabels
-                              defaultBundleExecutionOptions inputPath outputPath |> ignore
-
-let executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion 
-                                              internationalPolicy transportModeRules
-                                              estimatedPosts routingPbfPath diagnosticPostLabels
-                                              executionOptions inputPath outputPath =
-    if executionOptions.maximumWorkers <= 0 then
-        invalidArg "executionOptions" "Bundle maximum workers must be positive"
-    if executionOptions.memoryBudgetBytes <= 0L then
-        invalidArg "executionOptions" "Bundle memory budget must be positive"
+/// Compile a JDF batch (directory or ZIP) into a production package, or, in
+/// capture-only mode, into a post-inference evidence pack.
+let execute (options: BundleOptions) inputPath outputPath =
+    if options.maximumWorkers <= 0 then
+        invalidArg "options" "Bundle maximum workers must be positive"
+    if options.memoryBudgetBytes <= 0L then
+        invalidArg "options" "Bundle memory budget must be positive"
     let executionMode =
-        match executionOptions.postInferenceEvidenceOnly,
-              executionOptions.postInferenceEvidencePath,routingPbfPath,estimatedPosts with
+        match options.postInferenceEvidenceOnly,
+              options.postInferenceEvidencePath,options.routingPbfPath,options.estimatedPosts with
         | true,None,Some _,true -> CaptureOnly
         | false,Some _,None,true -> Replay
         | false,None,Some _,true -> Live
         | false,None,None,_ -> Disabled
-        | _ -> invalidArg "executionOptions" "Invalid post-inference execution-mode combination"
+        | _ -> invalidArg "options" "Invalid post-inference execution-mode combination"
     match executionMode with
     | CaptureOnly ->
-        if executionOptions.postInferencePolicyPath.IsSome then
-            invalidArg "executionOptions" "Capture-only execution cannot load a policy"
+        if options.postInferencePolicyPath.IsSome then
+            invalidArg "options" "Capture-only execution cannot load a policy"
         let evidencePath =
-            executionOptions.capturePostInferenceEvidencePath
+            options.capturePostInferenceEvidencePath
             |> Option.defaultWith(fun () ->
-                invalidArg "executionOptions"
+                invalidArg "options"
                     "Capture-only execution requires --capture-post-inference-evidence=DIR")
-        capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion 
-            internationalPolicy transportModeRules routingPbfPath.Value
-            executionOptions inputPath evidencePath
+        capturePostInferenceEvidenceOnly options.snapshotDescriptorPath options.converterVersion
+            options.internationalPolicy options.transportModeRules options.routingPbfPath.Value
+            options inputPath evidencePath
     | _ ->
-        if executionOptions.capturePostInferenceEvidencePath.IsSome then
-            invalidArg "executionOptions"
+        if options.capturePostInferenceEvidencePath.IsSome then
+            invalidArg "options"
                 "--capture-post-inference-evidence is valid only in capture-only execution"
-        if executionOptions.captureRestriction<>JdfPostEvidence.noCaptureRestriction
-           || executionOptions.exportPostContextCallsPath.IsSome then
-            invalidArg "executionOptions"
+        if options.captureRestriction<>JdfPostEvidence.noCaptureRestriction
+           || options.exportPostContextCallsPath.IsSome then
+            invalidArg "options"
                 "--capture-stop-region, --capture-exclude-source and --export-post-context-calls are valid only in capture-only execution"
-        writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
-                                  internationalPolicy transportModeRules
-                                  estimatedPosts routingPbfPath diagnosticPostLabels
-                                  executionOptions inputPath outputPath
-
-let writeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion 
-                                              internationalPolicy transportModeRules
-                                              estimatedPosts routingPbfPath diagnosticPostLabels
-                                              executionOptions inputPath outputPath =
-    executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion 
-        internationalPolicy transportModeRules estimatedPosts routingPbfPath
-        diagnosticPostLabels executionOptions inputPath outputPath |> ignore
-
-let writeBundle snapshotDescriptorPath converterVersion inputPath outputPath =
-    writeBundleWithPolicy snapshotDescriptorPath converterVersion 
-                          JdfToGtfs.KeepAll inputPath outputPath
+        writeBundleCore options inputPath outputPath

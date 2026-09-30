@@ -450,11 +450,11 @@ let private loadAliases path =
 let private distanceMeters (latitude1, longitude1) (latitude2, longitude2) =
     Geo.haversineMetres latitude1 longitude1 latitude2 longitude2
 
-let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
-                                                  inputPath outputDirectory
-                                                  sr70Path _sr70Name20Path osmPath
-                                                  osmAliasesPath
-                                                  (progress: string -> string -> unit) =
+/// Convert CZPTT messages into a feed plus operational and source-metadata
+/// sidecars; `outputDirectory` is private scratch for the sidecar spools.
+let convert storagePolicy catalog options inputPath outputDirectory
+            sr70Path osmPath osmAliasesPath
+            (progress: string -> string -> unit) =
     Directory.CreateDirectory(outputDirectory) |> ignore
     progress "parse-input" "started"
     let outputFull = Path.GetFullPath(outputDirectory)
@@ -486,7 +486,7 @@ let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
     progress "load-coordinate-sources" "completed"
     progress "convert-gtfs" "started"
     let rawResult =
-        CzPttToGtfs.convertWithPointNamesAndOptions
+        CzPttToGtfs.convert
             catalog options sr70.names messages
     progress "convert-gtfs" "completed"
     progress "index-stop-times" "started"
@@ -1484,24 +1484,3 @@ let writeSidecarsWithStorageAndProgressAndOptions storagePolicy catalog options
 
     result
 
-let writeSidecarsWithProgressAndOptions catalog options inputPath outputDirectory
-                                       sr70Path sr70Name20Path osmPath
-                                       osmAliasesPath progress =
-    writeSidecarsWithStorageAndProgressAndOptions
-        MemoryBacked catalog options inputPath outputDirectory sr70Path
-        sr70Name20Path osmPath osmAliasesPath progress
-
-let writeSidecarsWithProgress catalog mode inputPath outputDirectory sr70Path
-                              sr70Name20Path osmPath osmAliasesPath progress =
-    writeSidecarsWithProgressAndOptions
-        catalog {
-            operationalPointMode = mode
-        } inputPath outputDirectory sr70Path sr70Name20Path osmPath
-        osmAliasesPath progress
-
-let writeSidecars catalog mode inputPath outputDirectory sr70Path sr70Name20Path
-                  osmPath osmAliasesPath =
-    writeSidecarsWithProgress
-        catalog mode inputPath outputDirectory sr70Path sr70Name20Path
-        osmPath osmAliasesPath
-        (fun _ _ -> ())

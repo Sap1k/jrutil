@@ -1657,7 +1657,7 @@ let private feedInfo (messages: CzPttXml.CzpttcisMessage array) =
                 (Some (Array.min starts))
                 (Some (Array.max ends)))
 
-let convertWithPointNamesAndOptions catalog options pointNames
+let convert catalog options pointNames
                           (messages: CzPttXml.CzpttcisMessage seq) =
     let noteContexts =
         ResizeArray<CzPttXml.CzpttcisMessage * NormalizedCall array>()
@@ -2225,17 +2225,3 @@ let convertWithPointNamesAndOptions catalog options pointNames
         notes = allNotes
         features = allFeatures
     }
-
-let convertWithOptions catalog options messages =
-    convertWithPointNamesAndOptions catalog options emptyPointNames messages
-
-let convertWithPointNames catalog mode pointNames messages =
-    convertWithPointNamesAndOptions catalog {
-        operationalPointMode = mode
-    } pointNames messages
-
-let convert catalog mode messages =
-    convertWithOptions catalog {
-        operationalPointMode = mode
-    } messages
-

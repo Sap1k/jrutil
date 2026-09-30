@@ -140,10 +140,5 @@ let locationActivities (loc: CzPttXml.CzpttLocation) =
     |> Option.defaultValue [||]
     |> Seq.map (fun ta -> ta.TrainActivityType |> parseUnion<TrainActivity>)
 
-let locationTrainType (loc: CzPttXml.CzpttLocation) =
-    loc.TrainType
-    |> nullableOpt
-    |> Option.map (fun tt -> tt.ToString() |> parseUnion<TrainType>)
-
 let isPublicLocation (loc: CzPttXml.CzpttLocation) =
     locationActivities loc |> Seq.contains Stops

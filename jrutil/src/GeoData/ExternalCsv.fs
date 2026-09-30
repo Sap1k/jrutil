@@ -18,13 +18,6 @@ open JrUtil.JdfFixups
 
 #nowarn "0058"
 
-type OtherStops = CsvProvider<
-    HasHeaders = false,
-    Schema = "name(string), lat(float), lon(float), region(string option), country(string option)">
-type CzRailStops = CsvProvider<
-    HasHeaders = false,
-    Schema = "sr70(string), name(string), lat(float), lon(float)">
-
 type OtherStopRow = {
     Name: string
     Lat: float
@@ -67,16 +60,6 @@ let otherStopRowsForJdfMatch (otherStopRows: OtherStopRow seq) =
         }
     })
     |> Seq.toArray
-
-let otherStopsForJdfMatch (otherStops: OtherStops) =
-    otherStops.Rows
-    |> Seq.map (fun row -> {
-        Name = row.Name; Lat = row.Lat; Lon = row.Lon
-        Region = row.Region; Country = row.Country
-        Source = Some "external:legacy"
-        SourceObjectId = None
-    })
-    |> otherStopRowsForJdfMatch
 
 let private otherStopFiles path =
     if File.Exists(path) then
