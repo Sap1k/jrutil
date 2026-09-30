@@ -27,27 +27,6 @@ type PostEvidenceStore private (directory:string,
                                 manifest:JdfPostInference.PostInferenceEvidenceManifest) =
     member _.Directory = directory
     member _.Manifest = manifest
-    member _.RelationPath(name:string) = Path.Combine(directory,name)
-    member _.RelationMetrics =
-        manifest.files |> Array.map(fun value -> value.path,value.rows,value.bytes) |> Array.copy
-    member _.ReadStops() = seq {
-        use stream=File.OpenRead(Path.Combine(directory,"route_points.parquet"))
-        let reader=ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
-        try
-            let field=reader.Schema.DataFields |> Array.find(fun value -> value.Name="gtfs_stop_place_id")
-            let mutable previous:string=null
-            for groupIndex=0 to reader.RowGroupCount-1 do
-                use group=reader.OpenRowGroupReader(groupIndex)
-                let values=Array.zeroCreate<string>(int group.RowCount)
-                group.ReadAsync(field,values.AsMemory(),Nullable(),CancellationToken.None)
-                     .AsTask().GetAwaiter().GetResult()
-                for value in values do
-                    if value<>previous then
-                        previous<-value
-                        yield Int64.Parse(value.Substring(value.LastIndexOf(':')+1),
-                                          Globalization.CultureInfo.InvariantCulture)
-        finally reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
-    }
     interface IDisposable with member _.Dispose() = ()
     static member internal Create(directory,manifest) = new PostEvidenceStore(directory,manifest)
 

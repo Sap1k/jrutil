@@ -71,18 +71,6 @@ type internal ReplayPolicyCounters = {
     sameStopBlocks:int;distinctPairChoices:int;unresolvedBlockEdges:int
 }
 
-type internal ReplayEvidenceStopSummary = {
-    rowCount:int; usableRowCount:int; routePointCount:int; distinctFaces:int
-}
-
-type internal ReplayExpectation = {
-    stopId:int64;stopName:string;description:string;minimumDistinctFaces:int
-    minimumEvidenceFaces:int;allowPhysicalUnderTiedCorridors:bool
-    allowCentroidFallback:bool;mode:string option;lineId:string option
-    role:string option;expectedResolution:string option;targetObservationIds:string array
-    targetLatitude:float option;targetLongitude:float option;coordinateToleranceMetres:float
-}
-
 type internal ReplayContextColumns = {
     ids:string array;stops:string array;modes:string array;lines:string array
     distinctions:int array;directions:int array;patterns:string array;positions:int array
@@ -108,7 +96,7 @@ type internal ReplayAttachmentColumns = {
 
 /// Read the three routing relations as one ordered join.  Publication does not
 /// need diagnostic-only identifiers, so it can avoid decoding them entirely.
-let internal replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<int64> option) =
+let internal replayScoreRows includeDiagnostics evidencePath =
     JdfPostInferencePolicy.PostInferencePhaseProbe.record "evidence-joined-traversal"
     let stopRegex=Regex("(?:jdf|cis):stop:(?<id>[0-9]+)",RegexOptions.CultureInvariant)
     let parseStop value =
@@ -237,7 +225,6 @@ let internal replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<
             contextIndex<-contextIndex+1
             let contextId=contexts.ids.[contextRow]
             let stopId=parseStop contexts.stops.[contextRow]
-            let selected=selectedStops |> Option.forall(fun values -> values.Contains stopId)
             let context = {
                 stopId=stopId;mode=contexts.modes.[contextRow];lineId=contexts.lines.[contextRow]
                 routeDistinction=contexts.distinctions.[contextRow];direction=contexts.directions.[contextRow]
@@ -273,37 +260,36 @@ let internal replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<
                     let attachments=attachmentColumns.Value
                     let attachmentRow=attachmentIndex
                     attachmentIndex<-attachmentIndex+1
-                    if selected then
-                        let failure=optionalString attachments.failures attachmentRow
-                                    |> Option.orElse corridor.invariantFailureReason
-                        yield {
-                            contextId=contextId;variantRank=rank
-                            relativeCostMetres=corridor.relativeCostMetres
-                            relativeCostFraction=corridor.relativeCostFraction
-                            stopId=context.stopId;candidateId=attachments.candidates.[attachmentRow]
-                            mode=context.mode;lineId=context.lineId
-                            routeDistinction=context.routeDistinction;direction=context.direction
-                            patternHash=context.patternHash;position=context.position;role=context.role
-                            movementFamilyId=context.movementFamilyId
-                            previousStopId=context.previousStopId;nextStopId=context.nextStopId
-                            assignmentKind=context.assignmentKind;authoredPostKey=context.authoredPostKey
-                            sameStopBlockId=context.sameStopBlockId
-                            alignment=0.0;side=0.0;proximity=0.0
-                            routedExcess=optionalDouble attachments.routedExcess attachmentRow
-                            ingressThreadId=corridor.ingressThreadId;egressThreadId=corridor.egressThreadId
-                            corridorId=corridor.corridorId
-                            corridorFaceId=optionalString attachments.faces attachmentRow
-                            routingAvailability=if failure.IsSome then "unavailable" else attachments.availability.[attachmentRow]
-                            alternativeCorridorCount=0;alternativeCostGap=None;tiedCorridorsAgree=true
-                            corridorDistance=optionalDouble attachments.corridorDistances attachmentRow
-                            signedLateralOffset=optionalDouble attachments.lateralOffsets attachmentRow
-                            corridorHeading=optionalDouble attachments.corridorHeadings attachmentRow
-                            attachmentHeading=optionalDouble attachments.attachmentHeadings attachmentRow
-                            snapEdgeId=attachments.snapEdges |> Option.bind(fun values ->
-                                if values.[attachmentRow].HasValue then Some values.[attachmentRow].Value else None)
-                            snapFraction=attachments.snapFractions |> Option.bind(fun values -> optionalDouble values attachmentRow)
-                            topologyFailureReason=failure
-                            serviceEdgeCount=corridor.serviceEdgeCount }
+                    let failure=optionalString attachments.failures attachmentRow
+                                |> Option.orElse corridor.invariantFailureReason
+                    yield {
+                        contextId=contextId;variantRank=rank
+                        relativeCostMetres=corridor.relativeCostMetres
+                        relativeCostFraction=corridor.relativeCostFraction
+                        stopId=context.stopId;candidateId=attachments.candidates.[attachmentRow]
+                        mode=context.mode;lineId=context.lineId
+                        routeDistinction=context.routeDistinction;direction=context.direction
+                        patternHash=context.patternHash;position=context.position;role=context.role
+                        movementFamilyId=context.movementFamilyId
+                        previousStopId=context.previousStopId;nextStopId=context.nextStopId
+                        assignmentKind=context.assignmentKind;authoredPostKey=context.authoredPostKey
+                        sameStopBlockId=context.sameStopBlockId
+                        alignment=0.0;side=0.0;proximity=0.0
+                        routedExcess=optionalDouble attachments.routedExcess attachmentRow
+                        ingressThreadId=corridor.ingressThreadId;egressThreadId=corridor.egressThreadId
+                        corridorId=corridor.corridorId
+                        corridorFaceId=optionalString attachments.faces attachmentRow
+                        routingAvailability=if failure.IsSome then "unavailable" else attachments.availability.[attachmentRow]
+                        alternativeCorridorCount=0;alternativeCostGap=None;tiedCorridorsAgree=true
+                        corridorDistance=optionalDouble attachments.corridorDistances attachmentRow
+                        signedLateralOffset=optionalDouble attachments.lateralOffsets attachmentRow
+                        corridorHeading=optionalDouble attachments.corridorHeadings attachmentRow
+                        attachmentHeading=optionalDouble attachments.attachmentHeadings attachmentRow
+                        snapEdgeId=attachments.snapEdges |> Option.bind(fun values ->
+                            if values.[attachmentRow].HasValue then Some values.[attachmentRow].Value else None)
+                        snapFraction=attachments.snapFractions |> Option.bind(fun values -> optionalDouble values attachmentRow)
+                        topologyFailureReason=failure
+                        serviceEdgeCount=corridor.serviceEdgeCount }
                 variantIndex<-variantIndex+1
         if ensureVariant() then
             invalidArg "evidencePath" "Corridor evidence references an unknown context"
@@ -311,7 +297,7 @@ let internal replayScoreRows includeDiagnostics evidencePath (selectedStops:Set<
             invalidArg "evidencePath" "Route-point evidence references an unknown context or corridor variant"
     }
 
-let internal readReplayRoutePoints evidencePath (selectedStops:Set<int64> option) =
+let internal readReplayRoutePoints evidencePath =
     let path=Path.Combine(evidencePath,"route_points.parquet")
     begin
         use stream=File.OpenRead(path)
@@ -334,20 +320,7 @@ let internal readReplayRoutePoints evidencePath (selectedStops:Set<int64> option
             let values=ResizeArray<ReplayRoutePoint>()
             for groupIndex=0 to reader.RowGroupCount-1 do
                 use group=reader.OpenRowGroupReader(groupIndex)
-                let mightContainSelectedStop =
-                    selectedStops |> Option.forall(fun selected ->
-                        let statistics=group.GetStatistics(stopField)
-                        match Option.ofObj statistics.MinValue,Option.ofObj statistics.MaxValue with
-                        | Some minimum,Some maximum ->
-                            let minimum=string minimum
-                            let maximum=string maximum
-                            selected |> Seq.exists(fun stopId ->
-                                [|$"jdf:stop:{stopId}";$"cis:stop:{stopId}"|]
-                                |> Array.exists(fun value ->
-                                    StringComparer.Ordinal.Compare(value,minimum)>=0
-                                    && StringComparer.Ordinal.Compare(value,maximum)<=0))
-                        | _ -> true)
-                let count=if mightContainSelectedStop then int group.RowCount else 0
+                let count=int group.RowCount
                 let readStrings field =
                     let result=Array.zeroCreate<string> count
                     if count>0 then
@@ -377,15 +350,14 @@ let internal readReplayRoutePoints evidencePath (selectedStops:Set<int64> option
                     let matched=stopRegex.Match(stops.[index])
                     if matched.Success then
                         let stopId=Int64.Parse(matched.Groups.["id"].Value,CultureInfo.InvariantCulture)
-                        if selectedStops |> Option.forall(fun selected -> selected.Contains(stopId)) then
-                            values.Add({ stopId=stopId;routePointId=ids.[index]
-                                         latitude=latitudes.[index];longitude=longitudes.[index]
-                                         observationIds=observationIds.[index].Split(';',StringSplitOptions.RemoveEmptyEntries)
-                                         hasCurrentLifecycle=current.[index]
-                                         hasObsoleteLifecycle=obsolete.[index]
-                                         supportWeight=support.[index]
-                                         explicitModes=explicitModes.[index].Split(';',StringSplitOptions.RemoveEmptyEntries)
-                                         deniedModes=deniedModes.[index].Split(';',StringSplitOptions.RemoveEmptyEntries) })
+                        values.Add({ stopId=stopId;routePointId=ids.[index]
+                                     latitude=latitudes.[index];longitude=longitudes.[index]
+                                     observationIds=observationIds.[index].Split(';',StringSplitOptions.RemoveEmptyEntries)
+                                     hasCurrentLifecycle=current.[index]
+                                     hasObsoleteLifecycle=obsolete.[index]
+                                     supportWeight=support.[index]
+                                     explicitModes=explicitModes.[index].Split(';',StringSplitOptions.RemoveEmptyEntries)
+                                     deniedModes=deniedModes.[index].Split(';',StringSplitOptions.RemoveEmptyEntries) })
             values |> Seq.groupBy(fun value -> value.stopId)
                    |> Seq.map(fun (stopId,points) -> stopId,points |> Seq.sortBy(fun value -> value.routePointId) |> Seq.toArray)
                    |> Map.ofSeq
@@ -476,51 +448,3 @@ let internal medianFloat values =
     if ordered.Length=0 then 0.0
     elif ordered.Length%2=1 then ordered.[ordered.Length/2]
     else (ordered.[ordered.Length/2-1]+ordered.[ordered.Length/2])/2.0
-
-let internal validateReplayEvidenceSemantics evidencePath
-                                                    (manifest:JdfPostInference.PostInferenceEvidenceManifest)
-                                                    (routePointsByStop:Map<int64,ReplayRoutePoint array>) =
-    let mutable rowCount=0L
-    let mutable contextCount=0L
-    let mutable variantCount=0L
-    let mutable currentStop=None
-    let rows=ResizeArray<ReplayScore>()
-    let flush () =
-        if rows.Count>0 then
-            let values=rows.ToArray()
-            let stopId=values.[0].stopId
-            let expectedPoints =
-                routePointsByStop |> Map.tryFind stopId |> Option.defaultValue [||]
-                |> Array.map _.routePointId |> Set.ofArray
-            for _,contextRows in values |> Array.groupBy _.contextId do
-                contextCount<-contextCount+1L
-                let ranks=contextRows |> Array.map _.variantRank |> Array.distinct |> Array.sort
-                if ranks.Length<1 || ranks.Length>JdfPostInference.CaptureMaximumCorridorVariants
-                   || ranks<>[|0..ranks.Length-1|] then
-                    invalidArg "evidencePath" "Evidence corridor ranks must be contiguous from zero and respect the capture ceiling"
-                variantCount<-variantCount+int64 ranks.Length
-                for rank in ranks do
-                    let rankRows=contextRows |> Array.filter(fun row -> row.variantRank=rank)
-                    let actualPoints=rankRows |> Array.map _.candidateId |> Set.ofArray
-                    if rankRows.Length<>actualPoints.Count || actualPoints<>expectedPoints then
-                        invalidArg "evidencePath" "Evidence must contain exactly one attachment per context, variant, and route point"
-                    for row in rankRows do
-                        let finite value=value |> Option.forall Double.IsFinite
-                        if not(finite row.relativeCostMetres && finite row.relativeCostFraction
-                               && finite row.routedExcess && finite row.corridorDistance
-                               && finite row.signedLateralOffset && finite row.corridorHeading
-                               && finite row.attachmentHeading) then
-                            invalidArg "evidencePath" "Evidence contains a non-finite routing fact"
-            rows.Clear()
-    for row in replayScoreRows true evidencePath None do
-        match currentStop with
-        | Some stopId when stopId<>row.stopId -> flush()
-        | _ -> ()
-        currentStop<-Some row.stopId
-        rows.Add(row)
-        rowCount<-rowCount+1L
-    flush()
-    if rowCount<>manifest.routePointEvidenceCount
-       || contextCount<>manifest.contextCount
-       || variantCount<>manifest.corridorVariantCount then
-        invalidArg "evidencePath" "Evidence semantic counts do not match the manifest"

@@ -303,13 +303,6 @@ let validatePolicyForEvidence capturedHorizon capturedMaximumVariants policy =
              $"requests {policy.alternativeCorridors.maximumVariants} but evidence captures {capturedMaximumVariants}"
     validated
 
-let loadPolicy path =
-    PostInferencePhaseProbe.record "policy-loading"
-    if not(File.Exists path) then invalidArg "path" $"Post-inference policy does not exist: {path}"
-    let policy=JsonSerializer.Deserialize<PostInferencePolicyV2>(File.ReadAllText(path),jsonOptions)
-    if isNull(box policy) then invalidArg "path" $"Post-inference policy is empty: {path}"
-    validatePolicy DefaultCapturedRoutedExcessHorizonMetres policy
-
 [<Literal>]
 let PolicyDocumentSchemaVersion = 3
 

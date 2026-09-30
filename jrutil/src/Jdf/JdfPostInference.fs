@@ -417,10 +417,9 @@ type PostInferenceDiagnosticScore = {
 }
 
 type PostInferenceCounters = {
-    evidenceRows:int64;contextCount:int;candidateStopCount:int
+    contextCount:int;candidateStopCount:int
     unresolvedContexts:int;authoredPositions:int;sameStopBlocks:int
     distinctPairChoices:int;unresolvedBlockEdges:int
-    physicalResolutions:int;sideResolutions:int;centroidResolutions:int
 }
 
 type PostInferenceResult(hypotheses:ConsolidatedPostHypothesis array,

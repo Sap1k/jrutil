@@ -23,7 +23,7 @@ open Parquet.Serialization
 open Serilog
 open JrUtil
 
-type PostInferenceExecutionMode = Disabled | CaptureOnly | Live | Replay
+type PostInferenceExecutionMode = Disabled | CaptureOnly | Live
 
 type PostInferenceCaptureMetrics = {
     estimatedEvidenceBytes: int64
@@ -122,17 +122,13 @@ type BundleOptions = {
     transportModeRules: JdfGtfsRules.TransportModeRuleSet
     estimatedPosts: bool
     routingPbfPath: string option
-    diagnosticPostLabels: bool
     maximumWorkers: int
     memoryBudgetBytes: int64
-    reviewStopsPath: string option
     capturePostInferenceEvidencePath: string option
     postInferenceEvidenceOnly: bool
     captureRestriction: JdfPostEvidence.CaptureRestriction
     exportPostContextCallsPath: string option
-    postInferenceEvidencePath: string option
     postInferencePolicyPath: string option
-    includePostInferenceScores: bool
     diagnosticsOutput: string option
     diagnosticTraces: bool
     progress: BundleProgressEvent -> unit
@@ -148,17 +144,13 @@ let defaultBundleOptions = {
     transportModeRules = JdfGtfsRules.emptyTransportModeRules
     estimatedPosts = true
     routingPbfPath = None
-    diagnosticPostLabels = false
     maximumWorkers = 1
     memoryBudgetBytes = Int64.MaxValue
-    reviewStopsPath = None
     capturePostInferenceEvidencePath = None
     postInferenceEvidenceOnly = false
     captureRestriction = JdfPostEvidence.noCaptureRestriction
     exportPostContextCallsPath = None
-    postInferenceEvidencePath = None
     postInferencePolicyPath = None
-    includePostInferenceScores = true
     diagnosticsOutput = None
     diagnosticTraces = false
     progress = ignore

@@ -216,7 +216,6 @@ let internal writeManifest (stream: Stream) descriptor (converterVersion: string
                           (routingPbfPath: string option)
                           (postInferenceEvidencePath:string option)
                           (postInferencePolicyPath:string option)
-                          diagnosticPostLabels
                           (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed) =
     use writer = new Utf8JsonWriter(stream, JsonWriterOptions(Indented = true))
     writer.WriteStartObject()
@@ -283,10 +282,7 @@ let internal writeManifest (stream: Stream) descriptor (converterVersion: string
     let selectedPolicy =
         selectedDocument |> Option.map _.policy
         |> Option.defaultValue JdfPostInferencePolicy.conservativeRoutedV4
-    writer.WriteString("execution_mode",
-        if postInferenceEvidencePath.IsSome && routingPbfPath.IsSome then "live"
-        elif postInferenceEvidencePath.IsSome then "replay"
-        else "disabled")
+    writer.WriteString("execution_mode", if postInferenceEvidencePath.IsSome then "live" else "disabled")
     writer.WriteString("evaluator_version",JdfPostInference.EvaluatorVersion)
     writer.WriteNumber("policy_schema_version",selectedPolicy.schemaVersion)
     writer.WriteString("policy_id",selectedPolicy.policyId)
@@ -298,7 +294,6 @@ let internal writeManifest (stream: Stream) descriptor (converterVersion: string
     match selectedDocument with
     | Some document -> writer.WriteString("policy_document_sha256",document.documentSha256)
     | None -> writer.WriteNull("policy_document_sha256")
-    writer.WriteBoolean("diagnostic_labels", diagnosticPostLabels)
     match routingPbfPath with
     | Some value ->
         writer.WriteString("routing_pbf_sha256", sha256File value)
@@ -341,7 +336,6 @@ let internal writeManifest (stream: Stream) descriptor (converterVersion: string
     writer.WriteNumber("centroid_pattern_fallbacks", postPlan.unresolvedPatternContexts.Length)
     writer.WriteNumber("modality_explicit", postPlan.modalityEstimates |> Seq.filter (fun value -> value.status = "Explicit") |> Seq.length)
     writer.WriteNumber("modality_estimated", postPlan.modalityEstimates |> Seq.filter (fun value -> value.status = "Estimated") |> Seq.length)
-    writer.WriteNumber("distinct_pattern_scores", postPlan.scoreCount)
     writer.WriteNumber("weak_or_unresolved_contexts", postPlan.unresolvedContexts)
     writer.WriteNumber("two_call_same_stop_blocks", postPlan.sameStopBlocks)
     writer.WriteNumber("distinct_pair_choices", postPlan.distinctPairChoices)

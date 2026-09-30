@@ -33,18 +33,14 @@ Options:
     --transport-mode-rules=FILE  Reviewed JDF effective transport-mode rule CSV
     --no-estimated-posts         Disable candidate-based internal post inference
     --routing-osm-pbf=FILE       Osmium demand-clipped road/tram PBF for routed inference
-    --diagnostic-post-labels     Emit inferred O*/O-direction labels in GTFS platform_code
-    --post-review-stops=FILE     Stop IDs/names for routed-inference review GeoJSON
     --capture-post-inference-evidence=DIR  Persist reusable policy-neutral routed evidence
     --post-inference-evidence-only         Stop after writing the evidence directory
     --capture-stop-region=BOX              Capture only stops in MINLON,MINLAT,MAXLON,MAXLAT (review/training packs)
     --capture-exclude-source=PREFIXES      Drop observations whose source ID starts with a comma-separated prefix
     --export-post-context-calls=FILE       Also write per-call context IDs (Parquet) for label joins
-    --post-inference-evidence=DIR          Reuse captured routed evidence without loading a graph
     --post-inference-policy=FILE           Versioned routed-inference policy JSON
-    --no-post-inference-scores             Skip diagnostic score rows for publication-only bundles
-    --evidence=DIR                         Evidence directory for policy replay
-    --policy=FILE                          Policy JSON for policy replay
+    --evidence=DIR                         jdf-export-post-features: captured evidence pack
+    --policy=FILE                          Overlay policy, or jdf-export-post-features baseline policy
     --gvd-year=YEAR                       GVD year: overlay window, merge-jdf validity bound, jdf-to-bundle manifest
     --reference-date=DATE                 merge-jdf: drop timetables expired before YYYY-MM-DD
     --source=BINDING                      Overlay source binding SOURCE_ID=GTFS.zip
