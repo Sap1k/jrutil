@@ -96,39 +96,6 @@ type PhysicalPostHypothesis = {
     sources: string array
 }
 
-type DerivedPostScore = {
-    context: PostPatternContextKey
-    movementFamilyId: string
-    candidateId: string
-    eligible: bool
-    alignment: float
-    side: float
-    proximity: float
-    routedFit: float
-    routedExcessMetres: float option
-    corridorId: string option
-    ingressThreadId: string option
-    egressThreadId: string option
-    corridorFaceId: string option
-    routingAvailability: string
-    alternativeCorridorCount: int
-    alternativeCostGap: float option
-    snapEdgeId: int option
-    snapFraction: float option
-    corridorDistance: float option
-    signedLateralOffset: float option
-    corridorHeading: float option
-    attachmentHeading: float option
-    tiedCorridorsAgree: bool
-    topologyFailureReason: string option
-    routeDistinction: int
-    sourceAdjustment: float
-    modalityAdjustment: float
-    popularityPrior: float
-    total: float
-    rejectionReason: string option
-}
-
 type PostEstimationPlan = {
     authored: Map<int64 * string, DerivedPostSelection>
     calls: IReadOnlyDictionary<PostPatternContextKey, DerivedPostSelection>
@@ -141,9 +108,6 @@ type PostEstimationPlan = {
     physicalHypotheses: PhysicalPostHypothesis array
     modalityEstimates: CandidateModalityEstimate array
     sideGroups: PostSideGroup array
-    scoreCount: int64
-    scoreRows: unit -> seq<DerivedPostScore>
-    cleanupScoreRows: unit -> unit
     unresolvedPatternContexts: PostPatternContextKey array
     tripPatternHashes: IReadOnlyDictionary<struct (string * int * int64), string>
     candidateStopCount: int
@@ -166,9 +130,6 @@ let internal emptyPostEstimationPlan = {
     physicalHypotheses = [||]
     modalityEstimates = [||]
     sideGroups = [||]
-    scoreCount = 0L
-    scoreRows = fun () -> Seq.empty
-    cleanupScoreRows = ignore
     unresolvedPatternContexts = [||]
     tripPatternHashes = Dictionary<struct (string * int * int64), string>()
     candidateStopCount = 0; singleCandidateSkips = 0
@@ -178,11 +139,11 @@ let internal emptyPostEstimationPlan = {
 
 /// Adapts the inference-domain result to the converter's publishing plan.
 /// Policy evaluation remains entirely in JdfPostInferenceEvaluator; this
-/// function only translates already-decided assignments and diagnostics.
+/// function only translates already-decided assignments, and releases the
+/// result's spooled rows once the plan is materialized.
 let postEstimationPlanFromInferenceResult
         (result:JdfPostInference.PostInferenceResult) : PostEstimationPlan =
     JdfPostInferencePolicy.PostInferencePhaseProbe.record "result-adaptation"
-    let disposeResult () = (result :> IDisposable).Dispose()
     try
         let hypothesesById =
             result.Hypotheses
@@ -303,52 +264,12 @@ let postEstimationPlanFromInferenceResult
                      value.sameStopBlockRole,value.previousStopId,value.nextStopId)
                  |> Seq.toArray))
             |> Map.ofSeq
-        let scoreRows () = seq {
-            use assignments=result.Assignments.ReadRows().GetEnumerator()
-            let mutable hasAssignment=assignments.MoveNext()
-            for score in result.DiagnosticScores.ReadRows() do
-                while hasAssignment && assignments.Current.contextId<>score.contextId do
-                    hasAssignment<-assignments.MoveNext()
-                if not hasAssignment then
-                    invalidOp $"Derived post score references an unknown context: {score.contextId}"
-                let assignment=assignments.Current
-                let context:PostPatternContextKey = {
-                    stopId=assignment.stopId
-                    mode=parseTransportMode "inference result mode" assignment.mode
-                    lineId=assignment.lineId;routeDistinction=assignment.routeDistinction
-                    direction=assignment.direction;patternHash=assignment.patternHash
-                    position=assignment.patternPosition
-                    sameStopBlockRole=assignment.sameStopBlockRole }
-                yield ({ context=context;movementFamilyId=assignment.movementFamilyId
-                         candidateId=score.candidateId;eligible=score.eligible
-                         alignment=score.alignment;side=score.side;proximity=score.proximity
-                         routedFit=score.routedExcess;routedExcessMetres=score.routedExcessMetres
-                         corridorId=score.corridorId;ingressThreadId=score.ingressThreadId
-                         egressThreadId=score.egressThreadId;corridorFaceId=score.corridorFaceId
-                         routingAvailability=score.routingAvailability
-                         alternativeCorridorCount=score.alternativeCorridorCount
-                         alternativeCostGap=score.alternativeCostGap
-                         snapEdgeId=score.snapEdgeId;snapFraction=score.snapFraction
-                         corridorDistance=score.corridorDistance
-                         signedLateralOffset=score.signedLateralOffset
-                         corridorHeading=score.corridorHeading
-                         attachmentHeading=score.attachmentHeading
-                         tiedCorridorsAgree=score.tiedCorridorsAgree
-                         topologyFailureReason=score.topologyFailureReason
-                         routeDistinction=assignment.routeDistinction
-                         sourceAdjustment=score.sourceAdjustment
-                         modalityAdjustment=score.modalityAdjustment
-                         popularityPrior=score.popularityAdjustment
-                         total=score.total;rejectionReason=score.rejectionReason }
-                       : DerivedPostScore)
-        }
         { authored=authored;calls=calls;authoredContexts=authoredContextMap
           callContexts=callContexts;movementFamilyIds=movementFamilyIds
           locations=inferredLocations;inferredLocations=inferredLocations
           inferredLocationOrdinals=inferredLocationOrdinals
           physicalHypotheses=physicalHypotheses;modalityEstimates=[||]
-          sideGroups=sideGroups;scoreCount=result.DiagnosticScores.Count
-          scoreRows=scoreRows;cleanupScoreRows=disposeResult
+          sideGroups=sideGroups
           unresolvedPatternContexts=unresolved.ToArray()
           tripPatternHashes=Dictionary<struct(string*int*int64),string>()
           candidateStopCount=result.Counters.candidateStopCount;singleCandidateSkips=0
@@ -356,9 +277,8 @@ let postEstimationPlanFromInferenceResult
           sameStopBlocks=result.Counters.sameStopBlocks
           distinctPairChoices=result.Counters.distinctPairChoices
           unresolvedBlockEdges=result.Counters.unresolvedBlockEdges }
-    with _ ->
-        disposeResult()
-        reraise()
+    finally
+        (result :> IDisposable).Dispose()
 
 let internal authoredPostKey (call: JdfModel.TripStop) =
     match call.stopPostId, call.stopPostNum |> Option.bind nonEmptyTrimmed with

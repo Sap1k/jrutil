@@ -147,7 +147,7 @@ type JdfBundleTests() =
             osmWay 12L [|1L;11L|] ["highway","residential"] :> OsmGeo
             osmWay 13L [|4L;14L|] ["highway","residential"] :> OsmGeo|]
         File.WriteAllText(routing+".manifest.json",JsonSerializer.Serialize(
-            {|filter_schema=JdfBundleReview.routingEnvelopePolicy;source_key="fixture"
+            {|filter_schema=JdfBundleInput.routingEnvelopePolicy;source_key="fixture"
               output={|bytes=FileInfo(routing).Length|}|}))
         let sha=
             use stream=File.OpenRead(input)
@@ -202,32 +202,14 @@ type JdfBundleTests() =
             | _ -> invalidArg "fileName" fileName
         JdfPostInference.writeEvidenceManifest (Path.Combine(evidence,"manifest.json")) manifest
 
+    let evaluateHeuristic includeDiagnostics store policy =
+        JdfPostInferenceEvaluator.evaluateWithScorer includeDiagnostics store policy
+            JdfPostInferencePolicy.HeuristicScorer
+
     let copyDirectory source destination =
         Directory.CreateDirectory(destination) |> ignore
         for path in Directory.GetFiles(source) do
             File.Copy(path,Path.Combine(destination,Path.GetFileName(path)))
-
-    [<TestMethod>]
-    member _.``Mandatory routed review selectors and expectations stay in sync``() =
-        let dataPath name = Path.Combine(__SOURCE_DIRECTORY__, "TestData", name)
-        let selectors =
-            File.ReadAllLines(dataPath "routed-post-review-stops.txt")
-            |> Array.map _.Trim()
-            |> Array.filter (fun value -> value <> "" && not(value.StartsWith("#")))
-            |> Array.map Int64.Parse
-            |> Set
-        let expectationRows =
-            File.ReadAllLines(dataPath "routed-post-review-expectations.tsv")
-            |> Array.skip 1
-            |> Array.filter (String.IsNullOrWhiteSpace >> not)
-            |> Array.map (fun row -> row.Split('\t'))
-        Assert.IsTrue(expectationRows |> Array.forall (fun row -> row.Length = 7))
-        let expectedIds = expectationRows |> Array.map (fun row -> Int64.Parse(row.[0]))
-        assertEqual expectedIds.Length (expectedIds |> Array.distinct |> Array.length)
-        assertEqual selectors (expectedIds |> Set)
-        let row stopId=expectationRows |> Array.find(fun values -> values.[0]=string stopId)
-        assertEqual [|"2";"2";"false";"true"|] (row 3832 |> Array.skip 3)
-        assertEqual [|"2";"2";"false";"false"|] (row 4410 |> Array.skip 3)
 
     [<TestMethod>]
     member _.``Routing PBF manifest accepts only the current envelope policy``() =
@@ -244,11 +226,11 @@ type JdfBundleTests() =
                 File.WriteAllText(
                     routingPbf + ".manifest.json",
                     JsonSerializer.Serialize(manifest))
-            writeManifest JdfBundleReview.routingEnvelopePolicy
-            JdfBundleReview.validateRoutingPbfManifest routingPbf
+            writeManifest JdfBundleInput.routingEnvelopePolicy
+            JdfBundleInput.validateRoutingPbfManifest routingPbf
             writeManifest "jdf-routing-envelope-v1"
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundleReview.validateRoutingPbfManifest routingPbf)
+                JdfBundleInput.validateRoutingPbfManifest routingPbf)
             |> ignore
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
@@ -430,21 +412,13 @@ type JdfBundleTests() =
         Directory.CreateDirectory(root) |> ignore
         try
             let descriptorPath,input,routing=routedCaptureFixture root
-            let firstStop =
-                use archive=ZipFile.OpenRead(input)
-                let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
-                batch.stops.[0].id
-            let reviewStops=Path.Combine(root,"review-stops.txt")
-            File.WriteAllText(reviewStops,string firstStop+Environment.NewLine)
             let diagnostics=Path.Combine(root,"diagnostics")
             let output=Path.Combine(root,"bundle")
-            let options={JdfBundleModel.defaultBundleOptions with
-                            reviewStopsPath=Some reviewStops
-                            diagnosticsOutput=Some diagnostics}
+            let options={JdfBundleModel.defaultBundleOptions with diagnosticsOutput=Some diagnostics}
             JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input output |> ignore
             JrUtil.Serving.Validation.validatePackage output |> ignore
-            for name in [| "post-review.geojson"; "derived_post_scores.parquet"; "derived_post_assignments.parquet" |] do
-                Assert.IsTrue(File.Exists(Path.Combine(diagnostics,"post-inference",name)),name)
+            Assert.IsTrue(File.Exists(Path.Combine(diagnostics,"post-inference","derived_post_assignments.parquet")))
+            Assert.IsFalse(File.Exists(Path.Combine(diagnostics,"post-inference","derived_post_scores.parquet")))
             Assert.IsFalse(Directory.Exists(Path.Combine(output,"post-inference")))
             // No scratch directory survives a successful build.
             Assert.IsFalse(Directory.EnumerateDirectories(root) |> Seq.exists (fun path -> Path.GetFileName(path).StartsWith(".")))
@@ -486,7 +460,7 @@ type JdfBundleTests() =
                 assertEqual 0L (probes |> Map.tryFind phase |> Option.defaultValue 0L)
             Assert.IsTrue(File.Exists(Path.Combine(evidence,"manifest.json")))
             Assert.IsFalse(Directory.Exists(Path.Combine(root,"must-not-be-created")))
-            let forbidden=[|"evaluate-post-inference";"replay-post-inference";"prepare-inference"
+            let forbidden=[|"evaluate-post-inference";"prepare-inference"
                             "write-derived";"stage-bundle";"activate";"diagnostics"|]
             for phase in forbidden do
                 Assert.IsFalse(phases |> Seq.exists(fun value -> value.Contains(phase)),
@@ -655,8 +629,7 @@ type JdfBundleTests() =
             JdfBundleEvidence.exportPostInferenceFeatures evidence None output
             use store=JdfPostEvidenceStore.openValidatedStore
                           JdfPostEvidenceStore.noIdentityExpectation evidence
-            use expected=JdfPostInferenceEvaluator.evaluateWithDiagnostics true store
-                             JdfPostInferencePolicy.conservativeRoutedV4
+            use expected=evaluateHeuristic true store JdfPostInferencePolicy.conservativeRoutedV4
             let scores=readParquet(Path.Combine(output,"diagnostic_scores.parquet"))
             let hypotheses=readParquet(Path.Combine(output,"hypotheses.parquet"))
             let assignments=readParquet(Path.Combine(output,"assignments.parquet"))
@@ -738,7 +711,7 @@ type JdfBundleTests() =
             if Directory.Exists(root) then Directory.Delete(root,true)
 
     [<TestMethod>]
-    member _.``Restricted evidence packs replay for review but are rejected for bundle conversion``() =
+    member _.``Restricted captures mark their packs and are rejected outside capture-only execution``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-capture-region-pack-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
@@ -756,22 +729,15 @@ type JdfBundleTests() =
                 {JdfPostEvidence.noCaptureRestriction with
                     stopRegion=Some(JdfPostEvidence.parseCaptureStopRegion "13.99,49.995,14.01,50.005")}
             let _,fullManifest=capture "full" JdfPostEvidence.noCaptureRestriction
-            let regionEvidence,regionManifest=capture "region" region
+            let _,regionManifest=capture "region" region
             assertEqual "test-tool+region:13.99,49.995,14.01,50.005" regionManifest.captureToolVersion
-            let excludedEvidence,excludedManifest=
+            let _,excludedManifest=
                 capture "excluded" {JdfPostEvidence.noCaptureRestriction with
                                         excludedSourcePrefixes=[|"100-we"|]}
             assertEqual "test-tool+exclude-source:100-we" excludedManifest.captureToolVersion
             Assert.AreNotEqual(fullManifest.packId,regionManifest.packId)
             Assert.IsTrue(regionManifest.contextCount>0L)
             Assert.IsTrue(regionManifest.contextCount<fullManifest.contextCount)
-            for evidence in [|regionEvidence;excludedEvidence|] do
-                let replayOptions={JdfBundleModel.defaultBundleOptions with
-                                      postInferenceEvidencePath=Some evidence}
-                let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
-                    JdfBundle.execute { replayOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool" } input (Path.Combine(root,"bundle")) |> ignore)
-                StringAssert.Contains(error.Message,"Restricted post-inference evidence")
-                Assert.IsFalse(Directory.Exists(Path.Combine(root,"bundle")))
             let liveOptions={JdfBundleModel.defaultBundleOptions with
                                 captureRestriction=region}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
@@ -927,7 +893,7 @@ type JdfBundleTests() =
             if Directory.Exists(root) then Directory.Delete(root,true)
 
     [<TestMethod>]
-    member _.``Live and replay share complete inference results and publication bytes``() =
+    member _.``Evaluation is deterministic and diagnostics do not change decisions``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-live-replay-equality-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
@@ -940,24 +906,21 @@ type JdfBundleTests() =
             JdfBundle.execute { captureOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"capture-unused")) |> ignore
             use store=JdfPostEvidenceStore.openValidatedStore
                           JdfPostEvidenceStore.noIdentityExpectation evidence
-            let capturedStops=store.ReadStops() |> Seq.toArray
-            Assert.IsTrue(capturedStops.Length>1)
-            use first=JdfPostInferenceEvaluator.evaluate store permissiveCoveragePolicy
-            use second=JdfPostInferenceEvaluator.evaluate store permissiveCoveragePolicy
+            use first=evaluateHeuristic true store permissiveCoveragePolicy
+            use second=evaluateHeuristic true store permissiveCoveragePolicy
             JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
-            use publicationOnly=
-                JdfPostInferenceEvaluator.evaluateWithDiagnostics false store
-                    permissiveCoveragePolicy
+            use publicationOnly=evaluateHeuristic false store permissiveCoveragePolicy
             let publicationProbes=JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
             let firstAssignments=first.Assignments.ReadRows() |> Seq.toArray
             let firstDiagnostics=first.DiagnosticScores.ReadRows() |> Seq.toArray
+            Assert.IsTrue((firstAssignments |> Array.map _.stopId |> Array.distinct).Length>1)
             Assert.IsTrue(first.Hypotheses |> Array.exists(fun value ->
                 value.memberObservationIds |> Array.contains "100-obsolete"))
             Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.assignmentKind="authored"))
             Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.sameStopBlockId.IsSome))
             Assert.IsTrue(first.Counters.sameStopBlocks>0)
-            Assert.IsTrue(first.Counters.centroidResolutions>0)
-            Assert.IsTrue(first.Counters.physicalResolutions>0 || first.Counters.sideResolutions>0)
+            Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.resolution="Centroid"))
+            Assert.IsTrue(firstAssignments |> Array.exists(fun value -> value.resolution<>"Centroid"))
             Assert.IsTrue(firstDiagnostics |> Array.exists(fun value -> value.alternativeCorridorCount>1))
             Assert.IsTrue(firstDiagnostics |> Array.exists(fun value -> value.modalityAdjustment<>0.0))
             Assert.IsTrue(firstDiagnostics |> Array.exists(fun value -> value.routingAvailability<>"available"))
@@ -983,40 +946,11 @@ type JdfBundleTests() =
                          |> Option.defaultValue 0L)
             assertEqual firstDiagnostics
                         (second.DiagnosticScores.ReadRows() |> Seq.toArray)
-
-            let liveOutput=Path.Combine(root,"live")
-            let replayOutput=Path.Combine(root,"replay")
-            let liveOptions={JdfBundleModel.defaultBundleOptions with
-                                maximumWorkers=3;memoryBudgetBytes=1L}
-            JdfBundle.execute { liveOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input liveOutput |> ignore
-            let replayOptions={JdfBundleModel.defaultBundleOptions with
-                                  memoryBudgetBytes=1L
-                                  postInferenceEvidencePath=Some evidence}
-            JdfBundle.execute { replayOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool" } input replayOutput |> ignore
-            JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
-            JrUtil.Serving.Validation.validatePackage replayOutput |> ignore
-            CollectionAssert.AreEqual(
-                File.ReadAllBytes(Path.Combine(liveOutput,"gtfs.zip")),
-                File.ReadAllBytes(Path.Combine(replayOutput,"gtfs.zip")),"gtfs.zip")
-            let liveView=Path.Combine(root,"live-view")
-            let replayView=Path.Combine(root,"replay-view")
-            let liveGtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView liveOutput liveView
-            let replayGtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView replayOutput replayView
-            let liveFeed=Gtfs.gtfsParseFolder () liveGtfs
-            let replayFeed=Gtfs.gtfsParseFolder () replayGtfs
-            let stopShape (feed:GtfsModel.GtfsFeed) =
-                feed.stops |> Array.map(fun value -> value.id,value.parentStation) |> Array.sort
-            assertEqual (stopShape liveFeed) (stopShape replayFeed)
-            let unspecified (feed:GtfsModel.GtfsFeed) =
-                feed.stopTimes |> Array.filter(fun value -> value.stopId.EndsWith(":unspecified"))
-                               |> Array.map(fun value -> value.tripId,value.stopSequence,value.stopId)
-                               |> Array.sort
-            assertEqual (unspecified liveFeed) (unspecified replayFeed)
         finally
             if Directory.Exists(root) then Directory.Delete(root,true)
 
     [<TestMethod>]
-    member _.``Learned v3 policy publishes identical live and replay bundles``() =
+    member _.``Learned v3 policy publishes a live bundle with learned provenance``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-learned-policy-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
@@ -1031,25 +965,11 @@ type JdfBundleTests() =
                 $"""{{"schema_version":3,"policy":{File.ReadAllText v2Path},"scorer":{{"kind":"learned","model":{golden.RootElement.GetProperty("model").GetRawText()}}}}}""")
             let loaded=JdfPostInferencePolicy.loadPolicyWithScorer policyPath
             Assert.IsTrue(match loaded.scorer with JdfPostInferencePolicy.LearnedScorer _ -> true | _ -> false)
-            let evidence=Path.Combine(root,"evidence")
-            JdfBundle.execute
-                {JdfBundleModel.defaultBundleOptions with
-                    maximumWorkers=3;memoryBudgetBytes=1L;postInferenceEvidenceOnly=true
-                    capturePostInferenceEvidencePath=Some evidence; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing} input (Path.Combine(root,"capture-unused")) |> ignore
             let liveOutput=Path.Combine(root,"live")
-            let replayOutput=Path.Combine(root,"replay")
             JdfBundle.execute
                 {JdfBundleModel.defaultBundleOptions with
                     maximumWorkers=3;memoryBudgetBytes=1L;postInferencePolicyPath=Some policyPath; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing} input liveOutput |> ignore
-            JdfBundle.execute
-                {JdfBundleModel.defaultBundleOptions with
-                    memoryBudgetBytes=1L;postInferenceEvidencePath=Some evidence
-                    postInferencePolicyPath=Some policyPath; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"} input replayOutput |> ignore
             JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
-            JrUtil.Serving.Validation.validatePackage replayOutput |> ignore
-            CollectionAssert.AreEqual(
-                File.ReadAllBytes(Path.Combine(liveOutput,"gtfs.zip")),
-                File.ReadAllBytes(Path.Combine(replayOutput,"gtfs.zip")),"gtfs.zip")
             // A route stop is served at the calls' stop place, whatever post each trip uses.
             let serving name = Path.Combine(liveOutput,"serving",name+".parquet")
             let routeStopLocations =
@@ -1084,7 +1004,7 @@ type JdfBundleTests() =
             let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                 use store=JdfPostEvidenceStore.openValidatedStore
                               JdfPostEvidenceStore.noIdentityExpectation evidence
-                JdfPostInferenceEvaluator.evaluate store JdfPostInferencePolicy.conservativeRoutedV4
+                evaluateHeuristic true store JdfPostInferencePolicy.conservativeRoutedV4
                 |> ignore)
             StringAssert.Contains(error.Message,"movement-family")
             assertEqual None (JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
@@ -1139,7 +1059,7 @@ type JdfBundleTests() =
                 Assert.ThrowsExactly<ArgumentException>(fun () ->
                     use store=JdfPostEvidenceStore.openValidatedStore
                                   JdfPostEvidenceStore.noIdentityExpectation evidence
-                    JdfPostInferenceEvaluator.evaluate store JdfPostInferencePolicy.conservativeRoutedV4
+                    evaluateHeuristic true store JdfPostInferencePolicy.conservativeRoutedV4
                     |> ignore)
                 |> ignore
                 assertEqual None (JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
@@ -1167,40 +1087,6 @@ type JdfBundleTests() =
                     |> int64
                 rehashEvidenceRelationWithCount evidence "route_point_evidence.parquet" rowCount
                 assertRejected name evidence
-        finally
-            if Directory.Exists(root) then Directory.Delete(root,true)
-
-    [<TestMethod>]
-    member _.``Evidence-backed bundle rejects a different merged JDF before replay``() =
-        let root = Path.Combine(Path.GetTempPath(), "jrutil-bundle-evidence-identity-" + Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(root) |> ignore
-        try
-            let sha, bytes = JdfBundleInput.directoryTreeIdentity fixturePath
-            let descriptorPath = Path.Combine(root, "snapshot.json")
-            descriptor descriptorPath "directory-tree" sha bytes
-            let evidencePath=Path.Combine(root,"evidence")
-            Directory.CreateDirectory(evidencePath) |> ignore
-            let evidenceFiles=JdfPostInference.RequiredEvidenceFiles
-            for fileName in evidenceFiles do File.WriteAllBytes(Path.Combine(evidencePath,fileName),[||])
-            let emptyHash="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-            JdfPostInference.writeEvidenceManifest (Path.Combine(evidencePath,"manifest.json")) {
-                evidenceFormat=JdfPostInference.EvidenceFormat;schemaVersion=JdfPostInference.EvidenceSchemaVersion
-                packId=JdfPostInference.evidencePackId "test-tool" (String.replicate 64 "0") (String.replicate 64 "1")
-                captureToolVersion="test-tool"
-                mergedJdfSha256=String.replicate 64 "0";routingPbfSha256=String.replicate 64 "1"
-                osmSnapshot=None;routerEvidenceVersion=JdfPostInference.RouterEvidenceVersion
-                variantEnumerationVersion=JdfPostInference.VariantEnumerationVersion
-                captureCeilings={routedExcessMetres=1000.0;maximumCorridorVariants=3}
-                maximumSearchStates=100000;maximumSearchDistanceMetres=30000.0
-                contextCount=0L;routePointCount=0L;observationCount=0L
-                corridorVariantCount=0L;routePointEvidenceCount=0L
-                files=evidenceFiles |> Array.map(fun path ->
-                    {JdfPostInference.EvidenceFileManifest.path=path;sha256=emptyHash;bytes=0L
-                     rows=0L;schemaFingerprint="test"}) }
-            let options={ JdfBundleModel.defaultBundleOptions with postInferenceEvidencePath=Some evidencePath }
-            let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.execute { options with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } fixturePath (Path.Combine(root,"bundle")) |> ignore)
-            StringAssert.Contains(error.Message,"different merged JDF")
         finally
             if Directory.Exists(root) then Directory.Delete(root,true)
 
@@ -1275,7 +1161,7 @@ type JdfBundleTests() =
             let path=Path.Combine(root,"policy.json")
             let baseline=JdfPostInferencePolicy.conservativeRoutedV4
             JdfPostInferencePolicy.writePolicy path baseline
-            assertEqual baseline (JdfPostInferencePolicy.loadPolicy path)
+            assertEqual baseline ((JdfPostInferencePolicy.loadPolicyWithScorer path).policy)
             use document=JsonDocument.Parse(File.ReadAllText(path))
             Assert.IsTrue(document.RootElement.TryGetProperty("same_stop_pairs") |> fst)
             Assert.IsFalse(document.RootElement.TryGetProperty("sameStopPairs") |> fst)
@@ -1602,7 +1488,7 @@ type JdfBundleTests() =
             Directory.Delete(root,true)
 
     [<TestMethod>]
-    member _.``Complete inference result adapts without re-evaluating and owns cleanup``() =
+    member _.``Complete inference result adapts without re-evaluating and releases its spills``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-result-adapter-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
         try
@@ -1650,22 +1536,16 @@ type JdfBundleTests() =
                 [||],assignmentStore,
                 [|authoredPosition|],
                 diagnosticStore,
-                { evidenceRows=1L;contextCount=2;candidateStopCount=1
+                { contextCount=2;candidateStopCount=1
                   unresolvedContexts=0;authoredPositions=1;sameStopBlocks=0
-                  distinctPairChoices=0;unresolvedBlockEdges=0
-                  physicalResolutions=1;sideResolutions=0;centroidResolutions=0 })
+                  distinctPairChoices=0;unresolvedBlockEdges=0 })
+            Assert.IsTrue(assignmentStore.CurrentSpillBytes>0L)
+            Assert.IsTrue(diagnosticStore.CurrentSpillBytes>0L)
             let plan=JdfPostPlan.postEstimationPlanFromInferenceResult result
             assertEqual 1 plan.calls.Count
             assertEqual 1 plan.authored.Count
             assertEqual "id:7" (plan.authored |> Seq.exactlyOne |> _.Key |> snd)
             assertEqual [|"o1";"o2"|] plan.physicalHypotheses.[0].memberObservationIds
-            let score=plan.scoreRows() |> Seq.exactlyOne
-            assertEqual (Some "corridor") score.corridorId
-            assertEqual (Some 11) score.snapEdgeId
-            assertEqual 0.04 score.popularityPrior
-            Assert.IsTrue(assignmentStore.CurrentSpillBytes>0L)
-            Assert.IsTrue(diagnosticStore.CurrentSpillBytes>0L)
-            plan.cleanupScoreRows()
             assertEqual 0L assignmentStore.CurrentSpillBytes
             assertEqual 0L diagnosticStore.CurrentSpillBytes
             assertEqual 0 (Directory.GetFiles(root).Length)

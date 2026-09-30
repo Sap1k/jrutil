@@ -41,10 +41,8 @@ let jdfToBundle (ctx: CommandContext) =
             |> Option.defaultValue JdfGtfsRules.emptyTransportModeRules
         estimatedPosts = (estimatedPostActivation args).runRoutedInference
         routingPbfPath = optArgValue args "--routing-osm-pbf"
-        diagnosticPostLabels = argFlagSet args "--diagnostic-post-labels"
         maximumWorkers = min 8 bundlePlan.resolvedWorkers
         memoryBudgetBytes = bundlePlan.memoryBudgetBytes
-        reviewStopsPath = optArgValue args "--post-review-stops"
         capturePostInferenceEvidencePath = optArgValue args "--capture-post-inference-evidence"
         postInferenceEvidenceOnly = argFlagSet args "--post-inference-evidence-only"
         captureRestriction =
@@ -56,9 +54,7 @@ let jdfToBundle (ctx: CommandContext) =
                 |> Option.map JdfPostEvidence.parseCaptureExcludedSources
                 |> Option.defaultValue [||] }
         exportPostContextCallsPath = optArgValue args "--export-post-context-calls"
-        postInferenceEvidencePath = optArgValue args "--post-inference-evidence"
         postInferencePolicyPath = optArgValue args "--post-inference-policy"
-        includePostInferenceScores = not(argFlagSet args "--no-post-inference-scores")
         diagnosticsOutput = optArgValue args "--diagnostics-out"
         diagnosticTraces = argFlagSet args "--diagnostic-traces"
         progress = bundleProgress

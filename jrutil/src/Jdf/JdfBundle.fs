@@ -27,7 +27,6 @@ open JrUtil.JdfBundleInput
 open JrUtil.JdfBundleTables
 open JrUtil.JdfBundleEvidence
 open JrUtil.JdfBundleManifest
-open JrUtil.JdfBundleReview
 
 let private logPhaseResources phase (timer: Stopwatch) =
     use currentProcess = Process.GetCurrentProcess()
@@ -55,45 +54,6 @@ let private reportProgress (options: BundleOptions) (timer: Stopwatch)
         privateBytes = currentProcess.PrivateMemorySize64
         workingSetBytes = currentProcess.WorkingSet64
     }
-
-let private applyDiagnosticPostLabels (batch: JdfModel.JdfBatch)
-                                      (plan: JdfPostPlan.PostEstimationPlan)
-                                      (feed: GtfsModel.GtfsFeed) =
-    let candidateRanks =
-        plan.physicalHypotheses
-        |> Array.groupBy (fun value -> value.stopId)
-        |> Array.collect (fun (stopId, values) ->
-            values
-            |> Array.sortBy (fun value -> value.hypothesisId)
-            |> Array.mapi (fun index value -> (stopId, value.hypothesisId), index + 1))
-        |> Map
-    let labels =
-        plan.locations
-        |> Array.choose (fun selection ->
-            let label =
-                match selection.sideGroupId with
-                | Some groupId ->
-                    plan.sideGroups
-                    |> Array.tryFind (fun value -> value.sideGroupId = groupId)
-                    |> Option.map (fun value -> $"O-{value.sector}")
-                | None ->
-                    selection.representativeCandidateId
-                    |> Option.bind (fun candidateId -> candidateRanks |> Map.tryFind (selection.stopId, candidateId))
-                    |> Option.map (fun rank -> $"O{rank}")
-            label
-            |> Option.map (fun value ->
-                JdfToGtfs.inferredPostId plan selection, value))
-        |> Map
-    { feed with
-        stops =
-            feed.stops
-            |> Array.map (fun stop ->
-                if stop.platformCode.IsSome then stop else
-                match labels |> Map.tryFind stop.id with
-                | Some label -> { stop with platformCode = Some label }
-                | None when stop.id.EndsWith(":unspecified", StringComparison.Ordinal) ->
-                    { stop with platformCode = Some "?" }
-                | None -> stop) }
 
 let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion
                                                    (internationalPolicy:JdfGtfsRules.InternationalRoutePolicy)
@@ -235,7 +195,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
     let transportModeRules = executionOptions.transportModeRules
     let estimatedPosts = executionOptions.estimatedPosts
     let routingPbfPath = executionOptions.routingPbfPath
-    let diagnosticPostLabels = executionOptions.diagnosticPostLabels
     if String.IsNullOrWhiteSpace(converterVersion) then invalidArg "converterVersion" "Converter version is required"
     let rawProgress=executionOptions.progress
     let progressGate=Dictionary<string,int64>(StringComparer.Ordinal)
@@ -261,10 +220,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
     Log.Information("Bundle phase: loading and validating snapshot descriptor")
     let descriptor = loadSnapshotDescriptor snapshotDescriptorPath
     validateSnapshot descriptor inputPath
-    if executionOptions.capturePostInferenceEvidencePath.IsSome
-       && executionOptions.postInferenceEvidencePath.IsSome then
-        invalidArg "executionOptions"
-            "--capture-post-inference-evidence and --post-inference-evidence are mutually exclusive"
     if executionOptions.postInferenceEvidenceOnly then
         invalidArg "executionOptions" "Capture-only execution must use the dedicated capture dispatcher"
     if executionOptions.capturePostInferenceEvidencePath.IsSome
@@ -274,32 +229,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
     if executionOptions.capturePostInferenceEvidencePath.IsSome
        && (not estimatedPosts || routingPbfPath.IsNone) then
         invalidArg "executionOptions" "Post-inference evidence capture requires routed estimation and --routing-osm-pbf"
-    if executionOptions.postInferenceEvidencePath.IsSome && not estimatedPosts then
-        invalidArg "executionOptions" "--post-inference-evidence requires estimated-post inference"
-    if executionOptions.postInferenceEvidencePath.IsSome && routingPbfPath.IsSome then
-        invalidArg "executionOptions"
-            "--post-inference-evidence reuses captured routes and cannot be combined with --routing-osm-pbf"
-    if not executionOptions.includePostInferenceScores && executionOptions.reviewStopsPath.IsSome then
-        invalidArg "executionOptions"
-            "--no-post-inference-scores cannot be combined with --post-review-stops"
-    let replayEvidence =
-        executionOptions.postInferenceEvidencePath
-        |> Option.map(fun path ->
-            let full=Path.GetFullPath(path)
-            let store=JdfPostEvidenceStore.openValidatedStore
-                          { JdfPostEvidenceStore.noIdentityExpectation with
-                              mergedJdfSha256=Some descriptor.payloadSha256 }
-                          full
-            let manifest=store.Manifest
-            if JdfPostEvidence.isRestrictedCaptureToolVersion manifest.captureToolVersion then
-                (store :> IDisposable).Dispose()
-                invalidArg "postInferenceEvidencePath"
-                    "Restricted post-inference evidence (region or excluded sources) is for replay review and training only; capture a complete pack for bundle conversion"
-            let policy,scorer = policyAndScorer executionOptions.postInferencePolicyPath
-            let policy =
-                policy
-                |> JdfPostInferencePolicy.validatePolicyForEvidence manifest.captureCeilings.routedExcessMetres manifest.captureCeilings.maximumCorridorVariants
-            store,manifest,(policy,scorer))
     let livePolicy =
         let policy,scorer = policyAndScorer executionOptions.postInferencePolicyPath
         Some(JdfPostInferencePolicy.validatePolicy JdfPostInference.CaptureRoutedExcessHorizonMetres policy,scorer)
@@ -334,8 +263,8 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
     // different resources. Starting the graph build here hides most of the
     // parse/calendar/filter latency without changing either result.
     let routingGraphTask =
-        match estimatedPosts, routingPbfPath,replayEvidence with
-        | true, Some path,None ->
+        match estimatedPosts, routingPbfPath with
+        | true, Some path ->
             validateRoutingPbfManifest path
             Task.Run(fun () ->
                 let graph =
@@ -420,26 +349,15 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             started "prepare-inference" None "contexts"
             Log.Information("Bundle phase: preparing streaming JDF to GTFS conversion")
             let preparation =
-                match replayEvidence,routingGraph with
-                | Some(evidenceStore,manifest,(policy,scorer)),_ ->
-                    started "replay-post-inference" (Some manifest.routePointEvidenceCount) "rows"
-                    let postPlan =
-                        JdfPostInferenceEvaluator.evaluateWithScorer
-                            executionOptions.includePostInferenceScores evidenceStore policy scorer
-                        |> JdfPostPlan.postEstimationPlanFromInferenceResult
-                    progressCompleted "replay-post-inference" manifest.routePointEvidenceCount
-                                      (Some manifest.routePointEvidenceCount) "rows"
-                    JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan
-                        retainedCalendar.Value postPlan batch
-                | None,Some graph ->
+                match routingGraph with
+                | Some graph ->
                     let progress phase count total detail =
                         reportProgress executionOptions phaseTimer phase "running"
                                        count total "items" detail executionOptions.maximumWorkers
-                    // Graph-backed and replay-backed conversion deliberately
-                    // meet at the same persisted evidence contract. The
-                    // routing pass emits raw route-point facts only; every
-                    // consolidation and publication decision is made by the
-                    // evaluator below.
+                    // The routing pass emits raw route-point facts into a
+                    // temporary evidence pack, the same contract capture
+                    // writes; every consolidation and publication decision is
+                    // made by the evaluator below.
                     use evidenceStore =
                         JdfPostEvidence.captureToStore
                             { maximumWorkers=executionOptions.maximumWorkers
@@ -471,14 +389,13 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     started "evaluate-post-inference" (Some manifest.routePointEvidenceCount) "rows"
                     let postPlan =
                         let policy,scorer = livePolicy.Value
-                        JdfPostInferenceEvaluator.evaluateWithScorer
-                            executionOptions.includePostInferenceScores evidenceStore policy scorer
+                        JdfPostInferenceEvaluator.evaluateWithScorer false evidenceStore policy scorer
                         |> JdfPostPlan.postEstimationPlanFromInferenceResult
                     progressCompleted "evaluate-post-inference" manifest.routePointEvidenceCount
                                       (Some manifest.routePointEvidenceCount) "rows"
                     JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan
                         retainedCalendar.Value postPlan batch
-                | None,None ->
+                | None ->
                     JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar
                         retainedCalendar.Value batch
             routingGraph |> Option.iter (fun graph ->
@@ -488,18 +405,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     graph.Searches, graph.CacheEntries, graph.CacheHits, graph.CacheMisses,
                     graph.RestrictionLookups, graph.RestrictionRulesExamined))
             logPhaseResources "prepare-inference" phaseTimer
-            progressCompleted "prepare-inference" preparation.postPlan.scoreCount None "scores"
-            match executionOptions.reviewStopsPath with
-            | Some reviewStopsPath when estimatedPosts ->
-                if not (File.Exists(reviewStopsPath)) then
-                    invalidArg "reviewStopsPath" $"Post review stop file does not exist: {reviewStopsPath}"
-                started "write-post-review" (Some 1L) "files"
-                Directory.CreateDirectory(diagnosticScratch) |> ignore
-                writePostReviewGeoJson (Path.Combine(diagnosticScratch, "post-review.geojson"))
-                                       reviewStopsPath batch preparation.postPlan
-                progressCompleted "write-post-review" 1L (Some 1L) "files"
-            | Some _ -> Log.Warning("Ignoring --post-review-stops because estimated posts are disabled")
-            | None -> ()
+            progressCompleted "prepare-inference" (int64 preparation.postPlan.calls.Count) None "contexts"
             // Routing is conversion-local and no later bundle phase consults
             // the graph. Release mappings and temporary files before the
             // 17-million-row output stream begins.
@@ -584,10 +490,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             let feed =
                 JdfToGtfs.finishStreamingFeedWithUniqueCalendars preparation (referencedStopIds |> Set.ofSeq)
                 |> Gtfs.fillStandardRequiredFields
-                |> fun value ->
-                    if diagnosticPostLabels then
-                        applyDiagnosticPostLabels batch preparation.postPlan value
-                    else value
             logPhaseResources "prepare-remaining-gtfs" phaseTimer
             progressCompleted "prepare-remaining-gtfs" 1L (Some 1L) "feeds"
             validateStopCoordinates feed
@@ -626,7 +528,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             let tablePath (name: string) =
                 if name.StartsWith("source_", StringComparison.Ordinal) then Path.Combine(temp, name)
                 else Path.Combine(diagnosticScratch, name)
-            let totalParquetTables = tables.Length + (if writeDiagnosticTables then 2 else 0)
+            let totalParquetTables = tables.Length + (if writeDiagnosticTables then 1 else 0)
             for index, (name, produceTable) in tables |> Array.indexed do
                 reportProgress executionOptions phaseTimer "write-parquet" "running"
                                (int64 index) (Some (int64 totalParquetTables)) "tables" (Some name) 1
@@ -637,30 +539,17 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                 writeParquet descriptor (tablePath name) parquetTable
                 reportProgress executionOptions phaseTimer "write-parquet" "running"
                                (int64 (index+1)) (Some (int64 totalParquetTables)) "tables" (Some name) 1
-            try
-                if writeDiagnosticTables then
-                    let assignmentTableName="derived_post_assignments.parquet"
-                    Log.Information(
-                        "Bundle phase: streaming Parquet table {Table} ({Rows} rows)",
-                        assignmentTableName,assignmentCount)
-                    writeDerivedPostAssignmentsParquet descriptor (Path.Combine(diagnosticScratch,assignmentTableName))
-                        assignmentCount assignmentRows
-                        (fun count total ->
-                            reportProgress executionOptions phaseTimer "stream-derived-post-assignments" "running"
-                                           count total "rows" None 1)
-                    |> ignore
-                    let scoreTableName="derived_post_scores.parquet"
-                    Log.Information(
-                        "Bundle phase: streaming Parquet table {Table} ({Rows} rows)",
-                        scoreTableName,preparation.postPlan.scoreCount)
-                    writeDerivedPostScoresParquet descriptor (Path.Combine(diagnosticScratch,scoreTableName))
-                        preparation.postPlan
-                        (fun count total ->
-                            reportProgress executionOptions phaseTimer "stream-derived-post-scores" "running"
-                                           count total "rows" None 1)
-                    |> ignore
-            finally
-                preparation.postPlan.cleanupScoreRows()
+            if writeDiagnosticTables then
+                let assignmentTableName="derived_post_assignments.parquet"
+                Log.Information(
+                    "Bundle phase: streaming Parquet table {Table} ({Rows} rows)",
+                    assignmentTableName,assignmentCount)
+                writeDerivedPostAssignmentsParquet descriptor (Path.Combine(diagnosticScratch,assignmentTableName))
+                    assignmentCount assignmentRows
+                    (fun count total ->
+                        reportProgress executionOptions phaseTimer "stream-derived-post-assignments" "running"
+                                       count total "rows" None 1)
+                |> ignore
             logPhaseResources "stream-parquet" phaseTimer
             progressCompleted "write-relations" (int64 totalParquetTables)
                               (Some (int64 totalParquetTables)) "tables"
@@ -706,9 +595,9 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     writeManifest stream descriptor converterVersion
                                   internationalPolicy filterResult.decisions transportModeRules
                                   transportModeDecisions preparation.postPlan routingPbfPath
-                                  (executionOptions.postInferenceEvidencePath |> Option.orElse liveEvidenceTemporaryDirectory)
+                                  liveEvidenceTemporaryDirectory
                                   executionOptions.postInferencePolicyPath
-                                  diagnosticPostLabels batch feed)
+                                  batch feed)
                 |> fun text -> recordManifestGvd text executionOptions.gvdYear
             let memoryTables entries =
                 entries
@@ -755,8 +644,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
         Directory.Move(productionTemp, outputFull)
         completed <- true
     finally
-        replayEvidence
-        |> Option.iter(fun (store,_,_) -> (store :> IDisposable).Dispose())
         routingGraph |> Option.iter (fun graph -> (graph :> IDisposable).Dispose())
         // If an earlier conversion phase failed while the concurrent graph
         // builder was still running, join it and release its temporary maps.
@@ -782,12 +669,10 @@ let execute (options: BundleOptions) inputPath outputPath =
     if options.memoryBudgetBytes <= 0L then
         invalidArg "options" "Bundle memory budget must be positive"
     let executionMode =
-        match options.postInferenceEvidenceOnly,
-              options.postInferenceEvidencePath,options.routingPbfPath,options.estimatedPosts with
-        | true,None,Some _,true -> CaptureOnly
-        | false,Some _,None,true -> Replay
-        | false,None,Some _,true -> Live
-        | false,None,None,_ -> Disabled
+        match options.postInferenceEvidenceOnly,options.routingPbfPath,options.estimatedPosts with
+        | true,Some _,true -> CaptureOnly
+        | false,Some _,true -> Live
+        | false,None,_ -> Disabled
         | _ -> invalidArg "options" "Invalid post-inference execution-mode combination"
     match executionMode with
     | CaptureOnly ->

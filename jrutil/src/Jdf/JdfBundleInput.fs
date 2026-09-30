@@ -1,6 +1,6 @@
 // This file is part of JrUtil and is licenced under the GNU AGPLv3 or later
 
-/// Snapshot descriptors and JDF input (directory or ZIP) validation.
+/// Snapshot descriptors, JDF input (directory or ZIP) and routing PBF validation.
 module JrUtil.JdfBundleInput
 
 open System
@@ -156,3 +156,27 @@ let internal withJdfInput inputPath action =
         use archive = ZipFile.OpenRead(inputPath)
         validateZip archive
         action (Jdf.ZipArchive archive)
+
+[<Literal>]
+let routingEnvelopePolicy = "jdf-routing-envelope-v2"
+
+let validateRoutingPbfManifest path =
+    let manifestPath = path + ".manifest.json"
+    if not (File.Exists(manifestPath)) then
+        invalidArg "routingPbfPath" $"Routing PBF manifest is missing: {manifestPath}"
+    use manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath))
+    let mutable schema = Unchecked.defaultof<JsonElement>
+    if not (manifest.RootElement.TryGetProperty("filter_schema", &schema))
+       || schema.GetString() <> routingEnvelopePolicy then
+        invalidArg "routingPbfPath" "Routing PBF was not created by the supported Osmium demand-envelope policy"
+    let mutable sourceKey = Unchecked.defaultof<JsonElement>
+    if not (manifest.RootElement.TryGetProperty("source_key", &sourceKey))
+       || sourceKey.ValueKind <> JsonValueKind.String
+       || String.IsNullOrWhiteSpace(sourceKey.GetString()) then
+        invalidArg "routingPbfPath" "Routing PBF manifest has no declared OSM source key"
+    let mutable output = Unchecked.defaultof<JsonElement>
+    let mutable bytes = Unchecked.defaultof<JsonElement>
+    if not (manifest.RootElement.TryGetProperty("output", &output))
+       || not (output.TryGetProperty("bytes", &bytes))
+       || bytes.GetInt64() <> FileInfo(path).Length then
+        invalidArg "routingPbfPath" "Routing PBF size does not match its Osmium manifest"

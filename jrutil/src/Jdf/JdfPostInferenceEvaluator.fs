@@ -38,7 +38,7 @@ let evaluateWithScorer includeDiagnostics
             manifest.captureCeilings.routedExcessMetres
             manifest.captureCeilings.maximumCorridorVariants policy
     let evidencePath=store.Directory
-    let routePointsByStop=readReplayRoutePoints evidencePath None
+    let routePointsByStop=readReplayRoutePoints evidencePath
     // The learned scorer replaces the heuristic's decision for unlabelled contexts;
     // authored posts, same-stop pairs and counters stay on the heuristic path.
     let learned =
@@ -50,7 +50,6 @@ let evaluateWithScorer includeDiagnostics
     let hypotheses=ResizeArray<JdfPostInference.ConsolidatedPostHypothesis>()
     let mutable policyCounters = {
         sameStopBlocks=0;distinctPairChoices=0;unresolvedBlockEdges=0 }
-    let mutable evidenceRows=0L
     // The assignment store drives the one and only joined evidence traversal
     // in publication mode.  Per-stop evaluation completes before the next
     // stop is read, so consolidation, decisions, hypotheses, side groups and
@@ -161,13 +160,12 @@ let evaluateWithScorer includeDiagnostics
                         stopRows.Clear()
                         contextRows.Clear()
                     }
-                for row in replayScoreRows includeDiagnostics evidencePath None do
+                for row in replayScoreRows includeDiagnostics evidencePath do
                     match currentStop with
                     | Some stopId when stopId<>row.stopId -> yield! flush()
                     | _ -> ()
                     currentStop<-Some row.stopId
                     stopRows.Add(row)
-                    evidenceRows<-evidenceRows+1L
                     if previousContext<>Some row.contextId then
                         previousContext<-Some row.contextId
                         contextRows.Add(row)
@@ -309,7 +307,7 @@ let evaluateWithScorer includeDiagnostics
                         yield diagnostic
                     stopRows.Clear()
             }
-            for row in replayScoreRows true evidencePath None do
+            for row in replayScoreRows true evidencePath do
                 match currentStop with
                 | Some stopId when stopId<>row.stopId ->
                     yield! emit()
@@ -324,25 +322,14 @@ let evaluateWithScorer includeDiagnostics
                 if includeDiagnostics then diagnosticRows else Seq.empty)
         let unresolved=assignments.ReadRows() |> Seq.filter(fun value -> value.assignmentKind="unlabelled" && value.selectedLocationId.IsNone) |> Seq.length
         let counters:JdfPostInference.PostInferenceCounters = {
-            evidenceRows=evidenceRows
             contextCount=int assignments.Count;candidateStopCount=routePointsByStop.Count
             unresolvedContexts=unresolved;authoredPositions=authoredPositions.Length
             sameStopBlocks=policyCounters.sameStopBlocks
             distinctPairChoices=policyCounters.distinctPairChoices
-            unresolvedBlockEdges=policyCounters.unresolvedBlockEdges
-            physicalResolutions=decisions |> Array.filter(fun value -> value.resolution="Physical") |> Array.length
-            sideResolutions=decisions |> Array.filter(fun value -> value.resolution="Side") |> Array.length
-            centroidResolutions=decisions |> Array.filter(fun value -> value.resolution="Centroid") |> Array.length }
+            unresolvedBlockEdges=policyCounters.unresolvedBlockEdges }
         new JdfPostInference.PostInferenceResult(
             hypotheses,sideGroups,assignments,authoredPositions,diagnostics,counters)
     with _ ->
         assignments.Dispose()
         reraise()
 
-/// The tuned heuristic scorer (policy v2 behaviour).
-let evaluateWithDiagnostics includeDiagnostics store policy =
-    evaluateWithScorer includeDiagnostics store policy JdfPostInferencePolicy.HeuristicScorer
-
-let evaluate (store:JdfPostEvidenceStore.PostEvidenceStore)
-             (policy:JdfPostInferencePolicy.PostInferencePolicyV2) =
-    evaluateWithDiagnostics true store policy

@@ -121,7 +121,6 @@
     <Compile Include="src/Jdf/JdfBundleTables.fs" />
     <Compile Include="src/Jdf/JdfBundleEvidence.fs" />
     <Compile Include="src/Jdf/JdfBundleManifest.fs" />
-    <Compile Include="src/Jdf/JdfBundleReview.fs" />
     <Compile Include="src/Jdf/JdfBundle.fs" />
     <Compile Include="src/GeoData/ExternalCsv.fs" />
     <Compile Include="src/Jdf/JdfFix.fs" />

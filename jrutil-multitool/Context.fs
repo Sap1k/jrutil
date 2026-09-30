@@ -58,8 +58,7 @@ let internationalRoutePolicy args =
 let estimatedPostActivation args =
     Execution.estimatedPostActivation
         (argFlagSet args "--no-estimated-posts")
-        ((optArgValue args "--routing-osm-pbf").IsSome
-         || (optArgValue args "--post-inference-evidence").IsSome)
+        (optArgValue args "--routing-osm-pbf").IsSome
 
 let existingFile args name description =
     let path = optArgValue args name

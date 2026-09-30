@@ -203,7 +203,7 @@ type JdfToGtfsTests() =
             let path=Path.Combine(root,"policy.json")
             let expected={ JdfPostInferencePolicy.conservativeRoutedV4 with policyId="test-policy" }
             JdfPostInferencePolicy.writePolicy path expected
-            assertEqual expected (JdfPostInferencePolicy.loadPolicy path)
+            assertEqual expected ((JdfPostInferencePolicy.loadPolicyWithScorer path).policy)
             let invalid={ expected with hardGates={ expected.hardGates with maximumRoutedExcessMetres=1001.0 } }
             Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfPostInferencePolicy.validatePolicy 1000.0 invalid |> ignore)
