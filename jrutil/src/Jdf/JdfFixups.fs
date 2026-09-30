@@ -13,7 +13,6 @@ open System.Globalization
 open System.Security.Cryptography
 open System.Text
 open System.Text.RegularExpressions
-open System.Threading
 open NetTopologySuite.Geometries
 open Serilog
 open Serilog.Events
@@ -52,24 +51,40 @@ type JdfStopToMatch = StopToMatch<JdfStopGeodata>
 /// matching
 let maxRadiusMetres = 1000.0
 
-let mutable private strictRegionMatchCount = 0L
-let mutable private borderRegionMatchCount = 0L
-let mutable private countryRejectCount = 0L
-let mutable private nonAdjacentRegionRejectCount = 0L
-let mutable private outsideBorderToleranceRejectCount = 0L
+/// Geography counters of the stop matching of one batch. A batch is matched
+/// on one thread; fix-jdf sums the batches' counters and logs them once.
+type MatchDiagnostics = {
+    mutable strictRegionMatches: int64
+    mutable borderRegionMatches: int64
+    mutable countryRejects: int64
+    mutable nonAdjacentRegionRejects: int64
+    mutable outsideBorderToleranceRejects: int64
+}
 
-let resetMatchDiagnostics () =
-    Interlocked.Exchange(&strictRegionMatchCount, 0L) |> ignore
-    Interlocked.Exchange(&borderRegionMatchCount, 0L) |> ignore
-    Interlocked.Exchange(&countryRejectCount, 0L) |> ignore
-    Interlocked.Exchange(&nonAdjacentRegionRejectCount, 0L) |> ignore
-    Interlocked.Exchange(&outsideBorderToleranceRejectCount, 0L) |> ignore
+module MatchDiagnostics =
+    let create () = {
+        strictRegionMatches = 0L
+        borderRegionMatches = 0L
+        countryRejects = 0L
+        nonAdjacentRegionRejects = 0L
+        outsideBorderToleranceRejects = 0L
+    }
 
-let logMatchDiagnostics () =
-    Log.Information(
-        "Stop matcher geography summary: strict region matches {StrictRegionMatches}, border-tolerant matches {BorderRegionMatches}, country rejects {CountryRejects}, non-adjacent region rejects {NonAdjacentRegionRejects}, outside-border-tolerance rejects {OutsideBorderToleranceRejects}",
-        strictRegionMatchCount, borderRegionMatchCount, countryRejectCount,
-        nonAdjacentRegionRejectCount, outsideBorderToleranceRejectCount)
+    let add (total: MatchDiagnostics) (batch: MatchDiagnostics) =
+        total.strictRegionMatches <- total.strictRegionMatches + batch.strictRegionMatches
+        total.borderRegionMatches <- total.borderRegionMatches + batch.borderRegionMatches
+        total.countryRejects <- total.countryRejects + batch.countryRejects
+        total.nonAdjacentRegionRejects <-
+            total.nonAdjacentRegionRejects + batch.nonAdjacentRegionRejects
+        total.outsideBorderToleranceRejects <-
+            total.outsideBorderToleranceRejects + batch.outsideBorderToleranceRejects
+
+    let log (diagnostics: MatchDiagnostics) =
+        Log.Information(
+            "Stop matcher geography summary: strict region matches {StrictRegionMatches}, border-tolerant matches {BorderRegionMatches}, country rejects {CountryRejects}, non-adjacent region rejects {NonAdjacentRegionRejects}, outside-border-tolerance rejects {OutsideBorderToleranceRejects}",
+            diagnostics.strictRegionMatches, diagnostics.borderRegionMatches,
+            diagnostics.countryRejects, diagnostics.nonAdjacentRegionRejects,
+            diagnostics.outsideBorderToleranceRejects)
 
 let private czechRegionAdjacency =
     Utils.memoizeVoidFunc <| fun () ->
@@ -105,23 +120,24 @@ let private withinExpectedRegionBorder expected (point: Point) =
             | Some polygon -> polygon.Boundary.Distance(point) <= maxRadiusMetres
             | None -> false)
 
-let private regionMatches expectedRegion (candidate: JdfStopGeodata) =
+let private regionMatches (diagnostics: MatchDiagnostics) expectedRegion (candidate: JdfStopGeodata) =
     let expectedRegion = expectedRegion |> Option.map canonicalRegionCode
     let candidateRegion = candidate.regionId |> Option.map canonicalRegionCode
     match expectedRegion, candidateRegion with
     | None, _ -> true
     | Some expected, Some actual when expected = actual ->
-        Interlocked.Increment(&strictRegionMatchCount) |> ignore
+        diagnostics.strictRegionMatches <- diagnostics.strictRegionMatches + 1L
         true
     | Some expected, Some actual when regionsAdjacent expected actual ->
         if withinExpectedRegionBorder expected candidate.point then
-            Interlocked.Increment(&borderRegionMatchCount) |> ignore
+            diagnostics.borderRegionMatches <- diagnostics.borderRegionMatches + 1L
             true
         else
-            Interlocked.Increment(&outsideBorderToleranceRejectCount) |> ignore
+            diagnostics.outsideBorderToleranceRejects <-
+                diagnostics.outsideBorderToleranceRejects + 1L
             false
     | Some _, _ ->
-        Interlocked.Increment(&nonAdjacentRegionRejectCount) |> ignore
+        diagnostics.nonAdjacentRegionRejects <- diagnostics.nonAdjacentRegionRejects + 1L
         false
 
 /// Some JDF batches in CIS JŘ public exports have the nearby town two-letter id
@@ -183,7 +199,7 @@ let matchStopByName (matcher: StopMatcher<JdfStopGeodata>)
                     (stop: Stop) =
     matcher.matchStop(jdfStopNameString stop)
 
-let exactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
+let exactMatches diagnostics (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
     let countryMatches =
         matches
         |> Array.filter (fun m ->
@@ -195,7 +211,7 @@ let exactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
             | Some country -> Some country = m.stop.data.country
             | None -> true
         if not countryMatches then
-            Interlocked.Increment(&countryRejectCount) |> ignore
+            diagnostics.countryRejects <- diagnostics.countryRejects + 1L
             false
         else true)
 
@@ -211,14 +227,15 @@ let exactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
                 |> Option.map canonicalRegionCode
                 |> Option.contains expectedRegion)
         if strictMatches.Length > 0 then
-            Interlocked.Add(&strictRegionMatchCount, int64 strictMatches.Length) |> ignore
+            diagnostics.strictRegionMatches <-
+                diagnostics.strictRegionMatches + int64 strictMatches.Length
             strictMatches
         else
             // Only broaden to an adjacent-boundary candidate when no strict
             // okres candidate exists. Mixing both sets makes a known strict
             // match appear geographically ambiguous.
             countryMatches
-            |> Array.filter (fun m -> regionMatches stop.regionId m.stop.data)
+            |> Array.filter (fun m -> regionMatches diagnostics stop.regionId m.stop.data)
 
 let addRegionFromMatch (stop: Stop) match_ =
     match stop.regionId, match_ with
@@ -277,9 +294,9 @@ let private validCandidateGroup (stop: Stop) candidates =
                       stop.id, radius)
             None
 
-let selectedExactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
+let selectedExactMatches diagnostics (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
     let preciseMatches =
-        exactMatches stop matches
+        exactMatches diagnostics stop matches
     let checkedMatches =
         preciseMatches
         |> Array.filter (fun m ->
@@ -295,8 +312,8 @@ let selectedExactMatches (stop: Stop) (matches: StopMatch<JdfStopGeodata> array)
         |> Array.filter (fun match_ -> not (checkedMatches |> Array.contains match_))
         |> validCandidateGroup stop)
 
-let topStopMatch (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
-    selectedExactMatches stop matches
+let topStopMatch diagnostics (stop: Stop) (matches: StopMatch<JdfStopGeodata> array) =
+    selectedExactMatches diagnostics stop matches
     |> Option.map (fun candidates ->
         let points = candidates |> Array.map (fun m -> m.stop.data.point)
         {
@@ -338,8 +355,8 @@ let private candidateId (point: Point) (observations: CandidateObservation array
     |> Convert.ToHexString
     |> fun value -> value.ToLowerInvariant()
 
-let private candidateMatches (stop: Stop) matches =
-    selectedExactMatches stop matches
+let private candidateMatches diagnostics (stop: Stop) matches =
+    selectedExactMatches diagnostics stop matches
     |> Option.map (fun selected ->
         let selectedPoints = selected |> Array.map (fun value -> value.stop.data.point)
         let centre =
@@ -349,7 +366,7 @@ let private candidateMatches (stop: Stop) matches =
             selected
             |> Array.choose (fun value -> value.stop.data.country)
             |> Set
-        exactMatches stop matches
+        exactMatches diagnostics stop matches
         |> Array.filter (fun value ->
             value.stop.data.point.Distance(centre) <= maxRadiusMetres
             && (countries.IsEmpty
@@ -589,6 +606,7 @@ let groupedTripsMatrices (routeStops: RouteStop array)
 /// Will add matches and regions disambiguated by previous matches' positions
 /// and km data from tripStops
 let addSecondaryMatches
+        diagnostics
         tolerance
         (tripsMatrix: TripStop option array array)
         // Array of tuples of:
@@ -627,7 +645,7 @@ let addSecondaryMatches
                             m.stop.data.point.Distance(lp) / 1000.0
                              < float kmDiff + tolerance)
                         |> Seq.toArray
-                        |> topStopMatch s
+                        |> topStopMatch diagnostics s
                     | _ -> mo)
                 |> Seq.filter ((<>) mo)
             match Seq.tryHead suggested with
@@ -673,6 +691,7 @@ let mhdTownsJoined = [
 /// This funtion looks at MHD-named stops and find the town that matches the
 /// most stops
 let mhdNamingTownCandidates
+        diagnostics
         (stopMatcher: StopMatcher<_>)
         (stopsWithMatches: (Stop * StopMatch<JdfStopGeodata> array) array) =
     stopsWithMatches
@@ -681,7 +700,7 @@ let mhdNamingTownCandidates
         && s.nearbyPlace.IsNone)
     |> Seq.collect (fun (s, ms) ->
         // Don't suggest any city if we already have a match with a town
-        if (ms |> exactMatches s |> Seq.isEmpty |> not)
+        if (ms |> exactMatches diagnostics s |> Seq.isEmpty |> not)
            &&
            (matchesCzTownByName (s.town.Split(",").[0].Trim()))
         then
@@ -722,7 +741,7 @@ let mhdNamingTownCandidates
     |> Seq.sortByDescending (fun (t, c) -> c)
     |> Seq.toArray
 
-let fixMhdNaming (stopMatcher: StopMatcher<JdfStopGeodata>) towns (stop: Stop) =
+let fixMhdNaming diagnostics (stopMatcher: StopMatcher<JdfStopGeodata>) towns (stop: Stop) =
     if stop.district.IsSome || stop.nearbyPlace.IsSome then stop
     else
         let nameSplit = stop.town.Split(",")
@@ -746,7 +765,7 @@ let fixMhdNaming (stopMatcher: StopMatcher<JdfStopGeodata>) towns (stop: Stop) =
             mhdAdjustedStops
             |> List.filter (fun mas ->
                 matchStopByName stopMatcher mas
-                |> topStopMatch mas
+                |> topStopMatch diagnostics mas
                 |> Option.isSome)
             |> List.tryHead
         if matchedMhdStop.IsSome then matchedMhdStop.Value
@@ -761,13 +780,13 @@ let fixMhdNaming (stopMatcher: StopMatcher<JdfStopGeodata>) towns (stop: Stop) =
                               else None }
         else mhdAdjustedStops |> List.head
 
-let matchStops stopMatcher tripsMatrix1 tripsMatrix2 stops =
+let matchStops diagnostics stopMatcher tripsMatrix1 tripsMatrix2 stops =
     stops
     |> Array.map (fun s -> s, matchStopByName stopMatcher s)
     // Try to assign the stop-accurate matches to a stop, if they are
     // unambiguous.
     |> Array.map (fun (s, ms) ->
-        let tm = topStopMatch s ms
+        let tm = topStopMatch diagnostics s ms
         let townOnly = s.district.IsNone && s.nearbyPlace.IsNone
         if townOnly && tm |> Option.map matchConflictsWithEurCity = Some true
         then s, None, ms
@@ -778,8 +797,8 @@ let matchStops stopMatcher tripsMatrix1 tripsMatrix2 stops =
                       s.id)
             s, None, ms
         else s, tm, ms)
-    |> addSecondaryMatches 1.0 tripsMatrix1
-    |> addSecondaryMatches 1.0 tripsMatrix2
+    |> addSecondaryMatches diagnostics 1.0 tripsMatrix1
+    |> addSecondaryMatches diagnostics 1.0 tripsMatrix2
     // Town polygons may fill missing geography, but never coordinates.
     |> Array.map (fun (s, mo, ams) ->
         match mo with
@@ -829,6 +848,7 @@ let townNameFromRouteDesc (route: Route) =
 /// valid and usable JDF batch, with stop positions as a bonus.
 let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
                         (jdfBatch: JdfBatch) =
+    let diagnostics = MatchDiagnostics.create ()
     if jdfBatch.routes.Length <> 1 then
         Log.Error("Expected just one route in batch, got {RouteCount}",
                   jdfBatch.routes.Length)
@@ -840,14 +860,14 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
     let swamNonMhd =
         stops
         |> Array.map (normaliseStopName >> normaliseNonMhdStopName)
-        |> matchStops stopMatcher tripsMatrix1 tripsMatrix2
+        |> matchStops diagnostics stopMatcher tripsMatrix1 tripsMatrix2
     let routeTownName = townNameFromRouteDesc jdfBatch.routes.[0]
     let mhdTownCandidates =
         stops
         |> Seq.map normaliseStopName
         |> Seq.map (fun s -> s, matchStopByName stopMatcher s)
         |> Seq.toArray
-        |> mhdNamingTownCandidates stopMatcher
+        |> mhdNamingTownCandidates diagnostics stopMatcher
         |> Array.map (fun (t, s) ->
             // Boost town that matches name in routes file
             match routeTownName with
@@ -877,8 +897,8 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
                 Log.Debug("Expanded MHD town to list: {Towns}", mhdTowns)
             let swamMhd =
                 jdfBatch.stops
-                |> Array.map (fixMhdNaming stopMatcher mhdTowns)
-                |> matchStops stopMatcher tripsMatrix1 tripsMatrix2
+                |> Array.map (fixMhdNaming diagnostics stopMatcher mhdTowns)
+                |> matchStops diagnostics stopMatcher tripsMatrix1 tripsMatrix2
             let matchCount =
                 Array.map (fun (_, mo, _) -> if Option.isSome mo then 1 else 0)
                 >> Array.sum
@@ -911,7 +931,7 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
     let clusteredCandidates =
         stopsWithAllMatches
         |> Array.collect (fun (stop, _, matches) ->
-            candidateMatches stop matches
+            candidateMatches diagnostics stop matches
             |> function
                 | [||] -> None
                 | values -> Some values
@@ -921,7 +941,8 @@ let fixPublicCisJrBatch (stopMatcher: StopMatcher<JdfStopGeodata>)
     { jdfBatch with
         stops = augmentedStops |> Array.map fst
         postCandidateEvidence = postCandidateEvidence },
-    augmentedStops |> Array.map snd
+    augmentedStops |> Array.map snd,
+    diagnostics
 
 let private stopLocationFromMatch (stop: Stop) (match_: JdfStopToMatch) =
     let wgs84Pt =

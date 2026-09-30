@@ -259,79 +259,79 @@ type JdfMerger(
              |> Seq.max) + 1
         routesByLicNum.[copy.id].Add(
             {copy with idDistinction = newDist })
-        routeIntegrationsByRoute.[(copy.id, newDist)] <-
+        routeIntegrationsByRoute.Replace((copy.id, newDist),
             routeIntegrationsByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        routeStopsByRoute.[(copy.id, newDist)] <-
+            }))
+        routeStopsByRoute.Replace((copy.id, newDist),
             routeStopsByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        tripsByRoute.[(copy.id, newDist)] <-
+            }))
+        tripsByRoute.Replace((copy.id, newDist),
             tripsByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
+            }))
         match tripStopSpool with
         | Some spool -> spool.Copy((copy.id, oldDist), (copy.id, newDist))
         | None ->
-            tripStopsByRoute.[(copy.id, newDist)] <-
+            tripStopsByRoute.Replace((copy.id, newDist),
                 tripStopsByRoute.[(copy.id, oldDist)]
                 |> Seq.map (fun x -> {
                     x with
                         routeId = copy.id
                         routeDistinction = newDist
-                })
-        routeInfoByRoute.[(copy.id, newDist)] <-
+                }))
+        routeInfoByRoute.Replace((copy.id, newDist),
             routeInfoByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        serviceNotesByRoute.[(copy.id, newDist)] <-
+            }))
+        serviceNotesByRoute.Replace((copy.id, newDist),
             serviceNotesByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        transfersByRoute.[(copy.id, newDist)] <-
+            }))
+        transfersByRoute.Replace((copy.id, newDist),
             transfersByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        agencyAlternationsByRoute.[(copy.id, newDist)] <-
+            }))
+        agencyAlternationsByRoute.Replace((copy.id, newDist),
             agencyAlternationsByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        alternateRouteNamesByRoute.[(copy.id, newDist)] <-
+            }))
+        alternateRouteNamesByRoute.Replace((copy.id, newDist),
             alternateRouteNamesByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
-        reservationOptionsByRoute.[(copy.id, newDist)] <-
+            }))
+        reservationOptionsByRoute.Replace((copy.id, newDist),
             reservationOptionsByRoute.[(copy.id, oldDist)]
             |> Seq.map (fun x -> {
                 x with
                     routeId = copy.id
                     routeDistinction = newDist
-            })
+            }))
         batchDateByRoute.[(copy.id, newDist)] <-
             batchDateByRoute.[(copy.id, oldDist)]
         originalValidityByRoute.[(copy.id, newDist)] <-
@@ -733,7 +733,7 @@ type JdfMerger(
                 routeDistinction = ridd
             })
         |> Seq.groupBy (fun ri -> ri.routeId, ri.routeDistinction)
-        |> Seq.iter (fun (k, v) -> routeIntegrationsByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> routeIntegrationsByRoute.Replace(k, v))
 
         batch.routeStops
         |> Seq.map (fun (rs: RouteStop) ->
@@ -745,7 +745,7 @@ type JdfMerger(
                 attributes = mapAttributes rs.attributes
             })
         |> Seq.groupBy (fun rs -> rs.routeId, rs.routeDistinction)
-        |> Seq.iter (fun (k, v) -> routeStopsByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> routeStopsByRoute.Replace(k, v))
 
         let newTripGroups =
             batch.tripGroups
@@ -774,7 +774,7 @@ type JdfMerger(
                 attributes = mapAttributes t.attributes
             })
         |> Seq.groupBy (fun t -> t.routeId, t.routeDistinction)
-        |> Seq.iter (fun (k, v) -> tripsByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> tripsByRoute.Replace(k, v))
 
         let tripStopAttributes =
             Dictionary<int option array, int option array>(HashIdentity.Structural)
@@ -801,7 +801,7 @@ type JdfMerger(
                 batch.tripStops
                 |> mapParallelOrderedBatches tripStopTransformWorkers mappedTripStop
                 |> Seq.groupBy (fun ts -> ts.routeId, ts.routeDistinction)
-                |> Seq.iter (fun (k, v) -> tripStopsByRoute.[k] <- v)
+                |> Seq.iter (fun (k, v) -> tripStopsByRoute.Replace(k, v))
                 Threading.Tasks.Task.FromResult(fun () -> ())
 
         batch.routeInfo
@@ -812,7 +812,7 @@ type JdfMerger(
                 routeDistinction = ridd
             })
         |> Seq.groupBy (fun ri -> ri.routeId, ri.routeDistinction)
-        |> Seq.iter (fun (k, v) -> routeInfoByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> routeInfoByRoute.Replace(k, v))
 
         batch.serviceNotes
         |> Seq.map (fun sn ->
@@ -822,7 +822,7 @@ type JdfMerger(
                 routeDistinction = ridd
             })
         |> Seq.groupBy (fun sn -> sn.routeId, sn.routeDistinction)
-        |> Seq.iter (fun (k, v) -> serviceNotesByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> serviceNotesByRoute.Replace(k, v))
 
         batch.transfers
         |> Seq.map (fun t ->
@@ -832,7 +832,7 @@ type JdfMerger(
                 routeDistinction = ridd
             })
         |> Seq.groupBy (fun t -> t.routeId, t.routeDistinction)
-        |> Seq.iter (fun (k, v) -> transfersByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> transfersByRoute.Replace(k, v))
 
         batch.agencyAlternations
         |> Seq.map (fun aa ->
@@ -846,7 +846,7 @@ type JdfMerger(
                 attributes = mapAttributes aa.attributes
             })
         |> Seq.groupBy (fun aa -> aa.routeId, aa.routeDistinction)
-        |> Seq.iter (fun (k, v) -> agencyAlternationsByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> agencyAlternationsByRoute.Replace(k, v))
 
         batch.alternateRouteNames
         |> Seq.map (fun arn ->
@@ -856,7 +856,7 @@ type JdfMerger(
                 routeDistinction = ridd
             })
         |> Seq.groupBy (fun arn -> arn.routeId, arn.routeDistinction)
-        |> Seq.iter (fun (k, v) -> alternateRouteNamesByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> alternateRouteNamesByRoute.Replace(k, v))
 
         batch.reservationOptions
         |> Seq.map (fun ro ->
@@ -866,7 +866,7 @@ type JdfMerger(
                 routeDistinction = ridd
             })
         |> Seq.groupBy (fun ro -> ro.routeId, ro.routeDistinction)
-        |> Seq.iter (fun (k, v) -> reservationOptionsByRoute.[k] <- v)
+        |> Seq.iter (fun (k, v) -> reservationOptionsByRoute.Replace(k, v))
 
         tripStopRegistration
 

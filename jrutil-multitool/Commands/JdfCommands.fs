@@ -63,7 +63,6 @@ let fixJdf (ctx: CommandContext) =
     let fixPlan = ctx.JobsFor "fix-jdf" Execution.FixBatches (4L * Execution.GiB)
     let jdfPar = Jdf.jdfBatchDirParser ()
     let jdfWri = Jdf.jdfBatchDirWriter ()
-    JdfFixups.resetMatchDiagnostics ()
     Log.Information(
         "Fixing JDF with {Jobs} workers and {BatchOutput} batch output",
         fixPlan.resolvedWorkers, batchOutput)
@@ -84,9 +83,10 @@ let fixJdf (ctx: CommandContext) =
         use _logCtx = LogContext.PushProperty("JdfBatch", batchName)
         Log.Information("Processing JDF batch {BatchPath}", batchPath)
         try
-            let batchWithLocations, decisions =
+            let fixedBatch =
                 Jdf.parseJdfBatchPath jdfPar batchPath
                 |> JdfFix.fixBatch stopMatcher internationalRoutePolicy collectEstimatedPostEvidence
+            let batchWithLocations = fixedBatch.batch
             if batchOutput = "zip" then
                 let fixedOutPath = Path.Combine(outDir, batchName + ".zip")
                 FileUtils.writeAtomicFile fixedOutPath (fun temporary ->
@@ -97,21 +97,23 @@ let fixJdf (ctx: CommandContext) =
                 Directory.CreateDirectory(fixedOutDir) |> ignore
                 jdfWri (Jdf.FsPath fixedOutDir) batchWithLocations
             Log.Information("Completed JDF batch {BatchPath}", batchPath)
-            Ok (batchPath, decisions)
+            Ok (batchPath, fixedBatch)
         with error ->
             Error (batchPath, error))
     let internationalRouteDecisions = ResizeArray<_>()
+    let matchDiagnostics = JdfFixups.MatchDiagnostics.create ()
     for result in results do
         match result with
-        | Ok (batchPath, decisions) ->
+        | Ok (batchPath, fixedBatch) ->
             ctx.BatchEvent "batch_completed" "fix-jdf" batchPath None
-            internationalRouteDecisions.AddRange(decisions)
+            internationalRouteDecisions.AddRange(fixedBatch.internationalRouteDecisions)
+            JdfFixups.MatchDiagnostics.add matchDiagnostics fixedBatch.matchDiagnostics
         | Error (batchPath, error) ->
             ctx.BatchEvent "batch_failed" "fix-jdf" batchPath (Some error)
             raise error
     ctx.Phase "fix-jdf" "process-batches" "completed"
     ctx.ResourceUsage "fix-jdf" "process-batches" 0L
-    JdfFixups.logMatchDiagnostics ()
+    JdfFixups.MatchDiagnostics.log matchDiagnostics
     JdfInternationalFilter.logInternationalRouteDecisions
         internationalRoutePolicy (internationalRouteDecisions.ToArray())
     Log.Information("Finished!")

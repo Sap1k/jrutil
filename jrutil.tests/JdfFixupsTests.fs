@@ -514,7 +514,7 @@ type JdfFixupsTests() =
     [<TestMethod>]
     member _.``Historical OL code matches canonical OC strictly``() =
         let point = (czechRegionPolygons ()).["OC"].Centroid
-        exactMatches (sourceStop "OL" "CZ") [| candidate "OC" "CZ" point |]
+        exactMatches (MatchDiagnostics.create ()) (sourceStop "OL" "CZ") [| candidate "OC" "CZ" point |]
         |> Array.length
         |> assertEqual 1
 
@@ -522,7 +522,7 @@ type JdfFixupsTests() =
     member _.``Adjacent okres candidate on expected boundary is accepted``() =
         let expected, expectedPolygon, actual, _ = adjacentPair.Value
         let point = expectedPolygon.Factory.CreatePoint(expectedPolygon.Boundary.Coordinate)
-        exactMatches (sourceStop expected "CZ") [| candidate actual "CZ" point |]
+        exactMatches (MatchDiagnostics.create ()) (sourceStop expected "CZ") [| candidate actual "CZ" point |]
         |> Array.length
         |> assertEqual 1
 
@@ -534,7 +534,7 @@ type JdfFixupsTests() =
         let strictPoint = expectedPolygon.Centroid
 
         let matches =
-            exactMatches
+            exactMatches (MatchDiagnostics.create ())
                 (sourceStop expected "CZ")
                 [| candidate actual "CZ" boundaryPoint
                    candidate expected "CZ" strictPoint |]
@@ -551,10 +551,10 @@ type JdfFixupsTests() =
                 expectedPolygon.Boundary.Distance(
                     expectedPolygon.Factory.CreatePoint(coordinate)))
         let point = actualPolygon.Factory.CreatePoint(coordinate)
-        exactMatches (sourceStop expected "CZ") [| candidate actual "CZ" point |]
+        exactMatches (MatchDiagnostics.create ()) (sourceStop expected "CZ") [| candidate actual "CZ" point |]
         |> Array.length
         |> assertEqual 0
-        exactMatches (sourceStop expected "CZ") [| candidate expected "D" point |]
+        exactMatches (MatchDiagnostics.create ()) (sourceStop expected "CZ") [| candidate expected "D" point |]
         |> Array.length
         |> assertEqual 0
 
@@ -565,7 +565,7 @@ type JdfFixupsTests() =
             polygons
             |> Array.find (fun (_, polygon) -> expectedPolygon.Distance(polygon) > 100.0)
         let point = actualPolygon.Centroid
-        exactMatches (sourceStop expected "CZ") [| candidate actual "CZ" point |]
+        exactMatches (MatchDiagnostics.create ()) (sourceStop expected "CZ") [| candidate actual "CZ" point |]
         |> Array.length
         |> assertEqual 0
 
@@ -575,7 +575,7 @@ type JdfFixupsTests() =
         let foreignStop = sourceStop "PU" "SK"
         let foreignCandidate = candidate "" "SK" point
 
-        exactMatches foreignStop [| foreignCandidate |]
+        exactMatches (MatchDiagnostics.create ()) foreignStop [| foreignCandidate |]
         |> Array.length
         |> assertEqual 1
 
@@ -588,7 +588,7 @@ type JdfFixupsTests() =
                 NetTopologySuite.Geometries.Coordinate(
                     checkedPoint.X + 5000.0, checkedPoint.Y))
         let selected =
-            topStopMatch
+            topStopMatch (MatchDiagnostics.create ())
                 (sourceStop region "CZ")
                 [| candidate region "CZ" checkedPoint |> withSource "external:manual"
                    candidate region "CZ" osmPoint |> withSource "osm:czech-pbf" |]

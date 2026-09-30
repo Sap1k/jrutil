@@ -31,24 +31,31 @@ let longestTripStops (tripStops: JdfModel.TripStop array) =
     |> Array.filter (fun tripStop ->
         (tripStop.routeId, tripStop.tripId) = selected)
 
-/// Fix one parsed source batch. Returns the batch to write and the
-/// international route decisions of the source batch.
+/// One fixed source batch: the batch to write, the international route
+/// decisions of the source batch and its stop-matching geography counters.
+type FixedBatch = {
+    batch: JdfModel.JdfBatch
+    internationalRouteDecisions: JdfGtfsRules.InternationalRouteDecision array
+    matchDiagnostics: JdfFixups.MatchDiagnostics
+}
+
+/// Fix one parsed source batch.
 let fixBatch stopMatcher internationalRoutePolicy collectEstimatedPostEvidence
              (batch: JdfModel.JdfBatch) =
     let routeFilter =
         JdfInternationalFilter.applyInternationalRoutePolicy
             internationalRoutePolicy batch
-    let inferredBatch =
+    let inferredBatch, matchDiagnostics =
         match JdfFixups.dropDegenerateBatch batch with
         | Some emptyBatch ->
             Log.Warning(
                 "Dropping degenerate JDF batch with fewer than two distinct called stops")
-            emptyBatch
+            emptyBatch, JdfFixups.MatchDiagnostics.create ()
         | None ->
             // Route classification can change after batches with
             // the same distinction are merged. Always geocode a
             // non-degenerate source batch.
-            let batchFixed, stopMatches =
+            let batchFixed, stopMatches, matchDiagnostics =
                 JdfFixups.fixPublicCisJrBatch stopMatcher batch
             let stopsWithMatches =
                 Array.zip batchFixed.stops stopMatches
@@ -76,9 +83,12 @@ let fixBatch stopMatcher internationalRoutePolicy collectEstimatedPostEvidence
             ]
             |> Seq.iter (fun msg -> Log.Write(msg))
             JdfFixups.addStopLocations batchFixed stopsWithMatches
-            |> JdfFixups.estimateMissingStopLocations
+            |> JdfFixups.estimateMissingStopLocations,
+            matchDiagnostics
     let batchWithLocations =
         if collectEstimatedPostEvidence then inferredBatch
         else { inferredBatch with
                    postCandidateEvidence = [||] }
-    batchWithLocations, routeFilter.decisions
+    { batch = batchWithLocations
+      internationalRouteDecisions = routeFilter.decisions
+      matchDiagnostics = matchDiagnostics }
