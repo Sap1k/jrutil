@@ -94,22 +94,12 @@ let buildCandidates ({
             | _ -> [||])
         |> Option.defaultValue [||]
 
-    let routeOverridesBySource = prepared.routeOverrides |> Array.groupBy (fun value -> value.sourceId) |> dict
     let routeCandidates = Dictionary<string, string array * string>(StringComparer.Ordinal)
     let structuralRouteCandidates = Dictionary<string, string array>(StringComparer.Ordinal)
     for sourceRoute in sourceRouteRows do
         let sourceRouteId = rowValue sourceRoute "route_id"
         let sourceTrips = match sourceTripsByRoute.TryGetValue(sourceRouteId) with | true, rows -> rows | _ -> [||]
         let direct = sourceTrips |> Array.collect directBaseRoutesForSourceTrip |> Array.distinct
-        let reviewed =
-            match routeOverridesBySource.TryGetValue(sourceRouteId) with
-            | true, values ->
-                values
-                |> Array.filter (fun value -> value.validFrom <= prepared.window.endDate && value.validTo >= prepared.window.startDate)
-                |> Array.map (fun value -> value.targetId)
-                |> Array.filter prepared.baseRoutes.ContainsKey
-                |> Array.distinct
-            | _ -> [||]
         let label = rowValue sourceRoute "route_short_name"
         let structuralExact =
             prepared.baseRouteRows
@@ -128,8 +118,6 @@ let buildCandidates ({
         structuralRouteCandidates.[sourceRouteId] <- structural
         if direct.Length > 0 && prepared.policy.source.routeMatchTiers |> Array.contains "companion_assertion" then
             routeCandidates.[sourceRouteId] <- direct, "companion_assertion"
-        elif reviewed.Length > 0 && prepared.policy.source.routeMatchTiers |> Array.contains "reviewed_override" then
-            routeCandidates.[sourceRouteId] <- reviewed, "reviewed_override"
         else
             let candidates =
                 if prepared.policy.source.routeMatchTiers |> Array.contains "structural_trip_evidence" then structuralExact else [||]

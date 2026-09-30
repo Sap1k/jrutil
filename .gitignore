@@ -11,8 +11,6 @@
 /scripts/*
 !/scripts/audit_regional_overlay_references.py
 !/scripts/audit_duplicate_journeys.py
-!/scripts/verify_regional_overlay.py
-!/scripts/overlay-profile/
 !/scripts/post-scorer/
 !/scripts/golden/
 /scripts/post-scorer/.venv/

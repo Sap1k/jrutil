@@ -20,7 +20,7 @@ open JrUtil.RegionalOverlay.Support
 open JrUtil.RegionalOverlay.Policy
 
 type Prepared = {
-    policyPath: string
+    policy: OverlayPolicy
     binding: SourceBinding
     sourceIds: string array
     descriptors: IReadOnlyDictionary<string, SourceDescriptor>
@@ -36,12 +36,8 @@ let loadPolicy path =
     if isNull (box policy) then invalidArg "--policy" "Multi-source overlay policy is empty"
     if policy.schemaVersion <> OverlayAllPolicySchemaVersion then
         invalidArg "--policy" $"Unsupported multi-source overlay policy schema {policy.schemaVersion}"
-    if policy.conflictPolicy <> "equal_priority_quarantine" then
-        invalidArg "--policy" "conflict_policy must be equal_priority_quarantine"
-    if policy.publicationEnabled && policy.calibration then
-        invalidArg "--policy" "A calibration policy cannot enable publication"
-    if isNull policy.sources || policy.sources.Length < 2 then
-        invalidArg "--policy" "Multi-source overlay policy requires at least two sources"
+    if isNull policy.sources || policy.sources.Length = 0 then
+        invalidArg "--policy" "Overlay policy requires at least one source"
     let sourceIds = policy.sources |> Array.map (fun source -> requiredText "sources.source_id" source.sourceId)
     if sourceIds |> Array.distinct |> Array.length <> sourceIds.Length then
         invalidArg "--policy" "Multi-source overlay source IDs must be unique"
@@ -163,22 +159,29 @@ let private writeCombinedTables root bindings =
         if table <> "shapes.txt" || bindings |> Array.exists (fun (_, binding, _, _) -> (columnsOf binding.payloadPath table).Length > 0) then
             writeRows (Path.Combine(root, table)) columns rows
 
-let private writeRouteJoin root bindings =
+/// Write the companion CIS-line join declared by each source profile and
+/// return whether it has any rows. A configured join requires its table.
+let private writeRouteJoin root (bindings: (string * SourceBinding * string * OverlayPolicy) array) =
+    let mutable count = 0
     let rows = seq {
-        for adapter, binding, _, _ in bindings do
-            if adapter = "pid-v1" then
+        for _, binding, _, sourcePolicy in bindings do
+            let join = sourcePolicy.source.routeJoin
+            if not (isNull (box join)) then
+                let key (columns: string array) (row: CsvRow) = columns |> Array.map (rowValue row) |> String.concat ""
                 let lookup =
-                    csvRows binding.payloadPath "route_sub_agencies.txt"
-                    |> Seq.groupBy (fun row -> rowValue row "route_id" + "\u001f" + rowValue row "sub_agency_id")
-                    |> Seq.map (fun (key, values) -> key, values |> Seq.map (fun row -> rowValue row "route_licence_number") |> Seq.filter (String.IsNullOrWhiteSpace >> not) |> Seq.distinct |> Seq.toArray)
+                    requireTable binding.payloadPath join.table
+                    |> Seq.groupBy (key join.lookupKeys)
+                    |> Seq.map (fun (joinKey, values) -> joinKey, values |> Seq.map (fun row -> rowValue row join.valueColumn) |> Seq.filter (String.IsNullOrWhiteSpace >> not) |> Seq.distinct |> Seq.toArray)
                     |> dict
                 for trip in csvRows binding.payloadPath "trips.txt" do
-                    let key = rowValue trip "route_id" + "\u001f" + rowValue trip "sub_agency_id"
-                    match lookup.TryGetValue(key) with
-                    | true, values when values.Length = 1 -> yield [| namespaced binding.sourceId (rowValue trip "trip_id"); values.[0] |]
+                    match lookup.TryGetValue(key join.sourceKeys trip) with
+                    | true, values when values.Length = 1 ->
+                        count <- count + 1
+                        yield [| namespaced binding.sourceId (rowValue trip "trip_id"); values.[0] |]
                     | _ -> ()
     }
     writeValues (Path.Combine(root, "overlay_route_join.txt")) [| "trip_id"; "cis_line_id" |] rows
+    count > 0
 
 let private writeIdsJmkOperational root bindings =
     let rows = ResizeArray<string array>()
@@ -217,12 +220,8 @@ let private writeCombinedOverrides destination (preparedBindings: (string * Sour
                         yield copy
         }
         writeRows output columns rows
-        Path.GetFileName(output)
-    {
-        routes = write "route" (fun value -> value.routes)
-        trips = write "trip" (fun value -> value.trips)
-        stops = write "stop" (fun value -> value.stops)
-    }
+        output
+    { stops = write "stop" (fun value -> value.stops) }
 
 let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding array) =
     let combinedPolicyPath, combinedPolicy = loadPolicy combinedPolicyPath
@@ -251,7 +250,7 @@ let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding a
             descriptors.[source.sourceId] <- descriptor
             source.adapter, binding, sourcePolicyPath, sourcePolicy)
     writeCombinedTables normalized preparedBindings
-    writeRouteJoin normalized preparedBindings
+    let hasRouteJoin = writeRouteJoin normalized preparedBindings
     writeIdsJmkOperational normalized preparedBindings
 
     let embedded = Path.Combine(normalized, "_overlay")
@@ -287,41 +286,30 @@ let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding a
     let combinedOverrides = writeCombinedOverrides policyDirectory preparedBindings
     let template = preparedBindings.[0] |> fun (_, _, _, policy) -> policy
     let sourcePolicies = preparedBindings |> Array.map (fun (_, _, _, policy) -> policy.source)
-    let capabilities = Dictionary<string, CapabilityPolicy>(StringComparer.Ordinal)
-    for capabilityName in capabilityNames |> Set.toArray |> Array.sort do
-        let enabledClaims =
-            sourcePolicies
-            |> Array.choose (fun policy ->
-                match policy.capabilities.TryGetValue(capabilityName) with
-                | true, value when value.mode <> "disabled" -> Some value
-                | _ -> None)
-            |> Array.distinct
-        if enabledClaims.Length > 1 then
-            invalidArg "--policy" $"Sources claim capability {capabilityName} with unequal modes or priorities"
-        capabilities.[capabilityName] <-
-            if enabledClaims.Length = 1 then enabledClaims.[0]
-            else { mode = "disabled"; priority = 0 }
+    let capabilities =
+        sourcePolicies |> Array.collect (fun policy -> policy.capabilities) |> Array.distinct |> Array.sort
     let capabilityTiers = Dictionary<string, string>(StringComparer.Ordinal)
     for policy in sourcePolicies do
         for KeyValue(name, tier) in policy.tripMatch.minimumCapabilityTier do
             match capabilityTiers.TryGetValue(name) with
             | true, existing when existing <> tier -> invalidArg "--policy" $"Sources configure unequal minimum matching tiers for {name}"
             | _ -> capabilityTiers.[name] <- tier
-    let canonicalRouteTiers = [| "companion_assertion"; "reviewed_override"; "structural_trip_evidence" |]
+    let canonicalRouteTiers = [| "companion_assertion"; "structural_trip_evidence" |]
     let configuredRouteTiers = sourcePolicies |> Array.collect (fun policy -> policy.routeMatchTiers) |> Set.ofArray
-    let canonicalTripTiers = [| "full_signature"; "pattern_endpoints"; "pattern_first"; "pattern_nearest"; "pattern_edit_nearest"; "reviewed_override" |]
+    let canonicalTripTiers = [| "full_signature"; "pattern_endpoints"; "pattern_first"; "pattern_nearest"; "pattern_edit_nearest" |]
     let configuredTripTiers = sourcePolicies |> Array.collect (fun policy -> policy.tripMatchTiers) |> Set.ofArray
     let generatedPolicy = {
         schemaVersion = OverlayPolicySchemaVersion
-        calibration = combinedPolicy.calibration
-        publicationEnabled = combinedPolicy.publicationEnabled
-        minimumCoverage = combinedPolicy.minimumCoverage
         source = {
             template.source with
                 sourceId = "regional-all"
                 excludedRouteTypes = sourcePolicies |> Array.collect (fun policy -> policy.excludedRouteTypes) |> Array.distinct |> Array.sort
                 maximumSnapshotSkewDays = 3660
-                routeJoin = { table = "overlay_route_join.txt"; sourceKeys = [| "trip_id" |]; lookupKeys = [| "trip_id" |]; valueColumn = "cis_line_id"; targetNamespace = "cis_line_id" }
+                // Without companion rows there are no CIS line assertions.
+                routeJoin =
+                    if hasRouteJoin then
+                        { table = "overlay_route_join.txt"; sourceKeys = [| "trip_id" |]; lookupKeys = [| "trip_id" |]; valueColumn = "cis_line_id"; targetNamespace = "cis_line_id" }
+                    else Unchecked.defaultof<RouteJoinPolicy>
                 stopMatch = {
                     template.source.stopMatch with
                         groupColumn = "overlay_group_id"
@@ -341,8 +329,6 @@ let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding a
                 overrides = combinedOverrides
         }
     }
-    let generatedPolicyPath = Path.Combine(policyDirectory, "overlay-policy.json")
-    File.WriteAllText(generatedPolicyPath, JsonSerializer.Serialize(generatedPolicy, jsonOptions), new UTF8Encoding(false))
     let payloadHash = sha256Tree normalized
     let retrievedAt = descriptors.Values |> Seq.map (fun value -> value.retrievedAt) |> Seq.max
     let descriptorPath = Path.Combine(scratchRoot, "combined-descriptor.json")
@@ -351,7 +337,7 @@ let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding a
     descriptorJson.["payload_sha256"] <- box payloadHash
     File.WriteAllText(descriptorPath, JsonSerializer.Serialize(descriptorJson, jsonOptions), new UTF8Encoding(false))
     {
-        policyPath = generatedPolicyPath
+        policy = generatedPolicy
         binding = { sourceId = "regional-all"; payloadPath = normalized; descriptorPath = descriptorPath }
         sourceIds = descriptors.Keys |> Seq.sort |> Seq.toArray
         descriptors = descriptors

@@ -5,22 +5,13 @@ module JrUtil.RegionalOverlay.Types
 open System.Collections.Generic
 
 [<Literal>]
-let OverlayBundleVersion = 1
+let OverlayBundleVersion = 2
 
 [<Literal>]
-let MultiSourceOverlayBundleVersion = 2
-
-[<Literal>]
-let OverlayPolicySchemaVersion = 3
+let OverlayPolicySchemaVersion = 4
 
 [<Literal>]
 let OverlayAllPolicySchemaVersion = 1
-
-[<CLIMutable>]
-type CapabilityPolicy = {
-    mode: string
-    priority: int
-}
 
 [<CLIMutable>]
 type RouteJoinPolicy = {
@@ -44,10 +35,7 @@ type StopMatchPolicy = {
 
 and [<CLIMutable>] ContextualStopInferencePolicy = {
     enabled: bool
-    maximumUnresolvedGroupsPerTrip: int
-    requireEqualCallCount: bool
     minimumMappedCalls: int
-    conflictPolicy: string
 }
 
 [<CLIMutable>]
@@ -69,15 +57,12 @@ type SourceRevisionPolicy = {
 type TripSetAuthorityPolicy = {
     modes: string array
     sourceNativeModes: string array
-    routeMatchTier: string
 }
 
 [<CLIMutable>]
 type TripMatchPolicy = {
     timeResolutionSeconds: int
-    timeRounding: string
     exactPatternProximity: bool
-    requireUniqueBest: bool
     patternEdit: PatternEditPolicy
     sourceRevision: SourceRevisionPolicy
     minimumCapabilityTier: Dictionary<string, string>
@@ -85,8 +70,6 @@ type TripMatchPolicy = {
 
 [<CLIMutable>]
 type OverridePolicy = {
-    routes: string
-    trips: string
     stops: string
 }
 
@@ -101,17 +84,14 @@ type SourcePolicy = {
     tripSetAuthority: TripSetAuthorityPolicy
     routeMatchTiers: string array
     tripMatchTiers: string array
-    neverInherit: string array
-    capabilities: Dictionary<string, CapabilityPolicy>
+    /// Enabled capabilities; everything else is inherited from the base.
+    capabilities: string array
     overrides: OverridePolicy
 }
 
 [<CLIMutable>]
 type OverlayPolicy = {
     schemaVersion: int
-    calibration: bool
-    publicationEnabled: bool
-    minimumCoverage: Dictionary<string, float>
     source: SourcePolicy
 }
 
@@ -125,10 +105,6 @@ type OverlayAllSourcePolicy = {
 [<CLIMutable>]
 type OverlayAllPolicy = {
     schemaVersion: int
-    calibration: bool
-    publicationEnabled: bool
-    conflictPolicy: string
-    minimumCoverage: Dictionary<string, float>
     sources: OverlayAllSourcePolicy array
 }
 
@@ -165,5 +141,4 @@ type MultiSourceOverlayResult = {
     outputPath: string
     sources: string array
     aggregate: OverlayResult
-    perSource: IReadOnlyDictionary<string, OverlayResult>
 }

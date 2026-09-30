@@ -51,13 +51,8 @@ let loadPolicy path =
         invalidArg "--policy" "coordinate_identity_minimum_margin_metres must not be negative"
     if isNull (box policy.source.stopMatch.contextualInference) then
         invalidArg "--policy" "source.stop_match.contextual_inference is required"
-    let contextual = policy.source.stopMatch.contextualInference
-    if contextual.maximumUnresolvedGroupsPerTrip <> 1 then
-        invalidArg "--policy" "contextual inference currently requires maximum_unresolved_groups_per_trip=1"
-    if contextual.minimumMappedCalls < 1 then
+    if policy.source.stopMatch.contextualInference.minimumMappedCalls < 1 then
         invalidArg "--policy" "contextual inference minimum_mapped_calls must be positive"
-    if contextual.conflictPolicy <> "quarantine" then
-        invalidArg "--policy" "contextual inference conflict_policy must be 'quarantine'"
     if isNull (box policy.source.tripMatch) then invalidArg "--policy" "source.trip_match is required"
     if isNull (box policy.source.tripSetAuthority) then invalidArg "--policy" "source.trip_set_authority is required"
     if isNull (box policy.source.tripMatch.patternEdit) then invalidArg "--policy" "trip_match.pattern_edit is required"
@@ -73,17 +68,11 @@ let loadPolicy path =
     if policy.source.tripMatch.patternEdit.minimumAgreement < 0.0
        || policy.source.tripMatch.patternEdit.minimumAgreement > 1.0 then
         invalidArg "--policy" "trip_match.pattern_edit.minimum_agreement must be between zero and one"
-    if isNull policy.source.neverInherit
-       || not (policy.source.neverInherit |> Array.contains "pathways.txt")
-       || not (policy.source.neverInherit |> Array.contains "levels.txt") then
-        invalidArg "--policy" "never_inherit must include pathways.txt and levels.txt in overlay bundle v1"
-    let routeTiers = set [ "companion_assertion"; "reviewed_override"; "structural_trip_evidence" ]
+    let routeTiers = set [ "companion_assertion"; "structural_trip_evidence" ]
     if isNull policy.source.tripSetAuthority.modes then
         invalidArg "--policy" "source.trip_set_authority.modes is required"
     if isNull policy.source.tripSetAuthority.sourceNativeModes then
         invalidArg "--policy" "source.trip_set_authority.source_native_modes is required"
-    if policy.source.tripSetAuthority.routeMatchTier <> "companion_assertion" then
-        invalidArg "--policy" "source.trip_set_authority.route_match_tier must be 'companion_assertion'"
     let authorityModes = set [ "bus"; "tram"; "metro"; "trolleybus"; "ferry"; "other-guided" ]
     for mode in policy.source.tripSetAuthority.modes do
         if not (authorityModes.Contains(mode)) then
@@ -96,7 +85,7 @@ let loadPolicy path =
     let tripTiers =
         set [
             "full_signature"; "pattern_endpoints"; "pattern_first"; "pattern_nearest"
-            "pattern_edit_nearest"; "reviewed_override"
+            "pattern_edit_nearest"
         ]
     if isNull policy.source.routeMatchTiers || policy.source.routeMatchTiers.Length = 0 then
         invalidArg "--policy" "source.route_match_tiers is required"
@@ -106,20 +95,9 @@ let loadPolicy path =
         if not (routeTiers.Contains(tier)) then invalidArg "--policy" $"Unknown route matching tier: {tier}"
     for tier in policy.source.tripMatchTiers do
         if not (tripTiers.Contains(tier)) then invalidArg "--policy" $"Unknown trip matching tier: {tier}"
-    if policy.publicationEnabled && policy.calibration then
-        invalidArg "--policy" "A calibration policy cannot enable publication"
-    if policy.publicationEnabled && (isNull policy.minimumCoverage || policy.minimumCoverage.Count = 0) then
-        invalidArg "--policy" "Publication requires reviewed minimum_coverage floors"
     if isNull policy.source.capabilities then
         invalidArg "--policy" "source.capabilities is required"
-    for KeyValue(name, capability) in policy.source.capabilities do
+    for name in policy.source.capabilities do
         if not (capabilityNames.Contains(name)) then
-            invalidArg "--policy" $"Unknown overlay capability: {name}"
-        if not ((set ["disabled"; "fill_missing"; "preferred"; "authoritative"; "additive"]).Contains(capability.mode)) then
-            invalidArg "--policy" $"Invalid mode for capability {name}: {capability.mode}"
-    for forbidden in ["calendars"; "agencies"; "stop_names"; "trip_headsigns"; "trip_short_names"] do
-        match policy.source.capabilities.TryGetValue(forbidden) with
-        | true, value when value.mode <> "disabled" ->
-            invalidArg "--policy" $"Capability {forbidden} must be disabled in overlay bundle v1"
-        | _ -> ()
+            invalidArg "--policy" $"Unknown or base-only overlay capability: {name}"
     policy

@@ -30,7 +30,6 @@ type Input = {
     matches: TripMatching.Result
     temporary: string
     usedStopIds: HashSet<string>
-    usedRouteIds: HashSet<string>
     usedOutputShapeIds: Set<string>
     slicesForBinding: MatchBinding -> (TripSlice * DateSet.Dates) array
     transferProvenance: ResizeArray<string array>
@@ -50,7 +49,6 @@ let write ({
     matches = matches
     temporary = temporary
     usedStopIds = usedStopIds
-    usedRouteIds = usedRouteIds
     usedOutputShapeIds = usedOutputShapeIds
     slicesForBinding = slicesForBinding
     transferProvenance = transferProvenance
@@ -85,12 +83,6 @@ let write ({
         }
     writeValues (Path.Combine(temporary, "mappings", "base_to_output_trips.csv"))
         [| "base_trip_id"; "output_trip_id"; "valid_from"; "valid_to" |] baseTripMappings
-    writeValues (Path.Combine(temporary, "mappings", "base_to_output_routes.csv"))
-        [| "base_route_id"; "output_route_id" |]
-        (usedRouteIds |> Seq.filter prepared.baseRoutes.ContainsKey |> Seq.sort |> Seq.map (fun id -> [| id; id |]))
-    writeValues (Path.Combine(temporary, "mappings", "base_to_output_stops.csv"))
-        [| "base_stop_id"; "output_stop_id" |]
-        (prepared.baseStopRows |> Seq.map (fun row -> rowValue row "stop_id") |> Seq.filter usedStopIds.Contains |> Seq.sort |> Seq.map (fun id -> [| id; id |]))
     writeValues (Path.Combine(temporary, "mappings", "source_to_output_stops.csv"))
         [| "source_id"; "source_stop_id"; "output_stop_id"; "target_stop_place_id"; "method" |]
         (projection.acceptedSourceStopIds
@@ -298,9 +290,6 @@ let write ({
                 dateIndex <- dateIndex + 1
             if covered then fullyCoveredSourceTrips.Add(sourceTripId) |> ignore
         | _ -> ()
-    writeValues (Path.Combine(temporary, "provenance", "transfer_claims.csv"))
-        [| "source_from_stop_id"; "source_to_stop_id"; "disposition"; "detail" |]
-        transferProvenance
     writeValues (Path.Combine(temporary, "reports", "trip_candidate_scores.csv"))
         [| "source_trip_id"; "base_trip_id"; "first_accepted_date"; "route_method"; "trip_method"; "pattern_edits"; "aligned_target_calls"; "first_departure_delta_seconds"; "aggregate_time_delta_seconds"; "duration_delta_seconds"; "maximum_aligned_time_delta_seconds"; "squared_aligned_time_delta"; "runner_up_margin" |]
         matches.candidateScoreReports
@@ -401,24 +390,6 @@ let write ({
     writeValues (Path.Combine(temporary, "reports", "diagnostics.csv"))
         [| "code"; "source_object_id"; "message" |]
         (effectiveDiagnostics |> Seq.map (fun value -> [| value.code; value.sourceObjectId; value.message |]))
-    let reportDiagnostics name predicate =
-        effectiveDiagnostics
-        |> Seq.filter predicate
-        |> Seq.map (fun value -> [| value.code; value.sourceObjectId; value.message |])
-        |> writeValues (Path.Combine(temporary, "reports", name)) [| "code"; "source_object_id"; "message" |]
-    reportDiagnostics "ambiguities.csv" (fun value -> value.code.Contains("ambiguous", StringComparison.Ordinal))
-    reportDiagnostics "conflicts.csv" (fun value -> value.code.Contains("conflict", StringComparison.Ordinal))
-    reportDiagnostics "equivalent_ties.csv" (fun value -> value.code = "trip_equivalent_tie_expanded")
-    reportDiagnostics "quarantine.csv" (fun value ->
-        value.code.Contains("unresolved", StringComparison.Ordinal)
-        || value.code.Contains("invalid", StringComparison.Ordinal)
-        || value.code.Contains("missing", StringComparison.Ordinal))
-    writeValues (Path.Combine(temporary, "reports", "substitutions.csv"))
-        [| "source_trip_id"; "base_trip_id"; "matching_tier" |]
-        (Seq.append
-            (matches.bindings |> Seq.map (fun value -> [| value.sourceTripId; value.targetTripId; value.method |]))
-            (projection.sourceTripAdditions |> Seq.map (fun value -> [| value.projection.sourceTripId; ""; "authoritative_source_trip_set" |]))
-         |> Seq.distinctBy (fun row -> String.concat "\u001f" row))
     writeValues (Path.Combine(temporary, "reports", "source_trip_additions.csv"))
         [| "source_trip_id"; "output_trip_id"; "cis_line_id"; "output_route_id"; "valid_from"; "valid_to"; "reason" |]
         (seq {
@@ -497,23 +468,6 @@ let write ({
     let ratio matched total = if total = 0 then 1.0 else float matched / float total
     writeValues (Path.Combine(temporary, "reports", "headsigns.csv"))
         [| "source_trip_id"; "stop_sequence"; "raw_headsign"; "output_headsign"; "status"; "reason"; "destination_stop_id"; "audit_day" |] projection.headsignProvenance.Rows
-    // Identity mappings describe provenance, not unconditional notice validity.
-    // Consumers may inherit snapshot-only semantics solely on the evidence date.
-    logProgress "write-semantic-inheritance" 0L None
-    writeValues (Path.Combine(temporary, "reports", "semantic_inheritance.csv"))
-        [| "source_trip_id"; "output_trip_id"; "base_trip_id"; "date"; "status" |]
-        (seq {
-            for matchBinding in matches.bindings do
-                for slice, dates in slicesForBinding matchBinding do
-                    for index in 0 .. dates.Length - 1 do
-                        if dates.[index] then
-                            yield [| matchBinding.sourceTripId; slice.trip.id; matchBinding.targetTripId; dateString prepared.window.dates.[index];
-                                     (if prepared.window.dates.[index] = prepared.snapshotDate && matchBinding.sourceOrdinalByTarget = identityAlignment matchBinding.sourceCalls.Length then "aligned_snapshot_evidence" else "requires_explicit_notice_validity") |]
-            for addition in projection.sourceTripAdditions do
-                for index in 0 .. addition.projection.dates.Length - 1 do
-                    if addition.projection.dates.[index] then
-                        yield [| addition.projection.sourceTripId; addition.trip.id; ""; dateString prepared.window.dates.[index]; "unassigned_jdf_trip_semantics" |]
-        })
     let dailyCoverage = Dictionary<string, int array * int array>(StringComparer.Ordinal)
     for trip in activeSourceTrips do
         let tripId = rowValue trip "trip_id"
@@ -649,12 +603,6 @@ let write ({
                 for population, matched, total in rows do
                     yield [| mode; population; string matched; string total; (ratio matched total).ToString("0.000000", CultureInfo.InvariantCulture) |]
          })
-    if prepared.policy.publicationEnabled then
-        for name, matched, total in coverage do
-            match prepared.policy.minimumCoverage.TryGetValue(name) with
-            | true, minimum when ratio matched total >= minimum -> ()
-            | true, minimum -> invalidOp $"Coverage floor failed for {name}: {ratio matched total:F6} < {minimum:F6}"
-            | _ -> invalidOp $"Publication policy is missing minimum coverage for {name}"
     {
         fullyCoveredSourceTrips = fullyCoveredSourceTrips
         matchedSourceTripSet = matchedSourceTripSet

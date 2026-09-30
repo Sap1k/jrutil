@@ -31,12 +31,13 @@ let requiredText name (value: string) =
         invalidArg name $"{name} must be non-empty"
     value
 
+/// Capabilities a source may enable. Stop names, headsigns, trip short names,
+/// calendars and agencies always stay with the base.
 let capabilityNames =
     set [
         "stop_coordinates"; "boarding_points"; "call_boarding_points"; "shapes"
         "route_short_name"; "route_long_name"; "route_color"; "route_text_color"
-        "transfers"; "stop_zones"; "stop_names"; "trip_headsigns"; "trip_short_names"
-        "schedules"; "calendars"; "agencies"
+        "transfers"; "stop_zones"; "schedules"
     ]
 
 let sha256Tree root =

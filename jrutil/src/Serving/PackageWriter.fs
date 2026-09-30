@@ -427,7 +427,6 @@ module PackageWriter =
         try
             // Coverage and matching summaries already live in diagnostics.json.
             let summarizedReports = set [
-                "ambiguities.csv"; "conflicts.csv"; "equivalent_ties.csv"; "quarantine.csv"; "substitutions.csv"; "semantic_inheritance.csv"
                 "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "trip_coverage_populations.csv"
                 "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" ]
             let writeTables (tables: IReadOnlyDictionary<string, CompilerOutput.Table>) (directory: string) (keep: string -> bool) =
