@@ -1,0 +1,32 @@
+# Intended differences between the pre-refactor baseline and the refactored
+# converter (bundle version 2, serving schema version 3).
+
+# selected_field_provenance was removed from the contract; trip and route
+# provenance stays in object_origin, source_trip_map and source_entity_map.
+file serving/selected_field_provenance.parquet
+manifest relations
+
+# extensions/ was removed; zones and transfer waiting limits already live in
+# fare_zone, location_zone, route_stop_zone, call_zone and transfer. Relations
+# lost their sort keys.
+file extensions/*
+extension *
+manifest bundle_version
+manifest serving_schema_version
+manifest extension_schema_version
+
+# The merged JDF is dated by the reference date instead of the wall clock, so
+# its bytes and snapshot hash change once and everything derived follows. The
+# JDF compiler facts no longer carry stop_ids_cis; the overlay records its
+# --converter-version as the compiler instead of hashing a git commit into its
+# build spec.
+column source_snapshot_sha256
+manifest sources
+manifest build_spec_sha256
+manifest compiler
+gtfs feed_info.txt
+
+# International-route decisions no longer print the removed override field;
+# CZPTT diagnostics no longer record the removed block mode.
+diagnostics examples_by_code
+diagnostics block_mode

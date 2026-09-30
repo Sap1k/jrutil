@@ -11,3 +11,5 @@ Reports such as `ambiguities`, `conflicts`, `equivalent_ties`, and `quarantine` 
 Base evidence remains an input to compilation, but blanket copying is removed. Required route-stop zones, notices, connection claims, restrictions, source calls, and operational facts must be projected before staging evidence is discarded. Empty post-estimation skeletons are not production relations.
 
 The prior README statements that combined overlay preparation was future work and that metadata Parquet sidecars were the immutable consumer interface contradicted implemented behavior and this contract. The durable consumer interface is the finalized production package.
+
+Bundle version 2 later removed the remaining public extensions and field-level provenance as well; see [OUTPUT_MIGRATION.md](OUTPUT_MIGRATION.md).
