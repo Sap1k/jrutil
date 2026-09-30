@@ -15,11 +15,16 @@ open Parquet
 open Parquet.Schema
 open JrUtil.JdfPostEvidenceReader
 open JrUtil.JdfPostPolicyEvaluation
-open JrUtil.JdfPostSideGroups
 
 
 [<Literal>]
 let private ResultRowMemoryBudgetBytes=256L*1024L*1024L
+
+/// Stable ID of the inferred post published at one consolidated hypothesis.
+let private replayPhysicalLocationId stopId candidateId =
+    let payload = $"{stopId}|{candidateId}"
+    let hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload)) |> Convert.ToHexString
+    $"estimated:{hash.ToLowerInvariant()}"
 
 /// The sole production policy-evaluation boundary. The store has already
 /// passed structural, hash, ordering, key, FK, sentinel, and coverage checks;
@@ -40,7 +45,7 @@ let evaluateWithScorer includeDiagnostics
     let evidencePath=store.Directory
     let routePointsByStop=readReplayRoutePoints evidencePath
     // The learned scorer replaces the heuristic's decision for unlabelled contexts;
-    // authored posts, same-stop pairs and counters stay on the heuristic path.
+    // authored posts stay on the heuristic path.
     let learned =
         match scorer with
         | JdfPostInferencePolicy.LearnedScorer model -> Some(model,readObservationFacts evidencePath)
@@ -48,13 +53,10 @@ let evaluateWithScorer includeDiagnostics
     let temporaryDirectory=Path.Combine(Path.GetTempPath(),"jrutil-post-inference-results")
     let decisions=ResizeArray<ReplayDecision>()
     let hypotheses=ResizeArray<JdfPostInference.ConsolidatedPostHypothesis>()
-    let mutable policyCounters = {
-        sameStopBlocks=0;distinctPairChoices=0;unresolvedBlockEdges=0 }
     // The assignment store drives the one and only joined evidence traversal
     // in publication mode.  Per-stop evaluation completes before the next
-    // stop is read, so consolidation, decisions, hypotheses, side groups and
-    // assignments derive from the same bounded stop-major buffer.
-    let sideGroups=ResizeArray<JdfPostInference.GlobalPostSideGroup>()
+    // stop is read, so consolidation, decisions, hypotheses and assignments
+    // derive from the same bounded stop-major buffer.
     let assignments:JdfPostInference.IReplayableRowStore<JdfPostInference.ContextPostAssignment> =
         JdfPostInference.ReplayableRowStore<JdfPostInference.ContextPostAssignment>.Create(
             ResultRowMemoryBudgetBytes,temporaryDirectory,
@@ -68,13 +70,9 @@ let evaluateWithScorer includeDiagnostics
                         let values=stopRows.ToArray()
                         let stopId=values.[0].stopId
                         let points=routePointsByStop |> Map.tryFind stopId |> Option.defaultValue [||]
-                        let stopDecisions,stopCounters,details =
+                        let stopDecisions,details =
                             evaluateReplayPolicy manifest.captureCeilings.routedExcessMetres policy points values
                         decisions.AddRange(stopDecisions)
-                        policyCounters <- {
-                            sameStopBlocks=policyCounters.sameStopBlocks+stopCounters.sameStopBlocks
-                            distinctPairChoices=policyCounters.distinctPairChoices+stopCounters.distinctPairChoices
-                            unresolvedBlockEdges=policyCounters.unresolvedBlockEdges+stopCounters.unresolvedBlockEdges }
                         for pair in details do
                             let medoid,_,_,_,_,_,members=pair.Value
                             hypotheses.Add({
@@ -86,21 +84,6 @@ let evaluateWithScorer includeDiagnostics
                                 representativeRoutePointId=medoid.routePointId
                                 latitude=medoid.latitude
                                 longitude=medoid.longitude })
-                        let stopSideGroups=sideGroupCatalog policy routePointsByStop stopDecisions
-                        sideGroups.AddRange(stopSideGroups)
-                        let sideGroupsByFamily =
-                            stopDecisions
-                            |> Array.choose(fun decision ->
-                                match decision.resolution,decision.corridorFaceId with
-                                | "Side",Some face ->
-                                    stopSideGroups
-                                    |> Array.tryFind(fun group ->
-                                        group.stopId=decision.stopId && group.mode=decision.mode
-                                        && group.corridorFaceId=face)
-                                    |> Option.map(fun group ->
-                                        struct(decision.stopId,decision.movementFamilyId),group)
-                                | _ -> None)
-                            |> Map.ofArray
                         let decisionsByFamily =
                             stopDecisions
                             |> Array.map(fun value ->
@@ -122,29 +105,22 @@ let evaluateWithScorer includeDiagnostics
                                     { decision with score=Some value.postProbability
                                                     margin=Some value.areaProbability }
                                 | _ -> decision
-                            let resolution,locationId,hypothesisId,sideGroupId =
+                            let resolution,locationId,hypothesisId =
                                 if context.assignmentKind<>"unlabelled" then
-                                    decision.resolution,None,None,None
+                                    decision.resolution,None,None
                                 elif learnedDecision.IsSome then
                                     match learnedDecision.Value with
                                     | Some { resolution=JdfPostScorer.Physical; hypothesisId=Some candidate } ->
-                                        "Physical",Some(replayPhysicalLocationId context.stopId candidate),Some candidate,None
+                                        "Physical",Some(replayPhysicalLocationId context.stopId candidate),Some candidate
                                     | Some { resolution=JdfPostScorer.Area; hypothesisId=Some candidate } ->
-                                        "Area",Some(replayPhysicalLocationId context.stopId candidate),Some candidate,None
-                                    | _ -> "Centroid",None,None,None
+                                        "Area",Some(replayPhysicalLocationId context.stopId candidate),Some candidate
+                                    | _ -> "Centroid",None,None
                                 elif decision.resolution="Physical" then
                                     match decision.candidateId with
                                     | Some candidate ->
-                                        "Physical",Some(replayPhysicalLocationId context.stopId candidate),
-                                        Some candidate,None
-                                    | None -> "Centroid",None,None,None
-                                elif decision.resolution="Side" then
-                                    match sideGroupsByFamily |> Map.tryFind(struct(context.stopId,context.movementFamilyId)) with
-                                    | Some group ->
-                                        "Side",Some(replaySideLocationId context.stopId group.sideGroupId),
-                                        Some group.representativeHypothesisId,Some group.sideGroupId
-                                    | None -> "Centroid",None,None,None
-                                else "Centroid",None,None,None
+                                        "Physical",Some(replayPhysicalLocationId context.stopId candidate),Some candidate
+                                    | None -> "Centroid",None,None
+                                else "Centroid",None,None
                             let assignment:JdfPostInference.ContextPostAssignment = {
                                 contextId=context.contextId
                                 stopId=context.stopId;mode=context.mode;lineId=context.lineId
@@ -155,7 +131,7 @@ let evaluateWithScorer includeDiagnostics
                                 sameStopBlockId=context.sameStopBlockId;sameStopBlockRole=context.role
                                 movementFamilyId=context.movementFamilyId;resolution=resolution
                                 selectedLocationId=locationId;selectedHypothesisId=hypothesisId
-                                selectedSideGroupId=sideGroupId;score=decision.score;margin=decision.margin }
+                                score=decision.score;margin=decision.margin }
                             yield assignment
                         stopRows.Clear()
                         contextRows.Clear()
@@ -175,7 +151,6 @@ let evaluateWithScorer includeDiagnostics
     let decisions=decisions.ToArray()
     let decisionsByFamily =
         decisions |> Array.map(fun value -> struct(value.stopId,value.movementFamilyId),value) |> Map.ofArray
-    let sideGroups=sideGroups.ToArray() |> Array.sortBy(fun value -> value.stopId,value.mode,value.sideGroupId)
     try
         let publishedPhysical =
             assignments.ReadRows()
@@ -323,12 +298,9 @@ let evaluateWithScorer includeDiagnostics
         let unresolved=assignments.ReadRows() |> Seq.filter(fun value -> value.assignmentKind="unlabelled" && value.selectedLocationId.IsNone) |> Seq.length
         let counters:JdfPostInference.PostInferenceCounters = {
             contextCount=int assignments.Count;candidateStopCount=routePointsByStop.Count
-            unresolvedContexts=unresolved;authoredPositions=authoredPositions.Length
-            sameStopBlocks=policyCounters.sameStopBlocks
-            distinctPairChoices=policyCounters.distinctPairChoices
-            unresolvedBlockEdges=policyCounters.unresolvedBlockEdges }
+            unresolvedContexts=unresolved;authoredPositions=authoredPositions.Length }
         new JdfPostInference.PostInferenceResult(
-            hypotheses,sideGroups,assignments,authoredPositions,diagnostics,counters)
+            hypotheses,assignments,authoredPositions,diagnostics,counters)
     with _ ->
         assignments.Dispose()
         reraise()

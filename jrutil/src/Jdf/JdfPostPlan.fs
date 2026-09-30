@@ -25,14 +25,12 @@ open JrUtil.JdfGtfsRules
 
 type PostResolution =
     | Physical of candidateId: string
-    | Side of sideGroupId: string * representativeCandidateId: string
     | Centroid
 
 type DerivedPostSelection = {
     locationId: string
     stopId: int64
     candidateIds: string array
-    sideGroupId: string option
     representativeCandidateId: string option
     resolution: PostResolution
     lat: decimal
@@ -40,18 +38,6 @@ type DerivedPostSelection = {
     selectionKind: string
     score: float
     margin: float option
-}
-
-type PostSideGroup = {
-    sideGroupId: string
-    stopId: int64
-    mode: JdfModel.TransportMode
-    corridorFaceId: string
-    sector: string
-    representativeCandidateId: string
-    memberCandidateIds: string array
-    compactnessMetres: float
-    repeatedPatternSupport: int
 }
 
 type DerivedPostContext = {
@@ -70,19 +56,6 @@ type PostPatternContextKey = {
     patternHash: string
     position: int
     sameStopBlockRole: string
-}
-
-type CandidateModalityEstimate = {
-    candidateId: string
-    supportedModes: string array
-    explicitlyDeniedModes: string array
-    status: string
-    roadSupport: int
-    trolleybusSupport: int
-    tramSupport: int
-    distinctSupportingPatterns: int
-    evidenceMethod: string
-    confidence: float
 }
 
 type PhysicalPostHypothesis = {
@@ -106,16 +79,9 @@ type PostEstimationPlan = {
     inferredLocations: DerivedPostSelection array
     inferredLocationOrdinals: Map<int64 * string, int>
     physicalHypotheses: PhysicalPostHypothesis array
-    modalityEstimates: CandidateModalityEstimate array
-    sideGroups: PostSideGroup array
     unresolvedPatternContexts: PostPatternContextKey array
-    tripPatternHashes: IReadOnlyDictionary<struct (string * int * int64), string>
     candidateStopCount: int
-    singleCandidateSkips: int
     unresolvedContexts: int
-    sameStopBlocks: int
-    distinctPairChoices: int
-    unresolvedBlockEdges: int
 }
 
 let internal emptyPostEstimationPlan = {
@@ -128,13 +94,9 @@ let internal emptyPostEstimationPlan = {
     inferredLocations = [||]
     inferredLocationOrdinals = Map.empty
     physicalHypotheses = [||]
-    modalityEstimates = [||]
-    sideGroups = [||]
     unresolvedPatternContexts = [||]
-    tripPatternHashes = Dictionary<struct (string * int * int64), string>()
-    candidateStopCount = 0; singleCandidateSkips = 0
-    unresolvedContexts = 0; sameStopBlocks = 0; distinctPairChoices = 0
-    unresolvedBlockEdges = 0
+    candidateStopCount = 0
+    unresolvedContexts = 0
 }
 
 /// Adapts the inference-domain result to the converter's publishing plan.
@@ -149,10 +111,6 @@ let postEstimationPlanFromInferenceResult
             result.Hypotheses
             |> Array.map(fun value -> value.hypothesisId,value)
             |> Map.ofArray
-        let sideGroupsById =
-            result.SideGroups
-            |> Array.map(fun value -> value.sideGroupId,value)
-            |> Map.ofArray
         let physicalHypotheses =
             result.Hypotheses
             |> Array.map(fun value ->
@@ -164,43 +122,18 @@ let postEstimationPlanFromInferenceResult
                    lat=decimal value.latitude
                    lon=decimal value.longitude
                    sources=[||] } : PhysicalPostHypothesis))
-        let sideGroups =
-            result.SideGroups
-            |> Array.map(fun value ->
-                ({ sideGroupId=value.sideGroupId
-                   stopId=value.stopId
-                   mode=parseTransportMode "inference result mode" value.mode
-                   corridorFaceId=value.corridorFaceId
-                   sector=value.sector
-                   representativeCandidateId=value.representativeHypothesisId
-                   memberCandidateIds=value.memberHypothesisIds
-                   compactnessMetres=value.compactnessMetres
-                   repeatedPatternSupport=value.support } : PostSideGroup))
         let selectionFor (assignment:JdfPostInference.ContextPostAssignment) =
             match assignment.selectedLocationId,assignment.selectedHypothesisId with
             | Some locationId,Some hypothesisId ->
-                match assignment.selectedSideGroupId with
-                | Some groupId ->
-                    let group=sideGroupsById.[groupId]
-                    Some ({ locationId=locationId;stopId=assignment.stopId
-                            candidateIds=[|group.representativeHypothesisId|]
-                            sideGroupId=Some groupId
-                            representativeCandidateId=Some group.representativeHypothesisId
-                            resolution=Side(groupId,group.representativeHypothesisId)
-                            lat=decimal group.latitude;lon=decimal group.longitude
-                            selectionKind="side"
-                            score=assignment.score |> Option.defaultValue 0.0
-                            margin=assignment.margin } : DerivedPostSelection)
-                | None ->
-                    let hypothesis=hypothesesById.[hypothesisId]
-                    Some ({ locationId=locationId;stopId=assignment.stopId
-                            candidateIds=[|hypothesisId|];sideGroupId=None
-                            representativeCandidateId=Some hypothesisId
-                            resolution=Physical hypothesisId
-                            lat=decimal hypothesis.latitude;lon=decimal hypothesis.longitude
-                            selectionKind="physical"
-                            score=assignment.score |> Option.defaultValue 0.0
-                            margin=assignment.margin } : DerivedPostSelection)
+                let hypothesis=hypothesesById.[hypothesisId]
+                Some ({ locationId=locationId;stopId=assignment.stopId
+                        candidateIds=[|hypothesisId|]
+                        representativeCandidateId=Some hypothesisId
+                        resolution=Physical hypothesisId
+                        lat=decimal hypothesis.latitude;lon=decimal hypothesis.longitude
+                        selectionKind="physical"
+                        score=assignment.score |> Option.defaultValue 0.0
+                        margin=assignment.margin } : DerivedPostSelection)
             | _ -> None
         let calls=Dictionary<PostPatternContextKey,DerivedPostSelection>()
         let callContexts=Dictionary<PostPatternContextKey,DerivedPostContext>()
@@ -268,15 +201,10 @@ let postEstimationPlanFromInferenceResult
           callContexts=callContexts;movementFamilyIds=movementFamilyIds
           locations=inferredLocations;inferredLocations=inferredLocations
           inferredLocationOrdinals=inferredLocationOrdinals
-          physicalHypotheses=physicalHypotheses;modalityEstimates=[||]
-          sideGroups=sideGroups
+          physicalHypotheses=physicalHypotheses
           unresolvedPatternContexts=unresolved.ToArray()
-          tripPatternHashes=Dictionary<struct(string*int*int64),string>()
-          candidateStopCount=result.Counters.candidateStopCount;singleCandidateSkips=0
-          unresolvedContexts=result.Counters.unresolvedContexts
-          sameStopBlocks=result.Counters.sameStopBlocks
-          distinctPairChoices=result.Counters.distinctPairChoices
-          unresolvedBlockEdges=result.Counters.unresolvedBlockEdges }
+          candidateStopCount=result.Counters.candidateStopCount
+          unresolvedContexts=result.Counters.unresolvedContexts }
     finally
         (result :> IDisposable).Dispose()
 

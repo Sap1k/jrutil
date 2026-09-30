@@ -447,15 +447,15 @@ both. Validation covers exact Arrow types/nullability and
 metadata, canonical ordering, key/foreign-key integrity, context/block/family
 identity, corridor ranks and costs, unavailable sentinels, finite numeric facts,
 and complete route-point attachment coverage. Policy v2 owns consolidation, hard gates, geometry,
-support, consensus, alternatives, side groups, authored resolution, and
-same-stop thresholds. A policy
+support, consensus, alternatives and authored resolution. The heuristic
+publishes one physical candidate or the parent centroid. A policy
 may request at most the captured routed-excess horizon (currently 1,000 m;
 the default publication gate remains 500 m).
 
 The sole production decision boundary is a validated `PostEvidenceStore` plus a
 `PostInferencePolicyV2`, returning a complete disposable
 `PostInferenceResult`. The result owns replayable assignment and diagnostic-row
-stores, while its hypotheses, side groups, authored positions, and counters are
+stores, while its hypotheses, authored positions, and counters are
 complete policy outputs. `JdfToGtfs` only adapts that result to the conversion
 plan; capture and bundle orchestration do not contain a second evaluator.
 
@@ -468,7 +468,7 @@ It replaces the per-family decision for unlabelled contexts:
 - `Area` publishes the most probable post of a confident 40 m area;
 - abstention publishes the centroid.
 
-Consolidation, hard gates, authored and same-stop resolution still come from
+Consolidation, hard gates and authored resolution still come from
 the embedded v2 policy. The bundle manifest records the scorer and the
 document's SHA-256. `JdfPostScorerTests` pins F#/Python parity on a golden
 fixture (`TestData/post-scorer-golden.json`, from `python -m

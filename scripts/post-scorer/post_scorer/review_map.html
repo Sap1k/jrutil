@@ -17,7 +17,7 @@ tr.row{cursor:pointer}tr.done td:first-child{box-shadow:inset 3px 0 #2a8a3a}butt
 <div id="side">
 <b>__TITLE__</b>
 <div class="legend"><span style="background:#139c8c"></span>bay<span style="background:#e08a2c"></span>other post
-<span style="border:3px solid #1d5fd1;width:6px;height:6px"></span>model<span style="border:3px dashed #c0392b;width:6px;height:6px"></span>current policy (Side: thin rings = rest of group)</div>
+<span style="border:3px solid #1d5fd1;width:6px;height:6px"></span>model<span style="border:3px dashed #c0392b;width:6px;height:6px"></span>current policy</div>
 <input id="q" placeholder="Filter stops (name)">
 <select id="f"><option value="all">All stops</option><option value="dis">Model ≠ policy only</option></select>
 <div id="stops" style="max-height:30vh;overflow:auto;border:1px solid #ddd"></div>
@@ -80,7 +80,7 @@ function show(s){
     return `<tr class="row${done?' done':''}${selected===k?' hi':''}" data-k="${k}"><td>${m.line}/${m.dir}${m.role!=='through'?' '+m.role:''}${done?'<br><span class="same">'+(done.verdict==='none'?'∅':'#'+done.candidate_index)+'</span>':''}</td>
       <td class="dim">${m.from??'∅'} → ${m.to??'∅'}</td>
       <td class="m">${m.published?label(s,m.model):'<span class="dim">abstain</span>'}<br><span class="dim">${m.model_resolution==='Area'?'area ':''}p=${m.p}</span></td>
-      <td class="${same&&m.published?'same':'b'}">${m.baseline!=null?label(s,m.baseline):'–'}<br><span class="dim">${m.resolution||'–'}${m.resolution==='Side'?' · group of '+m.group.length:''}</span></td>
+      <td class="${same&&m.published?'same':'b'}">${m.baseline!=null?label(s,m.baseline):'–'}<br><span class="dim">${m.resolution||'–'}</span></td>
       <td class="dim">${m.n}<br><button class="v" data-ok="${k}" title="model right"${m.published?'':' disabled'}>✓</button><button class="v" data-none="${k}" title="no correct post">∅</button></td></tr>`;}).join('');
   document.getElementById('detail').innerHTML=`<h3 style="margin:8px 0 2px">${s.name}</h3>
    <div class="dim">stop ${s.id} · ${s.candidates.length} candidate posts · ${s.candidates.filter(c=>c.bay).length} bays</div>
@@ -91,8 +91,6 @@ function show(s){
     document.querySelectorAll('tr.hi').forEach(x=>x.classList.remove('hi'));tr.classList.add('hi');
     const m=s.movements[+tr.dataset.k];ring.clearLayers();
     if(m.published&&m.model!=null){const c=s.candidates[m.model];L.circleMarker([c.lat,c.lon],{radius:13,color:'#1d5fd1',weight:4,fill:false}).addTo(ring);}
-    // Side: the published coordinate is the group's representative post; outline the rest of the group.
-    (m.group||[]).forEach(i=>{if(i!==m.baseline){const c=s.candidates[i];L.circleMarker([c.lat,c.lon],{radius:11,color:'#c0392b',weight:1.5,fill:false}).addTo(ring);}});
     if(m.baseline!=null){const c=s.candidates[m.baseline];L.circleMarker([c.lat,c.lon],{radius:18,color:'#c0392b',weight:3,dashArray:'4 4',fill:false}).addTo(ring);}
   });
 }

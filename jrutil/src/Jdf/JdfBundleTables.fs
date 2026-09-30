@@ -480,22 +480,16 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                 |> String.concat ";"
             let representative = location.representativeCandidateId
             let diagnosticLabel =
-                match location.sideGroupId with
-                | Some groupId ->
-                    postPlan.sideGroups |> Array.tryFind (fun value -> value.sideGroupId = groupId)
-                    |> Option.map (fun value -> $"O-{value.sector}")
-                | None ->
-                    representative
-                    |> Option.bind (fun candidateId ->
-                        candidates |> Array.sortBy (fun value -> value.hypothesisId)
-                        |> Array.tryFindIndex (fun value -> value.hypothesisId = candidateId))
-                    |> Option.map (fun index -> $"O{index + 1}")
+                representative
+                |> Option.bind (fun candidateId ->
+                    candidates |> Array.sortBy (fun value -> value.hypothesisId)
+                    |> Array.tryFindIndex (fun value -> value.hypothesisId = candidateId))
+                |> Option.map (fun index -> $"O{index + 1}")
             row [
                 "derived_location_id", box location.locationId
                 "gtfs_stop_place_id", box (JdfGtfsRules.jdfStopId location.stopId)
                 "selection_kind", box location.selectionKind
                 "physical_candidate_id", if location.selectionKind = "physical" then representative |> nullableObj else null
-                "side_group_id", location.sideGroupId |> nullableObj
                 "representative_candidate_id", representative |> nullableObj
                 "diagnostic_label", diagnosticLabel |> nullableObj
                 "latitude", box (float location.lat)
@@ -640,7 +634,6 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                 reportAssignmentProgress ()
                 value)
         Seq.concat [ authored; internalAssignments (); internalCentroidAssignments () ]
-    let modalityByCandidate = postPlan.modalityEstimates |> Array.map (fun value -> value.candidateId, value) |> Map
     let hypothesisByCandidate =
         postPlan.physicalHypotheses
         |> Seq.collect (fun hypothesis ->
@@ -651,7 +644,6 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
         |> Array.sortBy (fun value -> value.stopId, value.candidateId, value.observationId)
         |> Array.map (fun evidence ->
             let hypothesisId=hypothesisByCandidate |> Map.tryFind evidence.candidateId
-            let estimate=hypothesisId |> Option.bind (fun value -> modalityByCandidate |> Map.tryFind value)
             row [
                 "gtfs_stop_place_id", box (JdfGtfsRules.jdfStopId evidence.stopId)
                 "candidate_id", box evidence.candidateId; "observation_id", box evidence.observationId
@@ -661,11 +653,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                 "latitude", box (float evidence.lat); "longitude", box (float evidence.lon)
                 "support_weight", box (float evidence.supportWeight); "raw_tags", box evidence.rawTags
                 "explicit_modes", box evidence.explicitModes; "denied_modes", box evidence.deniedModes
-                "lifecycle", box evidence.lifecycle
-                "modality_status", estimate |> Option.map (fun value -> value.status) |> nullableObj
-                "supported_modes", estimate |> Option.map (fun value -> String.Join(";", value.supportedModes)) |> nullableObj
-                "distinct_supporting_patterns", estimate |> Option.map (fun value -> value.distinctSupportingPatterns) |> nullableObj
-                "modality_confidence", estimate |> Option.map (fun value -> value.confidence) |> nullableObj ])
+                "lifecycle", box evidence.lifecycle ])
     let physicalHypothesisRows () =
         postPlan.physicalHypotheses
         |> Array.map (fun hypothesis -> row [
@@ -676,17 +664,6 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
             "representative_candidate_id",box hypothesis.representativeCandidateId
             "latitude",box(float hypothesis.lat); "longitude",box(float hypothesis.lon)
             "sources",box(String.Join(";",hypothesis.sources)) ])
-    let sideGroupRows () =
-        postPlan.sideGroups
-        |> Array.map (fun group -> row [
-            "gtfs_stop_place_id", box (JdfGtfsRules.jdfStopId group.stopId)
-            "side_group_id", box group.sideGroupId; "mode", box(string group.mode)
-            "corridor_face_id", box group.corridorFaceId
-            "sector", box group.sector
-            "representative_candidate_id", box group.representativeCandidateId
-            "member_candidate_ids", box (String.Join(";", group.memberCandidateIds))
-            "compactness_metres", box group.compactnessMetres
-            "repeated_pattern_support", box group.repeatedPatternSupport ])
     let stringField name nullable = field<string> name nullable
     let intField name nullable = field<int> name nullable
     let int64Field name nullable = field<int64> name nullable
@@ -727,7 +704,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
         "derived_post_locations.parquet", producer [|
             stringField "derived_location_id" false; stringField "gtfs_stop_place_id" false
             stringField "selection_kind" false; stringField "physical_candidate_id" true
-            stringField "side_group_id" true; stringField "representative_candidate_id" true
+            stringField "representative_candidate_id" true
             stringField "diagnostic_label" true; doubleField "latitude" false
             doubleField "longitude" false; stringField "candidate_ids" false
             stringField "provenance" false |] derivedPostLocations
@@ -739,20 +716,12 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
             doubleField "latitude" false; doubleField "longitude" false
             doubleField "support_weight" false; stringField "raw_tags" false
             stringField "explicit_modes" false; stringField "denied_modes" false
-            stringField "lifecycle" false; stringField "modality_status" true
-            stringField "supported_modes" true; intField "distinct_supporting_patterns" true
-            doubleField "modality_confidence" true |] candidateEvidenceRows
+            stringField "lifecycle" false |] candidateEvidenceRows
         "post_physical_hypotheses.parquet", producer [|
             stringField "gtfs_stop_place_id" false; stringField "hypothesis_id" false
             stringField "member_observation_ids" false; stringField "member_legacy_candidate_ids" false
             stringField "representative_candidate_id" false; doubleField "latitude" false
             doubleField "longitude" false; stringField "sources" false |] physicalHypothesisRows
-        "post_side_groups.parquet", producer [|
-            stringField "gtfs_stop_place_id" false; stringField "side_group_id" false
-            stringField "mode" false; stringField "corridor_face_id" false; stringField "sector" false
-            stringField "representative_candidate_id" false
-            stringField "member_candidate_ids" false; doubleField "compactness_metres" false
-            intField "repeated_pattern_support" false |] sideGroupRows
     |], assignmentTotal, derivedPostAssignments, notices, tripFeatures
 
 let internal writeParquet descriptor path table =
