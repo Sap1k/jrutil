@@ -139,7 +139,7 @@ function Get-StageArguments([string] $Stage, [string] $Target) {
         "merge-posts" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=2026-09-16") + $common + @($Target, "$out/fix-posts") }
         "bundle" { Get-BundleArguments $Target "merge" @("--no-estimated-posts") }
         "bundle-posts" { Get-BundleArguments $Target "merge-posts" @("--routing-osm-pbf=$routingPbf") }
-        "overlay" { @("regional-gtfs-overlay", "--policy=$config/pid-ids-jmk-production-v1.json", "--gvd-year=2026",
+        "overlay" { @("regional-gtfs-overlay", "--policy=$config/pid-ids-jmk-production-v1.json", "--gvd-year=2026", "--converter-version=golden",
                       "--source=pid-gtfs=$overlayInputs/pid-gtfs.zip", "--source-descriptor=pid-gtfs=$overlayInputs/pid-gtfs-descriptor.json",
                       "--source=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs.zip", "--source-descriptor=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs-descriptor.json",
                       "--diagnostics-out=$Target-diagnostics") + $common + @("$out/bundle", $Target) }

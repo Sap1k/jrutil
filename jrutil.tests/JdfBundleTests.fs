@@ -263,9 +263,9 @@ type JdfBundleTests() =
             descriptor descriptorPath "directory-tree" sha bytes
             let first = Path.Combine(root, "first")
             let second = Path.Combine(root, "second")
-            JdfBundle.writeBundle descriptorPath "test-commit" false fixturePath first
-            JdfBundle.writeBundleWithPolicyAndMemory true descriptorPath "test-commit" false
-                JdfToGtfs.KeepAll [||] fixturePath second
+            JdfBundle.writeBundle descriptorPath "test-commit" fixturePath first
+            JdfBundle.writeBundleWithPolicyAndMemory true descriptorPath "test-commit"
+                JdfToGtfs.KeepAll fixturePath second
 
             JrUtil.Serving.Validation.validatePackage first |> ignore
             JrUtil.Serving.Validation.validatePackage second |> ignore
@@ -329,7 +329,7 @@ type JdfBundleTests() =
             let descriptorPath = Path.Combine(root, "snapshot.json")
             descriptor descriptorPath "directory-tree" sha bytes
             let output = Path.Combine(root, "bundle")
-            JdfBundle.writeBundle descriptorPath "test-commit" false input output
+            JdfBundle.writeBundle descriptorPath "test-commit" input output
 
             let bindings =
                 JrUtil.Serving.PackageReader.readTextRows
@@ -373,7 +373,7 @@ type JdfBundleTests() =
             let output = Path.Combine(root, "invalid")
             descriptor descriptorPath "directory-tree" (String.replicate 64 "0") 0L
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.writeBundle descriptorPath "test-commit" false fixturePath output)
+                JdfBundle.writeBundle descriptorPath "test-commit" fixturePath output)
             |> ignore
             assertEqual false (Directory.Exists(output))
 
@@ -386,7 +386,7 @@ type JdfBundleTests() =
                 |> fun value -> value.ToLowerInvariant()
             descriptor descriptorPath "zip" zipSha (FileInfo(zipPath).Length)
             let zipOutput = Path.Combine(root, "zip")
-            JdfBundle.writeBundle descriptorPath "test-commit" true zipPath zipOutput
+            JdfBundle.writeBundle descriptorPath "test-commit" zipPath zipOutput
             assertEqual true (File.Exists(Path.Combine(zipOutput, "manifest.json")))
 
             let unsafeZip = Path.Combine(root, "unsafe.zip")
@@ -401,7 +401,7 @@ type JdfBundleTests() =
             descriptor descriptorPath "zip" unsafeSha (FileInfo(unsafeZip).Length)
             let unsafeOutput = Path.Combine(root, "unsafe")
             Assert.ThrowsExactly<ArgumentException>(fun () ->
-                JdfBundle.writeBundle descriptorPath "test-commit" false unsafeZip unsafeOutput)
+                JdfBundle.writeBundle descriptorPath "test-commit" unsafeZip unsafeOutput)
             |> ignore
             assertEqual false (Directory.Exists(unsafeOutput))
         finally
@@ -420,8 +420,8 @@ type JdfBundleTests() =
             let error =
                 Assert.ThrowsExactly<ArgumentException>(fun () ->
                     JdfBundle.writeBundleWithRoutedPostInference
-                        descriptorPath "test-commit" false
-                        JdfToGtfs.KeepAll [||] JdfToGtfs.emptyTransportModeRules
+                        descriptorPath "test-commit"
+                        JdfToGtfs.KeepAll JdfToGtfs.emptyTransportModeRules
                         true (Some missingRoutingPbf) false fixturePath output)
             StringAssert.Contains(error.Message, "JrutilPostCandidateEvidence.txt")
             assertEqual false (Directory.Exists(output))
@@ -446,7 +446,7 @@ type JdfBundleTests() =
                             reviewStopsPath=Some reviewStops
                             diagnosticsOutput=Some diagnostics}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 options input output |> ignore
             JrUtil.Serving.Validation.validatePackage output |> ignore
@@ -474,7 +474,7 @@ type JdfBundleTests() =
                             capturePostInferenceEvidencePath=Some evidence
                             progress=fun value -> phases.Add(value.phase)}
             let result=JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                           descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                           descriptorPath "test-tool" JdfToGtfs.KeepAll
                            JdfToGtfs.emptyTransportModeRules true (Some routing) false
                            options input (Path.Combine(root,"must-not-be-created"))
             match result with
@@ -633,7 +633,7 @@ type JdfBundleTests() =
                             capturePostInferenceEvidencePath=Some evidence
                             exportPostContextCallsPath=Some export}
             match JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                      descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                      descriptorPath "test-tool" JdfToGtfs.KeepAll
                       JdfToGtfs.emptyTransportModeRules true (Some routing) false
                       options input (Path.Combine(root,"unused")) with
             | JdfBundle.CaptureCompleted(manifest,_) ->
@@ -652,7 +652,7 @@ type JdfBundleTests() =
                                   exportPostContextCallsPath=Some(Path.Combine(root,"other.parquet"))}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                    descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                    descriptorPath "test-tool" JdfToGtfs.KeepAll
                     JdfToGtfs.emptyTransportModeRules true (Some routing) false
                     bundleOptions input (Path.Combine(root,"live")) |> ignore) |> ignore
         finally
@@ -669,7 +669,7 @@ type JdfBundleTests() =
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 options input (Path.Combine(root,"unused")) |> ignore
             let output=Path.Combine(root,"features")
@@ -771,7 +771,7 @@ type JdfBundleTests() =
                                 capturePostInferenceEvidencePath=Some evidence
                                 captureRestriction=region}
                 match JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                          descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                          descriptorPath "test-tool" JdfToGtfs.KeepAll
                           JdfToGtfs.emptyTransportModeRules true (Some routing) false
                           options input (Path.Combine(root,name+"-unused")) with
                 | JdfBundle.CaptureCompleted(manifest,_) -> evidence,manifest
@@ -794,7 +794,7 @@ type JdfBundleTests() =
                                       postInferenceEvidencePath=Some evidence}
                 let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                     JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                        descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                        descriptorPath "test-tool" JdfToGtfs.KeepAll
                         JdfToGtfs.emptyTransportModeRules true None false
                         replayOptions input (Path.Combine(root,"bundle")) |> ignore)
                 StringAssert.Contains(error.Message,"Restricted post-inference evidence")
@@ -803,7 +803,7 @@ type JdfBundleTests() =
                                 captureRestriction=region}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                    descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                    descriptorPath "test-tool" JdfToGtfs.KeepAll
                     JdfToGtfs.emptyTransportModeRules true (Some routing) false
                     liveOptions input (Path.Combine(root,"live")) |> ignore) |> ignore
         finally
@@ -897,7 +897,7 @@ type JdfBundleTests() =
                             capturePostInferenceEvidencePath=Some collision}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                    descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                    descriptorPath "test-tool" JdfToGtfs.KeepAll
                     JdfToGtfs.emptyTransportModeRules true (Some routing) false
                     options input (Path.Combine(root,"unused")) |> ignore)
             |> ignore
@@ -938,7 +938,7 @@ type JdfBundleTests() =
                     preflight=ignore
                     progress=fun _ _ _ _ -> () }
                 use captured=JdfPostEvidence.captureToStore captureOptions graph value
-                JdfBundle.writePostEvidenceStore snapshot "test-tool" false
+                JdfBundle.writePostEvidenceStore snapshot "test-tool"
                     (Path.Combine(root,name)) routing captured (fun _ _ _ -> ())
             let baseline=Path.Combine(root,"one-worker-memory")
             let relativeFiles=Array.append JdfPostInference.RequiredEvidenceFiles [|"manifest.json"|]
@@ -971,7 +971,7 @@ type JdfBundleTests() =
                                     postInferenceEvidenceOnly=true
                                     capturePostInferenceEvidencePath=Some evidence}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 captureOptions input (Path.Combine(root,"capture-unused")) |> ignore
             use store=JdfPostEvidenceStore.openValidatedStore
@@ -1025,14 +1025,14 @@ type JdfBundleTests() =
             let liveOptions={JdfBundle.defaultBundleExecutionOptions with
                                 maximumWorkers=3;memoryBudgetBytes=1L}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 liveOptions input liveOutput |> ignore
             let replayOptions={JdfBundle.defaultBundleExecutionOptions with
                                   memoryBudgetBytes=1L
                                   postInferenceEvidencePath=Some evidence}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true None false
                 replayOptions input replayOutput |> ignore
             JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
@@ -1075,7 +1075,7 @@ type JdfBundleTests() =
             Assert.IsTrue(match loaded.scorer with JdfPostInferencePolicy.LearnedScorer _ -> true | _ -> false)
             let evidence=Path.Combine(root,"evidence")
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 {JdfBundle.defaultBundleExecutionOptions with
                     maximumWorkers=3;memoryBudgetBytes=1L;postInferenceEvidenceOnly=true
@@ -1084,13 +1084,13 @@ type JdfBundleTests() =
             let liveOutput=Path.Combine(root,"live")
             let replayOutput=Path.Combine(root,"replay")
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 {JdfBundle.defaultBundleExecutionOptions with
                     maximumWorkers=3;memoryBudgetBytes=1L;postInferencePolicyPath=Some policyPath}
                 input liveOutput |> ignore
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true None false
                 {JdfBundle.defaultBundleExecutionOptions with
                     memoryBudgetBytes=1L;postInferenceEvidencePath=Some evidence
@@ -1128,7 +1128,7 @@ type JdfBundleTests() =
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 options input (Path.Combine(root,"unused")) |> ignore
             rewriteEvidenceRelation (Path.Combine(evidence,"contexts.parquet"))
@@ -1156,7 +1156,7 @@ type JdfBundleTests() =
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some baseline}
             JdfBundle.executeBundleWithRoutedPostInferenceOptions
-                descriptorPath "test-tool" false JdfToGtfs.KeepAll [||]
+                descriptorPath "test-tool" JdfToGtfs.KeepAll
                 JdfToGtfs.emptyTransportModeRules true (Some routing) false
                 options input (Path.Combine(root,"unused")) |> ignore
 
@@ -1255,7 +1255,7 @@ type JdfBundleTests() =
             let options={ JdfBundle.defaultBundleExecutionOptions with postInferenceEvidencePath=Some evidencePath }
             let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                 JdfBundle.writeBundleWithRoutedPostInferenceOptions
-                    descriptorPath "test-commit" false JdfToGtfs.KeepAll [||]
+                    descriptorPath "test-commit" JdfToGtfs.KeepAll
                     JdfToGtfs.emptyTransportModeRules true None false options fixturePath
                     (Path.Combine(root,"bundle")))
             StringAssert.Contains(error.Message,"different merged JDF")

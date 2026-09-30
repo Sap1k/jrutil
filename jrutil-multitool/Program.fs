@@ -21,7 +21,7 @@ Usage:
     jrutil-multitool.exe jdf-to-bundle [options] [--gvd-year=YEAR] --snapshot-descriptor=FILE --converter-version=VALUE <JDF-input> <bundle-out-dir>
     jrutil-multitool.exe jdf-export-post-features [options] [--policy=FILE] --evidence=DIR --output=DIR
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
-    jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
+    jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR --converter-version=VALUE (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
     jrutil-multitool.exe validate-package <package-dir>
     jrutil-multitool.exe compare-packages (--byte-identical | --semantic) [--expect=FILE] <left-package> <right-package>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
@@ -326,7 +326,6 @@ let main (args: string array) =
             optArgValue args "--international-route-policy"
             |> Option.defaultValue "keep-all"
             |> JdfToGtfs.parseInternationalRoutePolicy
-        let internationalRouteOverrides: JdfToGtfs.InternationalRouteOverride array = [||]
         let transportModeRules =
             optArgValue args "--transport-mode-rules"
             |> Option.map JdfToGtfs.loadTransportModeRules
@@ -357,6 +356,7 @@ let main (args: string array) =
                         bindings = sourceBindings
                         baseBundle = baseBundle
                         outputBundle = argValue args "<overlay-bundle-out>"
+                        converterVersion = argValue args "--converter-version"
                         diagnosticsOutput = optArgValue args "--diagnostics-out"
                         diagnosticTraces = argFlagSet args "--diagnostic-traces" }
                 Log.Information(
@@ -450,9 +450,7 @@ let main (args: string array) =
                     JdfBundle.executeBundleWithRoutedPostInferenceOptions
                         (argValue args "--snapshot-descriptor")
                         (argValue args "--converter-version")
-                        false
                         internationalRoutePolicy
-                        internationalRouteOverrides
                         transportModeRules
                         routedPostInference
                         routingPbf
@@ -502,7 +500,7 @@ let main (args: string array) =
                     | value -> invalidArg "--operational-points" $"Expected gtfs or sidecar, got {value}"
                 let options: CzPttPackage.Options = {
                     catalog = CzPttToGtfs.loadCatalogSnapshot (argValue args "--catalog-snapshot")
-                    conversion = { operationalPointMode = operationalPointMode; blockMode = CzPttToGtfs.Blocks }
+                    conversion = { operationalPointMode = operationalPointMode }
                     sr70Path = sr70Path
                     sr70Name20Path = sr70Name20Path
                     osmPath = osmPath
@@ -584,13 +582,9 @@ let main (args: string array) =
                 Log.Information("Processing JDF batch {BatchPath}", batchPath)
                 try
                     let batch = Jdf.parseJdfBatchPath jdfPar batchPath
-                    let routeKeys =
-                        batch.routes
-                        |> Seq.map (fun route -> route.id, route.idDistinction)
-                        |> Set
                     let routeFilter =
                         JdfToGtfs.applyInternationalRoutePolicy
-                            internationalRoutePolicy internationalRouteOverrides batch
+                            internationalRoutePolicy batch
                     let inferredBatch =
                         match JdfFixups.dropDegenerateBatch batch with
                         | Some emptyBatch ->
@@ -645,24 +639,20 @@ let main (args: string array) =
                         Directory.CreateDirectory(fixedOutDir) |> ignore
                         jdfWri (Jdf.FsPath fixedOutDir) batchWithLocations
                     Log.Information("Completed JDF batch {BatchPath}", batchPath)
-                    Ok (batchPath, routeKeys, routeFilter.decisions)
+                    Ok (batchPath, routeFilter.decisions)
                 with error ->
                     Error (batchPath, error))
-            let mutable internationalRouteKeys = Set.empty
             let internationalRouteDecisions = ResizeArray<_>()
             for result in results do
                 match result with
-                | Ok (batchPath, routeKeys, decisions) ->
+                | Ok (batchPath, decisions) ->
                     batchEvent "batch_completed" "fix-jdf" batchPath None
-                    internationalRouteKeys <- Set.union internationalRouteKeys routeKeys
                     internationalRouteDecisions.AddRange(decisions)
                 | Error (batchPath, error) ->
                     batchEvent "batch_failed" "fix-jdf" batchPath (Some error)
                     raise error
             phase "fix-jdf" "process-batches" "completed"
             resourceUsage "fix-jdf" "process-batches" 0L
-            JdfToGtfs.validateInternationalRouteOverrides
-                internationalRouteKeys internationalRouteOverrides
             JdfFixups.logMatchDiagnostics ()
             JdfToGtfs.logInternationalRouteDecisions
                 internationalRoutePolicy (internationalRouteDecisions.ToArray())

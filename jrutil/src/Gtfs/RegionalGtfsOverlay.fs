@@ -45,6 +45,7 @@ let private executeSingle (options: CompilationOptions) (binding: SourceBinding)
         source = source
         matches = matches
         gvdYear = options.gvdYear
+        converterVersion = options.converterVersion
         diagnosticsOutput = options.diagnosticsOutput
         diagnosticTraces = options.diagnosticTraces
     }
@@ -66,7 +67,8 @@ let private executeMultiple (options: CompilationOptions) =
     let projection = Projection.resolve { prepared = prepared; source = source; matches = matches }
     let result = BundleWriter.write {
         prepared = prepared; projection = projection; source = source; matches = matches
-        gvdYear = options.gvdYear; diagnosticsOutput = options.diagnosticsOutput
+        gvdYear = options.gvdYear; converterVersion = options.converterVersion
+        diagnosticsOutput = options.diagnosticsOutput
         diagnosticTraces = options.diagnosticTraces }
     let perSource = Dictionary<string, OverlayResult>(System.StringComparer.Ordinal)
     for sourceId in combined.sourceIds do

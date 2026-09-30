@@ -53,6 +53,7 @@ let run (args: string array) =
             bindings = [| binding |]
             baseBundle = baseline
             outputBundle = output
+            converterVersion = "overlay-profile"
             diagnosticsOutput = None
             diagnosticTraces = false
         } |> printfn "%A"

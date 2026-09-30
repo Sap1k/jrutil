@@ -26,6 +26,7 @@ type Input = {
     source: SourceAnalysis.Result
     matches: TripMatching.Result
     gvdYear: int
+    converterVersion: string
     diagnosticsOutput: string option
     diagnosticTraces: bool
 }
@@ -38,6 +39,7 @@ let private compile ({
     source = source
     matches = matches
     gvdYear = gvdYear
+    converterVersion = converterVersion
     diagnosticsOutput = diagnosticsOutput
     diagnosticTraces = diagnosticTraces
 }: Input) =
@@ -757,7 +759,7 @@ let private compile ({
             manifest.["source"] <- box sourceManifest
             manifest.["policy_sha256"] <- box (sha256File prepared.policyPath)
         manifest.["gvd"] <- box gvd
-        manifest.["jrutil_commit"] <- box (currentCommit ())
+        manifest.["conversion"] <- box (dict [ "tool", box "jrutil"; "version", box converterVersion ])
         manifest.["counts"] <- box counts
 
         let tablesIn directory pattern =

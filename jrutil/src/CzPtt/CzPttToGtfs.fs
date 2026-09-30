@@ -21,13 +21,8 @@ type OperationalPointMode =
     | Gtfs
     | Sidecar
 
-type BlockMode =
-    | Blocks
-    | NoBlocks
-
 type ConversionOptions = {
     operationalPointMode: OperationalPointMode
-    blockMode: BlockMode
 }
 
 type CatalogLine = {
@@ -224,7 +219,7 @@ type private Journey = {
     modeBlockIndex: int
     calls: NormalizedCall array
     parts: Segment array
-    responsibleRus: string array
+    responsibleRu: string
     routeType: string
     alternativeTransport: bool
 }
@@ -891,70 +886,23 @@ let private segments (calls: NormalizedCall array) =
         }
         result.ToArray()
 
-let private routeTypePriority value =
-    match value with
-    | "102" -> 0
-    | "105" -> 1
-    | "103" -> 2
-    | "106" -> 3
-    | _ -> 4
-
-let private journeys blockMode (calls: NormalizedCall array)
-                     (journeySegments: Segment array) =
-    match blockMode with
-    | Blocks ->
-        let mutable modeBlockIndex = 0
-        journeySegments
-        |> Array.mapi (fun index segment ->
-            if index > 0
-               && journeySegments.[index - 1].alternativeTransport
-                    <> segment.alternativeTransport then
-                modeBlockIndex <- modeBlockIndex + 1
-            {
-            index = segment.index
-            modeBlockIndex = modeBlockIndex
-            calls = segment.calls
-            parts = [| segment |]
-            responsibleRus = [| segment.responsibleRu |]
-            routeType = segment.routeType
-            alternativeTransport = segment.alternativeTransport
-        })
-    | NoBlocks when calls.Length > 0 ->
-        let groups = ResizeArray<ResizeArray<Segment>>()
-        for segment in journeySegments do
-            if groups.Count = 0
-               || groups.[groups.Count - 1].[0].alternativeTransport
-                    <> segment.alternativeTransport then
-                groups.Add(ResizeArray())
-            groups.[groups.Count - 1].Add(segment)
-        groups
-        |> Seq.mapi (fun index group ->
-            let parts = group.ToArray()
-            let groupedCalls =
-                parts
-                |> Array.mapi (fun partIndex part ->
-                    if partIndex = 0 then part.calls else part.calls.[1..])
-                |> Array.concat
-            let representative =
-                parts
-                |> Array.mapi (fun partIndex part ->
-                    routeTypePriority part.routeType, partIndex, part)
-                |> Array.minBy (fun (priority, partIndex, _) -> priority, partIndex)
-                |> fun (_, _, part) -> part
-            {
-                index = index
-                modeBlockIndex = index
-                calls = groupedCalls
-                parts = parts
-                responsibleRus =
-                    groupedCalls
-                    |> Seq.map (fun call -> call.responsibleRu)
-                    |> distinctInOrder
-                routeType = representative.routeType
-                alternativeTransport = representative.alternativeTransport
-            })
-        |> Seq.toArray
-    | NoBlocks -> [||]
+let private journeys (journeySegments: Segment array) =
+    let mutable modeBlockIndex = 0
+    journeySegments
+    |> Array.mapi (fun index segment ->
+        if index > 0
+           && journeySegments.[index - 1].alternativeTransport
+                <> segment.alternativeTransport then
+            modeBlockIndex <- modeBlockIndex + 1
+        {
+        index = segment.index
+        modeBlockIndex = modeBlockIndex
+        calls = segment.calls
+        parts = [| segment |]
+        responsibleRu = segment.responsibleRu
+        routeType = segment.routeType
+        alternativeTransport = segment.alternativeTransport
+    })
 
 let private pointIdentity (call: NormalizedCall) =
     call.location.Location.CountryCodeIso,
@@ -1181,25 +1129,17 @@ let private labelsForJourney catalog date message (journey: Journey) =
             })
     |> distinctInOrder
 
-let private routeId blockMode catalog date message (journey: Journey) =
-    let labels = labelsForJourney catalog date message journey
-    match blockMode, journey.parts with
-    | Blocks, [| segment |] ->
-        match segment.lineCode with
-        | Some code when lineForDate catalog date code |> Option.isSome ->
-            $"czptt:route:line:{idComponent code}:" +
-            $"{idComponent segment.responsibleRu}:{idComponent segment.routeType}"
-        | _ ->
-            let number = trainNumberForCalls message segment.calls
-            $"czptt:route:fallback:{idComponent segment.responsibleRu}:" +
-            $"{idComponent segment.category}:{idComponent segment.routeType}:" +
-            $"{idComponent (number |> Option.defaultValue segment.category)}"
+let private routeId catalog date message (journey: Journey) =
+    let segment = journey.parts |> Array.exactlyOne
+    match segment.lineCode with
+    | Some code when lineForDate catalog date code |> Option.isSome ->
+        $"czptt:route:line:{idComponent code}:" +
+        $"{idComponent segment.responsibleRu}:{idComponent segment.routeType}"
     | _ ->
-        let signature =
-            labels |> Array.map (fun label -> label.identity) |> String.concat "/"
-        let operators = journey.responsibleRus |> String.concat "/"
-        $"czptt:route:combined:{idComponent signature}:" +
-        $"{idComponent operators}:{idComponent journey.routeType}"
+        let number = trainNumberForCalls message segment.calls
+        $"czptt:route:fallback:{idComponent segment.responsibleRu}:" +
+        $"{idComponent segment.category}:{idComponent segment.routeType}:" +
+        $"{idComponent (number |> Option.defaultValue segment.category)}"
 
 let private tripId (message: CzPttXml.CzpttcisMessage) (journey: Journey) =
     $"czptt:trip:{idComponent (paId message)}:{journey.index + 1}"
@@ -1282,17 +1222,9 @@ let private routeColor routeType =
     | "105" -> "4c1d95"
     | _ -> "475569"
 
-let private agencyGroupId codes =
-    match codes with
-    | [| code |] -> agencyId code
-    | codes ->
-        let codeKey = codes |> String.concat "/" |> idComponent
-        $"czptt:agency-group:{codeKey}"
+let private journeyAgencyId journey = agencyId journey.responsibleRu
 
-let private journeyAgencyId journey =
-    agencyGroupId journey.responsibleRus
-
-let private route blockMode catalog date message journey =
+let private route catalog date message journey =
     let labels = labelsForJourney catalog date message journey
     let mappedLongName =
         match labels with
@@ -1300,7 +1232,7 @@ let private route blockMode catalog date message journey =
             label.mappedLine |> Option.map (fun line -> line.name.TrimEnd())
         | _ -> None
     {
-        id = routeId blockMode catalog date message journey
+        id = routeId catalog date message journey
         agencyId = Some (journeyAgencyId journey)
         shortName =
             labels
@@ -1317,24 +1249,22 @@ let private route blockMode catalog date message journey =
         sortOrder = None
     }
 
-let private trip pointNames blockMode catalog date message sourceCalls endpoints
+let private trip pointNames catalog date message sourceCalls endpoints
                  separateModeBlocks journey =
     let finalCall = snd endpoints
     let wheelchairAccessible, bikesAllowed, _ =
         projectedTripFeatures message sourceCalls journey
     {
-        routeId = routeId blockMode catalog date message journey
+        routeId = routeId catalog date message journey
         serviceId = serviceId message
         id = tripId message journey
         headsign = Some (pointDisplayName pointNames finalCall)
         shortName = tripShortName message journey
         directionId = None
         blockId =
-            match blockMode with
-            | Blocks when separateModeBlocks ->
-                Some ($"{blockId message}:mode:{journey.modeBlockIndex + 1}")
-            | Blocks -> Some (blockId message)
-            | NoBlocks -> None
+            if separateModeBlocks
+            then Some ($"{blockId message}:mode:{journey.modeBlockIndex + 1}")
+            else Some (blockId message)
         shapeId = None
         wheelchairAccessible = wheelchairAccessible
         bikesAllowed = bikesAllowed
@@ -1651,25 +1581,6 @@ let private agency catalog code =
         email = None
     }
 
-let private compositeAgency catalog (codes: string array) =
-    let names =
-        codes
-        |> Array.map (fun code ->
-            catalog.companies
-            |> Array.tryFind (fun company -> company.code = code)
-            |> Option.map (fun company -> publicAgencyName company.name)
-            |> Option.defaultValue $"Unknown {code}")
-    {
-        id = Some (agencyGroupId codes)
-        name = String.concat " / " names
-        url = Some "https://portal.cisjr.cz/"
-        timezone = "Europe/Prague"
-        lang = Some "cs"
-        phone = None
-        fareUrl = None
-        email = None
-    }
-
 let private validIdsRecord (catalog: CatalogSnapshot) date code =
     catalog.ids
     |> Array.filter (fun value ->
@@ -1790,7 +1701,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
                     boundaryAdjustments.AddRange(adjustments)
                     let journeySegments = selected |> segments
                     let rawGeneratedJourneys =
-                        journeys options.blockMode selected journeySegments
+                        journeys journeySegments
                         |> Array.choose (fun journey ->
                             if journey.alternativeTransport then
                                 let passengerCalls =
@@ -1828,7 +1739,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
                 LocalDate.FromDateTime(
                     message.CzpttInformation.PlannedCalendar.ValidityPeriod.StartDateTime)
             generatedJourneys
-            |> Seq.map (route options.blockMode catalog date message))
+            |> Seq.map (route catalog date message))
         |> Seq.distinctBy (fun value -> value.id)
         |> Seq.sortBy (fun value -> value.id)
         |> Seq.toArray
@@ -1848,7 +1759,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
             |> Seq.map (fun journey ->
                 message, journey,
                 trip
-                    pointNames options.blockMode catalog date message calls endpoints
+                    pointNames catalog date message calls endpoints
                     separateModeBlocks journey))
         |> Seq.toArray
     let trips = generatedTrips |> Array.map (fun (_, _, value) -> value)
@@ -1906,7 +1817,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
     let agencyCodes =
         accepted
         |> Seq.collect (fun (_, _, _, generatedJourneys) ->
-            generatedJourneys |> Seq.collect (fun journey -> journey.responsibleRus))
+            generatedJourneys |> Seq.map (fun journey -> journey.responsibleRu))
         |> Seq.distinct
         |> Seq.sort
         |> Seq.toArray
@@ -1922,7 +1833,7 @@ let convertWithPointNamesAndOptions catalog options pointNames
                     labelsForJourney catalog date message journey
                     |> Array.exists (fun label -> label.mappedLine.IsSome)
                 if hasMappedLine then
-                    Some (routeId options.blockMode catalog date message journey)
+                    Some (routeId catalog date message journey)
                 else None))
         |> Set
     let czRoutes =
@@ -2255,21 +2166,8 @@ let convertWithPointNamesAndOptions catalog options pointNames
         stops pointNames allJourneyCalls
         |> Array.map (fun value ->
             { value with zoneId = Map.tryFind value.id unambiguousStopZones })
-    let compositeAgencyCodes =
-        accepted
-        |> Seq.collect (fun (_, _, _, generatedJourneys) ->
-            generatedJourneys
-            |> Seq.choose (fun journey ->
-                if journey.responsibleRus.Length > 1
-                then Some journey.responsibleRus else None))
-        |> Seq.distinct
-        |> Seq.toArray
     let feed = {
-        agencies =
-            Array.append
-                (agencyCodes |> Array.map (agency catalog))
-                (compositeAgencyCodes |> Array.map (compositeAgency catalog))
-            |> Array.sortBy (fun value -> value.id)
+        agencies = agencyCodes |> Array.map (agency catalog)
         stops = feedStops
         routes = routes
         trips = trips
@@ -2334,12 +2232,10 @@ let convertWithOptions catalog options messages =
 let convertWithPointNames catalog mode pointNames messages =
     convertWithPointNamesAndOptions catalog {
         operationalPointMode = mode
-        blockMode = Blocks
     } pointNames messages
 
 let convert catalog mode messages =
     convertWithOptions catalog {
         operationalPointMode = mode
-        blockMode = Blocks
     } messages
 

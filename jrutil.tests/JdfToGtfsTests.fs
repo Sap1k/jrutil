@@ -110,7 +110,7 @@ type JdfToGtfsTests() =
 
     [<TestMethod>]
     member _.``JDF conversion emits Oběhy identities and public line numbers``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed false
+        let feed = batch () |> JdfToGtfs.getGtfsFeed
 
         route "jdf:route:586001" feed
         |> fun item ->
@@ -171,7 +171,7 @@ type JdfToGtfsTests() =
 
     [<TestMethod>]
     member _.``Feed contact round-trips and legacy feed info remains readable``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed false
+        let feed = batch () |> JdfToGtfs.getGtfsFeed
         let root =
             Path.Combine(Path.GetTempPath(), "jrutil-feed-info-" + Guid.NewGuid().ToString("N"))
         try
@@ -279,11 +279,11 @@ type JdfToGtfsTests() =
                           && note.tripId = original.id then
                            yield { note with tripId = trips.[index].id } |]
         let expanded = { source with trips = trips; tripStops = calls; serviceNotes = notes }
-        let legacy = JdfToGtfs.getGtfsFeed false expanded |> Gtfs.deduplicateCalendar
+        let legacy = JdfToGtfs.getGtfsFeed expanded |> Gtfs.deduplicateCalendar
         for workers in [1; 4] do
             let calendar = JdfToGtfs.prepareGtfsCalendarWithWorkers workers expanded
             let preparation =
-                JdfToGtfs.prepareGtfsFeedForStreaming true false expanded
+                JdfToGtfs.prepareGtfsFeedForStreaming true expanded
             let actual =
                 JdfToGtfs.finishStreamingFeedWithUniqueCalendars
                     { preparation with calendarPreparation = calendar } Set.empty
@@ -301,11 +301,11 @@ type JdfToGtfsTests() =
         let streaming = Path.Combine(root, "streaming")
         try
             let source = batch ()
-            let feed = source |> JdfToGtfs.getGtfsFeed false
+            let feed = source |> JdfToGtfs.getGtfsFeed
             Gtfs.gtfsFeedToFolder () materialized feed
 
             let preparation =
-                JdfToGtfs.prepareGtfsFeedForStreaming true false source
+                JdfToGtfs.prepareGtfsFeedForStreaming true source
             let referenced = Collections.Generic.HashSet<string>(StringComparer.Ordinal)
             let stopTimes =
                 JdfToGtfs.getStreamingBundleStopTimes preparation
@@ -357,21 +357,21 @@ type JdfToGtfsTests() =
                 call.tripId, call.stopSequence, call.stopId,
                 call.arrivalTime, call.departureTime)
             |> Seq.toArray
-        let expected = JdfToGtfs.getGtfsStopTimes false source |> normalize
+        let expected = JdfToGtfs.getGtfsStopTimes source |> normalize
         let unsorted = {
             source with
                 tripStops = source.tripStops |> Seq.toArray |> Array.sortBy (fun call -> call.routeStopId)
         }
-        let actual = JdfToGtfs.getGtfsStopTimes false unsorted |> normalize
+        let actual = JdfToGtfs.getGtfsStopTimes unsorted |> normalize
         assertEqual expected actual
         let expectedStreamed =
             source
-            |> JdfToGtfs.getGtfsFeed false
+            |> JdfToGtfs.getGtfsFeed
             |> fun feed -> feed.stopTimes
             |> normalize
         let streamed =
             unsorted
-            |> JdfToGtfs.prepareGtfsFeedForStreaming true false
+            |> JdfToGtfs.prepareGtfsFeedForStreaming true
             |> JdfToGtfs.getStreamingBundleStopTimes
             |> normalize
         assertEqual expectedStreamed streamed
@@ -402,11 +402,11 @@ type JdfToGtfsTests() =
                         else stop)
         }
         let key (call: GtfsModel.StopTime) = call.tripId, call.stopSequence
-        let before = JdfToGtfs.getGtfsStopTimes false source |> Seq.toArray
-        let after = JdfToGtfs.getGtfsStopTimes false border |> Seq.toArray
+        let before = JdfToGtfs.getGtfsStopTimes source |> Seq.toArray
+        let after = JdfToGtfs.getGtfsStopTimes border |> Seq.toArray
         assertEqual (before |> Array.map key) (after |> Array.map key)
         let isBorderCall (call: GtfsModel.StopTime) =
-            let prefix = JdfToGtfs.jdfStopId false borderStop
+            let prefix = JdfToGtfs.jdfStopId borderStop
             call.stopId = prefix || call.stopId.StartsWith(prefix + ":")
         let borderCalls = after |> Array.filter isBorderCall
         Assert.IsTrue(borderCalls.Length > 0)
@@ -532,7 +532,7 @@ type JdfToGtfsTests() =
 
     [<TestMethod>]
     member _.``JDF conversion normalizes zones and preserves both post forms``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed false
+        let feed = batch () |> JdfToGtfs.getGtfsFeed
         let stopIds = feed.stops |> Array.map (fun stop -> stop.id) |> set
 
         assertEqual true (stopIds.Contains "jdf:stop:100:post:1")
@@ -631,7 +631,7 @@ type JdfToGtfsTests() =
                     }
                 |]
         }
-        let feed = withLocations |> JdfToGtfs.getGtfsFeed false
+        let feed = withLocations |> JdfToGtfs.getGtfsFeed
         let stop100Names =
             feed.stops
             |> Array.filter (fun stop -> stop.id.StartsWith("jdf:stop:100"))
@@ -659,7 +659,7 @@ type JdfToGtfsTests() =
         let plan = JdfToGtfs.buildPostEstimationPlan inferred
         assertEqual 0 plan.authored.Count
 
-        let feed = inferred |> JdfToGtfs.getGtfsFeed false
+        let feed = inferred |> JdfToGtfs.getGtfsFeed
         let authored = feed.stops |> Array.find (fun stop -> stop.id = "jdf:stop:100:post:1")
         Assert.AreEqual(50.0, float authored.lat.Value, 0.000001)
         Assert.AreEqual(14.0, float authored.lon.Value, 0.000001)
@@ -728,7 +728,7 @@ type JdfToGtfsTests() =
         assertEqual 0 plan.singleCandidateSkips
         assertEqual 0 plan.authored.Count
         assertEqual 0 plan.calls.Count
-        let feed = inferred |> JdfToGtfs.getGtfsFeed false
+        let feed = inferred |> JdfToGtfs.getGtfsFeed
         assertEqual false (feed.stops |> Array.exists (fun stop -> stop.id.Contains(":estimated:")))
 
     [<TestMethod>]
@@ -828,53 +828,6 @@ type JdfToGtfsTests() =
         assertEqual 0 selections.Length
         assertEqual 0 plan.locations.Length
 
-    [<TestMethod>]
-    member _.``CIS stop mode and extension serialization are deterministic``() =
-        let feed = batch () |> JdfToGtfs.getGtfsFeed true
-        let czStops = feed.czStops |> Option.get
-        czStops |> Array.iter (fun stop -> assertEqual true stop.cisStopId.IsSome)
-        assertEqual true (feed.stops |> Array.exists (fun stop ->
-            stop.id = "cis:stop:100:post:1"))
-
-        let root =
-            Path.Combine(Path.GetTempPath(), "jrutil-obehy-" + Guid.NewGuid().ToString("N"))
-        let first = Path.Combine(root, "first")
-        let second = Path.Combine(root, "second")
-        try
-            let write = Gtfs.gtfsFeedToFolder ()
-            write first feed
-            write second feed
-
-            let expectedHeaders = [|
-                "cz_routes.txt", "route_id,cis_line_id,public_line_number,source_provenance"
-                "cz_trips.txt", "trip_id,cis_line_id,cis_trip_id,train_number,source_trip_ids,coverage_sources"
-                "cz_stops.txt", "stop_id,stop_place_id,cis_stop_id,post_id,asw_id,source_ids"
-                "cz_stop_zones.txt", "stop_place_id,zone_id,zone_code,route_id,ids_system_id,source_provenance"
-            |]
-            expectedHeaders |> Array.iter (fun (fileName, expectedHeader) ->
-                let firstPath = Path.Combine(first, fileName)
-                let secondPath = Path.Combine(second, fileName)
-                assertEqual expectedHeader (File.ReadLines(firstPath) |> Seq.head)
-                CollectionAssert.AreEqual(File.ReadAllBytes(firstPath),
-                                          File.ReadAllBytes(secondPath))
-                let bytes = File.ReadAllBytes(firstPath)
-                let hasUtf8Bom =
-                    bytes.Length >= 3
-                    && bytes.[0] = 0xEFuy
-                    && bytes.[1] = 0xBBuy
-                    && bytes.[2] = 0xBFuy
-                assertEqual false hasUtf8Bom)
-
-            let parsed = Gtfs.gtfsParseFolder () first
-            assertEqual (Some 3) (parsed.czRoutes |> Option.map Array.length)
-            assertEqual (Some 2) (parsed.czTrips |> Option.map Array.length)
-            assertEqual (Some 6) (parsed.czStops |> Option.map Array.length)
-            assertEqual (Some 5) (parsed.czStopZones |> Option.map Array.length)
-            assertEqual false
-                ((File.ReadLines(Path.Combine(first, "stop_times.txt")) |> Seq.head)
-                    .Contains("stop_zone_ids"))
-        finally
-            if Directory.Exists(root) then Directory.Delete(root, true)
 
     member private _.routeVersions (versions: (bool * string * LocalDate) list) =
         let template = batch ()

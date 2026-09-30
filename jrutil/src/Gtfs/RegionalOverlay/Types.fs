@@ -156,6 +156,7 @@ type CompilationOptions = {
     bindings: SourceBinding array
     baseBundle: string
     outputBundle: string
+    converterVersion: string
     diagnosticsOutput: string option
     diagnosticTraces: bool
 }

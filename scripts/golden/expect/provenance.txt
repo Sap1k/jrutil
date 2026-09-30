@@ -1,2 +1,4 @@
-# The overlay embeds the git commit of the converter in its build spec.
+# The overlay records its converter version (--converter-version) as the
+# manifest compiler instead of embedding a git commit in its build spec.
 manifest build_spec_sha256
+manifest compiler

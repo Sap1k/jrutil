@@ -175,7 +175,7 @@ let private reportProgress (options: BundleExecutionOptions) (timer: Stopwatch)
         workingSetBytes = currentProcess.WorkingSet64
     }
 
-let private applyDiagnosticPostLabels stopIdsCis (batch: JdfModel.JdfBatch)
+let private applyDiagnosticPostLabels (batch: JdfModel.JdfBatch)
                                       (plan: JdfToGtfs.PostEstimationPlan)
                                       (feed: GtfsModel.GtfsFeed) =
     let candidateRanks =
@@ -201,7 +201,7 @@ let private applyDiagnosticPostLabels stopIdsCis (batch: JdfModel.JdfBatch)
                     |> Option.map (fun rank -> $"O{rank}")
             label
             |> Option.map (fun value ->
-                JdfToGtfs.inferredPostId stopIdsCis plan selection, value))
+                JdfToGtfs.inferredPostId plan selection, value))
         |> Map
     { feed with
         stops =
@@ -579,7 +579,7 @@ let private transportModeCode = function
     | JdfModel.Metro -> "M"
     | JdfModel.Ferry -> "P"
 
-let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int, JdfModel.TransportMode>)
+let private getTableProducers (sourceTransportModes: Map<string * int, JdfModel.TransportMode>)
                       (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
                       (postPlan: JdfToGtfs.PostEstimationPlan)
                       (callFacts: CallDerivedFacts)
@@ -622,7 +622,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
     let stopPlaces () =
         batch.stops
         |> Array.filter (fun stop ->
-            retainedStopIds.Contains(JdfToGtfs.jdfStopId stopIdsCis stop.id))
+            retainedStopIds.Contains(JdfToGtfs.jdfStopId stop.id))
         |> Array.sortBy (fun stop -> stop.id)
         |> Array.map (fun stop ->
             let location = stopLocations |> Map.tryFind stop.id
@@ -637,7 +637,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
                     | JdfModel.StopPrecise -> "stop"
                     | JdfModel.Estimated -> "estimated"
             row [
-                "gtfs_stop_id", box (JdfToGtfs.jdfStopId stopIdsCis stop.id)
+                "gtfs_stop_id", box (JdfToGtfs.jdfStopId stop.id)
                 "town", box stop.town
                 "district", nullableObj stop.district
                 "nearby_place", nullableObj stop.nearbyPlace
@@ -649,7 +649,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
     let locationFeatures () =
         batch.stops
         |> Seq.collect (fun stop ->
-            let gtfsStopId = JdfToGtfs.jdfStopId stopIdsCis stop.id
+            let gtfsStopId = JdfToGtfs.jdfStopId stop.id
             if not (retainedStopIds.Contains(gtfsStopId)) then Seq.empty else
             Jdf.parseAttributes batch stop.attributes
             |> Seq.map (fun attribute ->
@@ -815,7 +815,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
                     |> Option.map (fun index -> $"O{index + 1}")
             row [
                 "derived_location_id", box location.locationId
-                "gtfs_stop_place_id", box (JdfToGtfs.jdfStopId stopIdsCis location.stopId)
+                "gtfs_stop_place_id", box (JdfToGtfs.jdfStopId location.stopId)
                 "selection_kind", box location.selectionKind
                 "physical_candidate_id", if location.selectionKind = "physical" then representative |> nullableObj else null
                 "side_group_id", location.sideGroupId |> nullableObj
@@ -828,8 +828,8 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
 
     let authoredTargetId stopId (key: string) =
         if key.StartsWith("id:", StringComparison.Ordinal) then
-            JdfToGtfs.jdfStopPostId stopIdsCis stopId (Int64.Parse(key.Substring(3), CultureInfo.InvariantCulture))
-        else JdfToGtfs.jdfStopPostNumId stopIdsCis stopId (key.Substring(4))
+            JdfToGtfs.jdfStopPostId stopId (Int64.Parse(key.Substring(3), CultureInfo.InvariantCulture))
+        else JdfToGtfs.jdfStopPostNumId stopId (key.Substring(4))
     let rejectedCandidateIds stopId (selection: JdfToGtfs.DerivedPostSelection) =
         candidateLookup
         |> Map.tryFind stopId
@@ -843,7 +843,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
         |> Seq.choose selector
         |> Seq.distinct
         |> Seq.sort
-        |> Seq.map (JdfToGtfs.jdfStopId stopIdsCis)
+        |> Seq.map (JdfToGtfs.jdfStopId )
         |> String.concat ";"
         |> function value when String.IsNullOrEmpty(value) -> None | value -> Some value
     let contextRoles (contexts: JdfToGtfs.DerivedPostContext array) =
@@ -926,14 +926,14 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             let stopId, mode = pair.Key.stopId, pair.Key.mode
             let selection = pair.Value
             let context = postPlan.callContexts.[pair.Key]
-            { targetGtfsStopId = JdfToGtfs.inferredPostId stopIdsCis postPlan selection
+            { targetGtfsStopId = JdfToGtfs.inferredPostId postPlan selection
               assignmentKind="internal"; derivedLocationId=Some selection.locationId
               mode=transportModeCode mode; lineId=Some pair.Key.lineId
               direction=Some pair.Key.direction; patternHash=Some pair.Key.patternHash
               patternPosition=Some pair.Key.position
               movementFamilyId=movementFamilyId pair.Key
-              contextPreviousStopId=context.previousStopId |> Option.map (JdfToGtfs.jdfStopId stopIdsCis)
-              contextNextStopId=context.nextStopId |> Option.map (JdfToGtfs.jdfStopId stopIdsCis)
+              contextPreviousStopId=context.previousStopId |> Option.map (JdfToGtfs.jdfStopId )
+              contextNextStopId=context.nextStopId |> Option.map (JdfToGtfs.jdfStopId )
               sameStopBlockRole=context.sameStopBlockRole; score=Some selection.score; margin=selection.margin
               selectedCandidates=String.Join(";", selection.candidateIds)
               rejectedCandidates=rejectedCandidateIds stopId selection; status="positioned" })
@@ -946,13 +946,13 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
                 candidateLookup |> Map.tryFind contextKey.stopId |> Option.defaultValue [||]
                 |> Array.map (fun value -> value.hypothesisId) |> Array.sort
                 |> fun values -> String.Join(";",values)
-            { targetGtfsStopId = $"{JdfToGtfs.jdfStopId stopIdsCis contextKey.stopId}:unspecified"
+            { targetGtfsStopId = $"{JdfToGtfs.jdfStopId contextKey.stopId}:unspecified"
               assignmentKind="internal"; derivedLocationId=None; mode=transportModeCode contextKey.mode
               lineId=Some contextKey.lineId; direction=Some contextKey.direction
               patternHash=Some contextKey.patternHash; patternPosition=Some contextKey.position
               movementFamilyId=movementFamilyId contextKey
-              contextPreviousStopId=context.previousStopId |> Option.map (JdfToGtfs.jdfStopId stopIdsCis)
-              contextNextStopId=context.nextStopId |> Option.map (JdfToGtfs.jdfStopId stopIdsCis)
+              contextPreviousStopId=context.previousStopId |> Option.map (JdfToGtfs.jdfStopId )
+              contextNextStopId=context.nextStopId |> Option.map (JdfToGtfs.jdfStopId )
               sameStopBlockRole=contextKey.sameStopBlockRole; score=None; margin=None
               selectedCandidates=""; rejectedCandidates=rejected; status="centroid_fallback" })
     let derivedPostAssignments () : seq<DerivedPostAssignmentRow> =
@@ -976,7 +976,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
             let hypothesisId=hypothesisByCandidate |> Map.tryFind evidence.candidateId
             let estimate=hypothesisId |> Option.bind (fun value -> modalityByCandidate |> Map.tryFind value)
             row [
-                "gtfs_stop_place_id", box (JdfToGtfs.jdfStopId stopIdsCis evidence.stopId)
+                "gtfs_stop_place_id", box (JdfToGtfs.jdfStopId evidence.stopId)
                 "candidate_id", box evidence.candidateId; "observation_id", box evidence.observationId
                 "hypothesis_id", hypothesisId |> nullableObj
                 "source_kind", box evidence.sourceKind; "source_object_id", evidence.sourceObjectId |> nullableObj
@@ -992,7 +992,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
     let physicalHypothesisRows () =
         postPlan.physicalHypotheses
         |> Array.map (fun hypothesis -> row [
-            "gtfs_stop_place_id",box(JdfToGtfs.jdfStopId stopIdsCis hypothesis.stopId)
+            "gtfs_stop_place_id",box(JdfToGtfs.jdfStopId hypothesis.stopId)
             "hypothesis_id",box hypothesis.hypothesisId
             "member_observation_ids",box(String.Join(";",hypothesis.memberObservationIds))
             "member_legacy_candidate_ids",box(String.Join(";",hypothesis.memberCandidateIds))
@@ -1002,7 +1002,7 @@ let private getTableProducers stopIdsCis (sourceTransportModes: Map<string * int
     let sideGroupRows () =
         postPlan.sideGroups
         |> Array.map (fun group -> row [
-            "gtfs_stop_place_id", box (JdfToGtfs.jdfStopId stopIdsCis group.stopId)
+            "gtfs_stop_place_id", box (JdfToGtfs.jdfStopId group.stopId)
             "side_group_id", box group.sideGroupId; "mode", box(string group.mode)
             "corridor_face_id", box group.corridorFaceId
             "sector", box group.sector
@@ -1324,7 +1324,7 @@ let private writeDerivedPostAssignmentsParquet descriptor path expectedCount
     finally
         (writer :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
 
-let private writeDerivedPostScoresParquet descriptor stopIdsCis path
+let private writeDerivedPostScoresParquet descriptor path
                                          (plan: JdfToGtfs.PostEstimationPlan)
                                          (progress: int64 -> int64 option -> unit) =
     let fields: DataField array = [|
@@ -1394,7 +1394,7 @@ let private writeDerivedPostScoresParquet descriptor stopIdsCis path
         let mutable written=0L
         for rows in plan.scoreRows() |> Seq.chunkBySize 65536 do
             use rowGroup=writer.CreateRowGroup()
-            writeStrings rowGroup 0 (fun value -> JdfToGtfs.jdfStopId stopIdsCis value.context.stopId) rows
+            writeStrings rowGroup 0 (fun value -> JdfToGtfs.jdfStopId value.context.stopId) rows
             writeStrings rowGroup 1 (fun value -> value.candidateId) rows
             writeStrings rowGroup 2 (fun value -> transportModeCode value.context.mode) rows
             writeStrings rowGroup 3 (fun value -> value.context.lineId) rows
@@ -1438,7 +1438,7 @@ let private writeDerivedPostScoresParquet descriptor stopIdsCis path
     finally
         (writer :> IAsyncDisposable).DisposeAsync().AsTask().GetAwaiter().GetResult()
 
-let writePostEvidenceStore descriptor captureToolVersion stopIdsCis evidencePath routingPbfPath
+let writePostEvidenceStore descriptor captureToolVersion evidencePath routingPbfPath
                            (store:JdfPostEvidence.CapturedPostEvidence) progress =
     let outputFull=Path.GetFullPath(evidencePath)
     if Directory.Exists(outputFull) || File.Exists(outputFull) then
@@ -1454,7 +1454,7 @@ let writePostEvidenceStore descriptor captureToolVersion stopIdsCis evidencePath
             use stream=File.OpenRead(routingPbfPath)
             sha256Stream stream
         let packId=JdfPostInference.evidencePackId captureToolVersion descriptor.payloadSha256 routingHash
-        let stopId stop = JdfToGtfs.jdfStopId stopIdsCis stop
+        let stopId stop = JdfToGtfs.jdfStopId stop
         let write relationName fields rows writeGroup =
             writeTypedEvidenceParquet descriptor captureToolVersion routingHash packId relationName
                 (Path.Combine(temp,relationName)) fields rows writeGroup
@@ -1950,7 +1950,7 @@ let private serializeJson (write: Stream -> unit) =
     write stream
     Text.Encoding.UTF8.GetString(stream.ToArray())
 
-let private writeManifest (stream: Stream) descriptor (converterVersion: string) stopIdsCis
+let private writeManifest (stream: Stream) descriptor (converterVersion: string) 
                           (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
                           (internationalDecisions: JdfToGtfs.InternationalRouteDecision array)
                           (transportModeRules: JdfToGtfs.TransportModeRuleSet)
@@ -1988,7 +1988,6 @@ let private writeManifest (stream: Stream) descriptor (converterVersion: string)
     writer.WriteStartObject("conversion")
     writer.WriteString("tool", "jrutil")
     writer.WriteString("version", converterVersion)
-    writer.WriteBoolean("stop_ids_cis", stopIdsCis)
     writer.WriteStartObject("international_route_filter")
     writer.WriteString("policy", JdfToGtfs.internationalRoutePolicyName internationalPolicy)
     writer.WriteNumber("non_integrated_maximum_trip_span_km", 120)
@@ -2118,7 +2117,7 @@ let validateRoutingPbfManifest path =
        || bytes.GetInt64() <> FileInfo(path).Length then
         invalidArg "routingPbfPath" "Routing PBF size does not match its Osmium manifest"
 
-let private writePostReviewGeoJson path selectorsPath stopIdsCis
+let private writePostReviewGeoJson path selectorsPath 
                                    (batch: JdfModel.JdfBatch)
                                    (plan: JdfToGtfs.PostEstimationPlan) =
     let selectors =
@@ -2158,7 +2157,7 @@ let private writePostReviewGeoJson path selectorsPath stopIdsCis
         match value with Some number -> writer.WriteNumber(name, number) | None -> writer.WriteNull(name)
     let writeContextProperties (writer: Utf8JsonWriter) (score: JdfToGtfs.DerivedPostScore) =
         writer.WriteNumber("stop_id", score.context.stopId)
-        writer.WriteString("gtfs_stop_place_id", JdfToGtfs.jdfStopId stopIdsCis score.context.stopId)
+        writer.WriteString("gtfs_stop_place_id", JdfToGtfs.jdfStopId score.context.stopId)
         writer.WriteString("candidate_id", score.candidateId)
         writer.WriteString("mode", transportModeCode score.context.mode)
         writer.WriteString("line_id", score.context.lineId)
@@ -2293,9 +2292,9 @@ let private writePostReviewGeoJson path selectorsPath stopIdsCis
     writer.WriteEndObject()
     writer.Flush()
 
-let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion stopIdsCis
+let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion 
                                                    (internationalPolicy:JdfToGtfs.InternationalRoutePolicy)
-                                                   internationalOverrides transportModeRules
+                                                   transportModeRules
                                                    routingPbfPath
                                                    (executionOptions:BundleExecutionOptions)
                                                    inputPath evidencePath =
@@ -2341,13 +2340,12 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
                  (Some(int64 sourceBatch.trips.Length)) "trips" None 0
         let sourceRouteKeys =
             sourceBatch.routes |> Seq.map(fun route -> route.id,route.idDistinction) |> Set
-        JdfToGtfs.validateInternationalRouteOverrides sourceRouteKeys internationalOverrides
         let filterResult =
             JdfToGtfs.applyInternationalRoutePolicyWithCalendarWorkersAndProgress
                 executionOptions.maximumWorkers
                 (fun phase count total ->
                     progress phase "running" count total "items" None executionOptions.maximumWorkers)
-                internationalPolicy internationalOverrides sourceCalendar sourceBatch
+                internationalPolicy sourceCalendar sourceBatch
         JdfToGtfs.logInternationalRouteDecisions internationalPolicy filterResult.decisions
         let batch,_=JdfToGtfs.applyTransportModeRules transportModeRules filterResult.batch
         let evidenceFull=Path.GetFullPath(evidencePath)
@@ -2397,7 +2395,7 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
                 executionOptions.captureRestriction
                 graph batch
         progress "capture-post-inference-evidence" "started" 0L None "rows" None 0
-        writePostEvidenceStore descriptor captureToolVersion stopIdsCis evidencePath routingPbfPath captured
+        writePostEvidenceStore descriptor captureToolVersion evidencePath routingPbfPath captured
             (fun phase count total -> progress phase "running" count total "rows" None 1)
         let routingHash=sha256File routingPbfPath
         use store=JdfPostEvidenceStore.openValidatedStore
@@ -2429,9 +2427,8 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
               peakSpillBytes=captured.PeakSpillBytes
               maximumWorkers=executionOptions.maximumWorkers }))
 
-let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
+let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
                                       (internationalPolicy: JdfToGtfs.InternationalRoutePolicy)
-                                      (internationalOverrides: JdfToGtfs.InternationalRouteOverride array)
                                       (transportModeRules: JdfToGtfs.TransportModeRuleSet)
                                       estimatedPosts
                                       (routingPbfPath: string option)
@@ -2583,15 +2580,13 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 sourceBatch.routes
                 |> Seq.map (fun route -> (route.id, route.idDistinction), route.transportMode)
                 |> Map
-            JdfToGtfs.validateInternationalRouteOverrides
-                sourceRouteKeys internationalOverrides
             let filterResult =
                 JdfToGtfs.applyInternationalRoutePolicyWithCalendarWorkersAndProgress
                     executionOptions.maximumWorkers
                     (fun phase count total ->
                         reportProgress executionOptions phaseTimer phase "running"
                                        count total "items" None executionOptions.maximumWorkers)
-                    internationalPolicy internationalOverrides sourceCalendar sourceBatch
+                    internationalPolicy sourceCalendar sourceBatch
             JdfToGtfs.logInternationalRouteDecisions internationalPolicy filterResult.decisions
             let correctedBatch, transportModeDecisions =
                 JdfToGtfs.applyTransportModeRules transportModeRules filterResult.batch
@@ -2638,7 +2633,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     progressCompleted "replay-post-inference" manifest.routePointEvidenceCount
                                       (Some manifest.routePointEvidenceCount) "rows"
                     JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan
-                        stopIdsCis retainedCalendar.Value postPlan batch
+                        retainedCalendar.Value postPlan batch
                 | None,Some graph ->
                     let progress phase count total detail =
                         reportProgress executionOptions phaseTimer phase "running"
@@ -2665,7 +2660,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     let routingPath=routingPbfPath.Value
                     let routingHash=sha256File routingPath
                     started "capture-post-inference-evidence" None "rows"
-                    writePostEvidenceStore descriptor converterVersion stopIdsCis evidencePath routingPath evidenceStore
+                    writePostEvidenceStore descriptor converterVersion evidencePath routingPath evidenceStore
                         (fun phase count total ->
                             reportProgress executionOptions phaseTimer phase "running" count total "rows" None 1)
                     use evidenceStore=JdfPostEvidenceStore.openValidatedStore
@@ -2685,10 +2680,10 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     progressCompleted "evaluate-post-inference" manifest.routePointEvidenceCount
                                       (Some manifest.routePointEvidenceCount) "rows"
                     JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan
-                        stopIdsCis retainedCalendar.Value postPlan batch
+                        retainedCalendar.Value postPlan batch
                 | None,None ->
                     JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendar
-                        stopIdsCis retainedCalendar.Value batch
+                        retainedCalendar.Value batch
             routingGraph |> Option.iter (fun graph ->
                 Log.Information(
                     "Routing metrics: mapped_bytes={MappedBytes}; nodes={Nodes}; edges={Edges}; searches={Searches}; cache_entries={CacheEntries}; cache_hits={CacheHits}; cache_misses={CacheMisses}; restriction_lookups={RestrictionLookups}; restriction_rules_examined={RestrictionRulesExamined}",
@@ -2704,7 +2699,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 started "write-post-review" (Some 1L) "files"
                 Directory.CreateDirectory(diagnosticScratch) |> ignore
                 writePostReviewGeoJson (Path.Combine(diagnosticScratch, "post-review.geojson"))
-                                       reviewStopsPath stopIdsCis batch preparation.postPlan
+                                       reviewStopsPath batch preparation.postPlan
                 progressCompleted "write-post-review" 1L (Some 1L) "files"
             | Some _ -> Log.Warning("Ignoring --post-review-stops because estimated posts are disabled")
             | None -> ()
@@ -2747,7 +2742,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             use nativeSourceCalls = new JrUtil.Serving.SourceCallWriter.Spool(nativeSourceCallsPath)
             use nativeRouteStops = new JrUtil.Serving.RouteStopWriter.Writer(nativeRouteStopsPath, Threading.CancellationToken.None)
             let parents =
-                JdfToGtfs.getGtfsStopsWithPlan stopIdsCis preparation.postPlan batch
+                JdfToGtfs.getGtfsStopsWithPlan preparation.postPlan batch
                 |> Seq.map (fun stop -> stop.id, stop.parentStation)
                 |> dict
             let stopTimes =
@@ -2794,7 +2789,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                 |> Gtfs.fillStandardRequiredFields
                 |> fun value ->
                     if diagnosticPostLabels then
-                        applyDiagnosticPostLabels stopIdsCis batch preparation.postPlan value
+                        applyDiagnosticPostLabels batch preparation.postPlan value
                     else value
             logPhaseResources "prepare-remaining-gtfs" phaseTimer
             progressCompleted "prepare-remaining-gtfs" 1L (Some 1L) "feeds"
@@ -2809,7 +2804,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             started "write-relations" None "tables"
             Log.Information("Bundle phase: preparing Parquet relations")
             let tables, assignmentCount, assignmentRows, nativeNotes, nativeFeatures =
-                getTableProducers stopIdsCis sourceTransportModes batch feed preparation.postPlan callFacts
+                getTableProducers sourceTransportModes batch feed preparation.postPlan callFacts
                     (fun phase count total ->
                         reportProgress executionOptions phaseTimer phase "running"
                                        count total "rows" None 1)
@@ -2861,7 +2856,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     Log.Information(
                         "Bundle phase: streaming Parquet table {Table} ({Rows} rows)",
                         scoreTableName,preparation.postPlan.scoreCount)
-                    writeDerivedPostScoresParquet descriptor stopIdsCis (Path.Combine(diagnosticScratch,scoreTableName))
+                    writeDerivedPostScoresParquet descriptor (Path.Combine(diagnosticScratch,scoreTableName))
                         preparation.postPlan
                         (fun count total ->
                             reportProgress executionOptions phaseTimer "stream-derived-post-scores" "running"
@@ -2882,15 +2877,10 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
                     let countries = String.Join(",", decision.countries)
                     let span = decision.maximumTripSpanKm |> Option.map string |> Option.defaultValue "missing"
                     let depth = decision.maximumForeignDepthKm |> Option.map string |> Option.defaultValue "missing"
-                    let overrideValue =
-                        match decision.overrideDecision with
-                        | Some JdfToGtfs.KeepRoute -> "keep"
-                        | Some JdfToGtfs.DropRoute -> "drop"
-                        | None -> "none"
                     { severity = "warning"
                       code = if decision.keep then "filtered_international_trips" else "filtered_international_route"
                       sourceObjectId = JdfToGtfs.jdfSourceRouteId decision.routeId decision.routeDistinction
-                      message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; override={overrideValue}; domestic={decision.retainedDomesticTrips}; qualifying_cross_border={decision.qualifyingCrossBorderTrips}; rejected_cross_border={decision.rejectedCrossBorderTrips}; foreign_only={decision.foreignOnlyTrips}" })
+                      message = $"{decision.reason}; countries={countries}; maximum_trip_span_km={span}; maximum_foreign_depth_km={depth}; integrated={decision.integrated}; domestic={decision.retainedDomesticTrips}; qualifying_cross_border={decision.qualifyingCrossBorderTrips}; rejected_cross_border={decision.rejectedCrossBorderTrips}; foreign_only={decision.foreignOnlyTrips}" })
             let transportModeDiagnostics =
                 transportModeDecisions
                 |> Seq.map (fun decision ->
@@ -2916,7 +2906,7 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
             Log.Information("Bundle phase: creating manifest")
             let manifestText =
                 serializeJson (fun stream ->
-                    writeManifest stream descriptor converterVersion stopIdsCis
+                    writeManifest stream descriptor converterVersion 
                                   internationalPolicy filterResult.decisions transportModeRules
                                   transportModeDecisions preparation.postPlan routingPbfPath
                                   (executionOptions.postInferenceEvidencePath |> Option.orElse liveEvidenceTemporaryDirectory)
@@ -2988,35 +2978,35 @@ let private writeBundleWithPolicyCore snapshotDescriptorPath converterVersion st
     BundleCompleted
 
 let writeBundleWithPolicyAndMemory releaseStopTimesAfterMaterialization
-                                   snapshotDescriptorPath converterVersion stopIdsCis
-                                   internationalPolicy internationalOverrides
+                                   snapshotDescriptorPath converterVersion 
+                                   internationalPolicy 
                                    inputPath outputPath =
     // Stop times are always streamed directly to GTFS. Keep the public wrapper
     // for source compatibility, but the old materialization switch no longer
     // changes bundle behavior.
     ignore releaseStopTimesAfterMaterialization
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides JdfToGtfs.emptyTransportModeRules
+    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
+                              internationalPolicy JdfToGtfs.emptyTransportModeRules
                               true None false defaultBundleExecutionOptions
                               inputPath outputPath |> ignore
 
-let writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
-                          internationalPolicy internationalOverrides inputPath outputPath =
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides JdfToGtfs.emptyTransportModeRules
+let writeBundleWithPolicy snapshotDescriptorPath converterVersion 
+                          internationalPolicy inputPath outputPath =
+    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
+                              internationalPolicy JdfToGtfs.emptyTransportModeRules
                               true None false defaultBundleExecutionOptions
                               inputPath outputPath |> ignore
 
-let writeBundleWithRoutedPostInference snapshotDescriptorPath converterVersion stopIdsCis
-                                       internationalPolicy internationalOverrides transportModeRules
+let writeBundleWithRoutedPostInference snapshotDescriptorPath converterVersion 
+                                       internationalPolicy transportModeRules
                                        estimatedPosts routingPbfPath diagnosticPostLabels inputPath outputPath =
-    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
-                              internationalPolicy internationalOverrides transportModeRules
+    writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
+                              internationalPolicy transportModeRules
                               estimatedPosts routingPbfPath diagnosticPostLabels
                               defaultBundleExecutionOptions inputPath outputPath |> ignore
 
-let executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion stopIdsCis
-                                              internationalPolicy internationalOverrides transportModeRules
+let executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion 
+                                              internationalPolicy transportModeRules
                                               estimatedPosts routingPbfPath diagnosticPostLabels
                                               executionOptions inputPath outputPath =
     if executionOptions.maximumWorkers <= 0 then
@@ -3040,8 +3030,8 @@ let executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converter
             |> Option.defaultWith(fun () ->
                 invalidArg "executionOptions"
                     "Capture-only execution requires --capture-post-inference-evidence=DIR")
-        capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion stopIdsCis
-            internationalPolicy internationalOverrides transportModeRules routingPbfPath.Value
+        capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVersion 
+            internationalPolicy transportModeRules routingPbfPath.Value
             executionOptions inputPath evidencePath
     | _ ->
         if executionOptions.capturePostInferenceEvidencePath.IsSome then
@@ -3051,19 +3041,19 @@ let executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converter
            || executionOptions.exportPostContextCallsPath.IsSome then
             invalidArg "executionOptions"
                 "--capture-stop-region, --capture-exclude-source and --export-post-context-calls are valid only in capture-only execution"
-        writeBundleWithPolicyCore snapshotDescriptorPath converterVersion stopIdsCis
-                                  internationalPolicy internationalOverrides transportModeRules
+        writeBundleWithPolicyCore snapshotDescriptorPath converterVersion 
+                                  internationalPolicy transportModeRules
                                   estimatedPosts routingPbfPath diagnosticPostLabels
                                   executionOptions inputPath outputPath
 
-let writeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion stopIdsCis
-                                              internationalPolicy internationalOverrides transportModeRules
+let writeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion 
+                                              internationalPolicy transportModeRules
                                               estimatedPosts routingPbfPath diagnosticPostLabels
                                               executionOptions inputPath outputPath =
-    executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion stopIdsCis
-        internationalPolicy internationalOverrides transportModeRules estimatedPosts routingPbfPath
+    executeBundleWithRoutedPostInferenceOptions snapshotDescriptorPath converterVersion 
+        internationalPolicy transportModeRules estimatedPosts routingPbfPath
         diagnosticPostLabels executionOptions inputPath outputPath |> ignore
 
-let writeBundle snapshotDescriptorPath converterVersion stopIdsCis inputPath outputPath =
-    writeBundleWithPolicy snapshotDescriptorPath converterVersion stopIdsCis
-                          JdfToGtfs.KeepAll [||] inputPath outputPath
+let writeBundle snapshotDescriptorPath converterVersion inputPath outputPath =
+    writeBundleWithPolicy snapshotDescriptorPath converterVersion 
+                          JdfToGtfs.KeepAll inputPath outputPath
