@@ -5,7 +5,11 @@ module internal JrUtil.RegionalOverlay.BasePreparation
 open System.Collections.Generic
 open JrUtil.GtfsModel
 open JrUtil.RegionalOverlay.Model
-open JrUtil.RegionalOverlay.Support
+open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.GtfsRows
+open JrUtil.RegionalOverlay.StopGroups
+open JrUtil.RegionalOverlay.OutputIds
 open JrUtil.RegionalOverlay.Runtime
 
 /// Read-only national data. Source-local matching indexes are built separately.

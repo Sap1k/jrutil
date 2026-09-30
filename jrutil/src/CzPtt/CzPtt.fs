@@ -10,6 +10,7 @@ open System.IO.Compression
 open System.Xml.Serialization
 open NodaTime
 
+open JrUtil.DateUtils
 open JrUtil.Utils
 open JrUtil.UnionCodec
 

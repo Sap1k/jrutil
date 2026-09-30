@@ -12,7 +12,7 @@ open JrUtil.JdfModel
 open JrUtil.Jdf110To111
 open JrUtil.Jdf109To110
 open JrUtil.JdfSerializer
-open JrUtil.Utils
+open JrUtil.FileUtils
 
 type JdfBatchDirectory =
     | FsPath of string

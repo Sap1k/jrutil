@@ -10,7 +10,8 @@ open System.Threading
 open Parquet
 
 open JrUtil.RegionalOverlay.Model
-open JrUtil.RegionalOverlay.Support
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.StopGroups
 
 /// A compiler's complete hand-off to the package writer: replayable row
 /// sources that a compiler backs with memory or with its own scratch spools,

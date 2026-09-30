@@ -7,6 +7,9 @@ open System.Text
 open System.Globalization
 open System.Security.Cryptography
 open System.Collections.Generic
+open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.StopGroups
 open JrUtil.RegionalOverlay.Support
 
 let columns = [| "shape_id"; "shape_pt_lat"; "shape_pt_lon"; "shape_pt_sequence"; "shape_dist_traveled" |]

@@ -14,7 +14,8 @@ open System.Threading
 open Parquet
 open Parquet.Schema
 
-open JrUtil.RegionalOverlay.Support
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.StopGroups
 
 /// Semantic comparison of two production packages. Serving relations are
 /// compared row by row on their declared primary keys, GTFS tables as multisets

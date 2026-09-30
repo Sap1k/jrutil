@@ -230,7 +230,7 @@ let addRegionFromMatch (stop: Stop) match_ =
 let czTownNameMatcher =
     Utils.memoizeVoidFunc
     <| fun () ->
-        Utils.logWrappedOp "Creating Czech town name matcher" <| fun () ->
+        Logging.logWrappedOp "Creating Czech town name matcher" <| fun () ->
             // Sure, it's a *Stop* matcher, but it works for parts of a stop's
             // name too
             new StopMatcher<_>(
@@ -243,7 +243,7 @@ let czTownNameMatcher =
 
 let eurTownNameMatcher =
     Utils.memoizeVoidFunc <| fun () ->
-        Utils.logWrappedOp "Creating European town name matcher" <| fun () ->
+        Logging.logWrappedOp "Creating European town name matcher" <| fun () ->
             new StopMatcher<_>(
                 eurTownCountries ()
                 |> Seq.map (fun r ->
@@ -1194,7 +1194,7 @@ let checkMatchDistances
                 let dist = lp.Distance(m.data.point) / 1000.0
                 let kmDiff = abs (km - lkm)
                 if dist > float (kmDiff + preciseTolerance) * multTolerance
-                then Some <| Utils.logEvent
+                then Some <| Logging.logEvent
                       LogEventLevel.Warning
                       ("Distance between matches is too high"
                        + internationalNote
@@ -1233,13 +1233,13 @@ let checkMissingRegionsCountries (jdfBatch: JdfBatch) =
     |> Seq.choose (fun s ->
         match s.country, s.regionId with
         | None, None ->
-            Some <| Utils.logEvent
+            Some <| Logging.logEvent
                 (level s.id)
                 ((if isUsed s.id then "Stop" else "Unused stop")
                  + " without country: {StopId} ({StopName})")
                 [|box s.id; jdfStopNameString s |]
         | Some "CZ", None ->
-            Some <| Utils.logEvent
+            Some <| Logging.logEvent
                 (level s.id)
                 ((if isUsed s.id then "Czech stop" else "Unused Czech stop")
                  + " without region: {StopId} ({StopName})")

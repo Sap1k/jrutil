@@ -12,7 +12,8 @@ open System.Globalization
 open Parquet
 open Parquet.Schema
 
-open JrUtil.RegionalOverlay.Support
+open JrUtil.RegionalOverlay.GtfsFiles
+open JrUtil.RegionalOverlay.StopGroups
 
 module PackageReader =
     let private readValues<'T when 'T : (new : unit -> 'T) and 'T : struct and 'T :> ValueType>

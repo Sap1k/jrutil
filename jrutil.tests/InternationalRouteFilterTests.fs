@@ -11,6 +11,9 @@ open Microsoft.VisualStudio.TestTools.UnitTesting
 
 open JrUtil
 open JrUtil.JdfModel
+open JrUtil.JdfGtfsRules
+open JrUtil.JdfPostPlan
+open JrUtil.JdfInternationalFilter
 open JrUtil.JdfToGtfs
 open JrUtil.Tests.Asserts
 
@@ -258,7 +261,7 @@ type InternationalRouteFilterTests() =
   "payload_bytes": {FileInfo(zipPath).Length}
 }}"""
             File.WriteAllText(descriptorPath, descriptor)
-            JrUtil.JdfBundle.execute { JrUtil.JdfBundle.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit"; internationalPolicy=RegionalAdjacent } zipPath output |> ignore
+            JrUtil.JdfBundle.execute { JrUtil.JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit"; internationalPolicy=RegionalAdjacent } zipPath output |> ignore
 
             let gtfs, _ = JrUtil.Serving.PackageReader.prepareCompilerView output (Path.Combine(root, "compiler-view"))
             assertEqual 1 (File.ReadAllLines(Path.Combine(gtfs, "routes.txt")).Length)

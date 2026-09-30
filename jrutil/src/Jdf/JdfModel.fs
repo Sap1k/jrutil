@@ -9,7 +9,6 @@ open System.Text.RegularExpressions
 open NodaTime
 open NodaTime.Text
 
-open JrUtil.Utils
 open JrUtil.CsvMetadata
 open JrUtil.UnionCodec
 
