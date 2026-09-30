@@ -10,21 +10,12 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Text.RegularExpressions
-open System.Threading
 
 open Parquet
 open Parquet.Schema
 open JrUtil.JdfPostEvidenceReader
 open JrUtil.JdfPostPolicyEvaluation
 open JrUtil.JdfPostSideGroups
-
-let mutable private evaluatorEntryCountValue=0L
-
-/// Diagnostic counter used by isolation and malformed-pack tests. Validation
-/// happens before callers can obtain a PostEvidenceStore, so rejected packs
-/// must leave this counter unchanged.
-let evaluatorEntryCount () = Interlocked.Read(&evaluatorEntryCountValue)
-let resetEvaluatorEntryCount () = Interlocked.Exchange(&evaluatorEntryCountValue,0L) |> ignore
 
 
 [<Literal>]
@@ -38,8 +29,9 @@ let evaluateWithScorer includeDiagnostics
                        (policy:JdfPostInferencePolicy.PostInferencePolicyV2)
                        (scorer:JdfPostInferencePolicy.ScorerChoice)
                        : JdfPostInference.PostInferenceResult =
+    // Validation happens before callers can obtain a PostEvidenceStore, so a
+    // rejected pack never records this phase.
     JdfPostInferencePolicy.PostInferencePhaseProbe.record "evaluator-entry"
-    Interlocked.Increment(&evaluatorEntryCountValue) |> ignore
     let manifest=store.Manifest
     let policy =
         JdfPostInferencePolicy.validatePolicyForEvidence

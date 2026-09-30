@@ -459,7 +459,6 @@ type JdfBundleTests() =
             let descriptorPath,input,routing=routedCaptureFixture root
             let evidence=Path.Combine(root,"evidence")
             let phases=ResizeArray<string>()
-            JdfPostInferenceEvaluator.resetEvaluatorEntryCount()
             JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
             let options={JdfBundleModel.defaultBundleOptions with
                             maximumWorkers=3;memoryBudgetBytes=1L
@@ -477,7 +476,6 @@ type JdfBundleTests() =
                 Assert.IsTrue(metrics.peakSpillBytes>=metrics.currentSpillBytes)
                 assertEqual 3 metrics.maximumWorkers
             | _ -> Assert.Fail("Capture-only execution did not return CaptureCompleted")
-            assertEqual 0L (JdfPostInferenceEvaluator.evaluatorEntryCount())
             let probes=JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
             let forbiddenProbes=[|"policy-loading";"evaluator-entry";"consolidation";"scoring"
                                   "resolution";"authored-selection";"result-adaptation";"gtfs-conversion"
@@ -1082,14 +1080,15 @@ type JdfBundleTests() =
             rewriteEvidenceRelation (Path.Combine(evidence,"contexts.parquet"))
                 (fun row -> row.["movement_family_id"] <- box "movement-family:corrupt")
             rehashEvidenceRelation evidence "contexts.parquet"
-            JdfPostInferenceEvaluator.resetEvaluatorEntryCount()
+            JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
             let error=Assert.ThrowsExactly<ArgumentException>(fun () ->
                 use store=JdfPostEvidenceStore.openValidatedStore
                               JdfPostEvidenceStore.noIdentityExpectation evidence
                 JdfPostInferenceEvaluator.evaluate store JdfPostInferencePolicy.conservativeRoutedV4
                 |> ignore)
             StringAssert.Contains(error.Message,"movement-family")
-            assertEqual 0L (JdfPostInferenceEvaluator.evaluatorEntryCount())
+            assertEqual None (JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
+                                 |> Map.tryFind "evaluator-entry")
         finally
             if Directory.Exists(root) then Directory.Delete(root,true)
 
@@ -1136,14 +1135,15 @@ type JdfBundleTests() =
                     fun row -> row.["snap_fraction"]<-box 2.0
             |]
             let assertRejected name evidence =
-                JdfPostInferenceEvaluator.resetEvaluatorEntryCount()
+                JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
                 Assert.ThrowsExactly<ArgumentException>(fun () ->
                     use store=JdfPostEvidenceStore.openValidatedStore
                                   JdfPostEvidenceStore.noIdentityExpectation evidence
                     JdfPostInferenceEvaluator.evaluate store JdfPostInferencePolicy.conservativeRoutedV4
                     |> ignore)
                 |> ignore
-                assertEqual 0L (JdfPostInferenceEvaluator.evaluatorEntryCount())
+                assertEqual None (JdfPostInferencePolicy.PostInferencePhaseProbe.snapshot()
+                                 |> Map.tryFind "evaluator-entry")
             for name,fileName,mutate in semanticCases do
                 let evidence=Path.Combine(root,name)
                 copyDirectory baseline evidence

@@ -30,6 +30,7 @@ open System
 type MultiDict<'k, 'v when 'k: equality>() =
     let dict = Dictionary<'k, ResizeArray<'v>>()
 
+    /// The values of a key; a missing key gets a new empty list.
     member this.Item
         with get k =
             let success, v = dict.TryGetValue(k)
@@ -38,8 +39,10 @@ type MultiDict<'k, 'v when 'k: equality>() =
                 let arr = ResizeArray()
                 dict.[k] <- arr
                 arr
-        and set k (vs: 'v seq) =
-            dict.[k] <- ResizeArray(vs)
+
+    /// Replace the values of a key with a materialised copy of values.
+    member this.Replace(k, values: 'v seq) =
+        dict.[k] <- ResizeArray(values)
 
     member this.Keys with get() = dict.Keys
     member this.Values with get() = dict.Values
