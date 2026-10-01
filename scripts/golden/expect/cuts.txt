@@ -1,0 +1,15 @@
+# Intended differences between the learned-v1 reference (learned) and the
+# post-inference and overlay cuts. GTFS, serving relations and diagnostics.json
+# are identical in every package; only compiler provenance changes.
+
+# The JDF compiler no longer records replay/review/label settings, score
+# counts, side groups, same-stop pairs or the always-empty modality,
+# single-candidate and composite counters. The policy record lost its
+# side_groups and same_stop_pairs sections, so policy hashes change too
+# (learned-v1.json lost the same sections).
+manifest compiler
+
+# Derived from the compiler section (JDF) and from the overlay manifest, which
+# no longer carries calibration, publishable, per-source counts or the
+# single-source fields.
+manifest build_spec_sha256
