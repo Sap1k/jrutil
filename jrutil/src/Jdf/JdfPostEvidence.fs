@@ -96,6 +96,8 @@ type PostEvidenceCaptureOptions = {
     memoryBudgetBytes:int64
     preflight:PostEvidenceCaptureUpperBounds -> unit
     progress:string -> int64 -> int64 option -> string option -> unit
+    /// Routed evidence from earlier runs on the same graph and router.
+    routingCache:JdfRoutingCache.RoutingContextCache option
 }
 
 and PostEvidenceCaptureUpperBounds = {
@@ -200,6 +202,7 @@ let private observationExcluded restriction (observation:JdfModel.PostCandidateE
 let defaultCaptureOptions = {
     maximumWorkers=1;memoryBudgetBytes=Int64.MaxValue
     preflight=ignore;progress=fun _ _ _ _ -> ()
+    routingCache=None
 }
 
 /// Transient rows produced by the router.  This value is deliberately not an
@@ -606,6 +609,9 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                 $"{BitConverter.DoubleToInt64Bits(point.longitude):x16}{BitConverter.DoubleToInt64Bits(point.latitude):x16}")
             |> String.concat ","
             value.nextCoordinates |> Array.map coordinateKey |> String.concat "," |]
+    // Keys of every ordered work row, in store order, so the evidence joins
+    // below do not hash each row's geometry again on every pass.
+    let workRoutingKeys=ResizeArray<string>(int orderedWork.Count)
     let routingWorkRows = seq {
         let mutable currentGroup:struct(int64*string) option=None
         let groupKeys=HashSet<string>(StringComparer.Ordinal)
@@ -615,6 +621,7 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                 currentGroup<-Some group
                 groupKeys.Clear()
             let key=routingKey value
+            workRoutingKeys.Add(key)
             if groupKeys.Add(key) then yield key,value }
     let routingWork =
         ReplayableRowStore<CaptureRoutingWorkRow>.Create(
@@ -659,15 +666,15 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
         use linkedCancellation=
             CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
         let workerBudget=max 1L (storeBudget/int64 admittedWorkers)
-        let queues=
-            Array.init admittedWorkers (fun _ ->
-                new BlockingCollection<CaptureRoutingWorkRow>(1))
+        // One shared FIFO queue: a slow unit occupies only its own worker.
+        // Each worker still takes increasing ordinals, so its store stays
+        // ordered for MergeSorted.
+        let queue=new BlockingCollection<CaptureRoutingWorkRow>(admittedWorkers*2)
         let completeQueues () =
-            for queue in queues do
-                if not queue.IsAddingCompleted then queue.CompleteAdding()
+            if not queue.IsAddingCompleted then queue.CompleteAdding()
         let mutable completed=0L
         let progressLock=obj()
-        let route work =
+        let routeWork tracked work =
             let points=work.points
             let coordinates=points |> Array.map(fun point -> struct(point.longitude,point.latitude))
             let previous=work.previousCoordinates |> Array.map(fun value -> struct(value.longitude,value.latitude))
@@ -677,7 +684,15 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                 | "E" -> TramRouting
                 | "T" -> Trolleybus
                 | _ -> RoadBus
-            let result=graph.CaptureContextEvidence(routingMode,previous,coordinates,next)
+            if tracked then graph.CaptureContextEvidenceTracked(routingMode,previous,coordinates,next)
+            else struct(graph.CaptureContextEvidence(routingMode,previous,coordinates,next),Unchecked.defaultof<_>)
+        let route (item:CaptureRoutingWorkRow) =
+            let result=
+                match options.routingCache with
+                | Some cache -> cache.GetOrRoute(item.routingKey,fun () -> routeWork true item.work)
+                | None ->
+                    let struct(evidence,_)=routeWork false item.work
+                    evidence
             let count=Interlocked.Increment(&completed)
             if count%250L=0L then
                 lock progressLock (fun () ->
@@ -686,8 +701,7 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                         (Some $"logical_contexts={contextCount}"))
             result
         let workerTasks =
-            queues
-            |> Array.map(fun queue ->
+            Array.init admittedWorkers (fun _ ->
                 Task.Run(fun () ->
                     try
                         ReplayableRowStore<RoutedCaptureRow>.Create(
@@ -697,7 +711,7 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                                         ordinal=item.ordinal
                                         routingKey=item.routingKey
                                         work=item.work
-                                        routed=route item.work } })
+                                        routed=route item } })
                     with _ ->
                         linkedCancellation.Cancel()
                         reraise()))
@@ -708,7 +722,7 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                 try
                     for item in routingWork.ReadRows() do
                         linkedCancellation.Token.ThrowIfCancellationRequested()
-                        queues.[item.ordinal%admittedWorkers].Add(item,linkedCancellation.Token)
+                        queue.Add(item,linkedCancellation.Token)
                 with error ->
                     dispatchFailure<-Some error
                     linkedCancellation.Cancel()
@@ -740,7 +754,7 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
         finally
             graph.MaximumWorkers<-originalMaximumWorkers
             completeQueues()
-            for queue in queues do queue.Dispose()
+            queue.Dispose()
     with _ ->
         for value in owned do value.Dispose()
         reraise()
@@ -753,6 +767,7 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                 if routedRows.MoveNext() then Some routedRows.Current else None
             let mutable currentGroup:struct(int64*string) option=None
             let mutable ordinal=0
+            let mutable workIndex=0
             for work in orderedWork.ReadRows() do
                 let group=struct(work.context.key.stopId,work.context.key.mode)
                 if currentGroup<>Some group then
@@ -767,7 +782,8 @@ let captureToStoreRestrictedWithCancellation (cancellationToken:CancellationToke
                             currentRouted<-
                                 if routedRows.MoveNext() then Some routedRows.Current else None
                         | _ -> reading<-false
-                let key=routingKey work
+                let key=workRoutingKeys.[workIndex]
+                workIndex<-workIndex+1
                 match cache.TryGetValue key with
                 | true,evidence ->
                     yield struct(ordinal,work,evidence)

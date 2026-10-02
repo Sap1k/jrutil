@@ -111,6 +111,7 @@
     <Compile Include="src/Jdf/JdfPostScorer.fs" />
     <Compile Include="src/Jdf/JdfPostInferencePolicy.fs" />
     <Compile Include="src/Jdf/JdfPostInference.fs" />
+    <Compile Include="src/Jdf/JdfRoutingCache.fs" />
     <Compile Include="src/Jdf/JdfPostEvidence.fs" />
     <Compile Include="src/Jdf/JdfPostEvidenceStore.fs" />
     <Compile Include="src/Jdf/JdfPostEvidenceReader.fs" />
@@ -165,5 +166,26 @@
   <ItemGroup>
     <ProjectReference Include="../ext-services-cs/ext-services-cs.csproj" />
   </ItemGroup>
+
+  <!-- The routing cache reuses results only from the same routing code. Graph
+       build changes already show up in its tile fingerprints, so this hashes
+       the search, evidence and projection sources plus the cache format. -->
+  <ItemGroup>
+    <RoutingSource Include="src/GeoData/Osm.fs;src/GeoData/Common.fs;src/Jdf/JdfRoutingCache.fs" />
+  </ItemGroup>
+  <Target Name="JrUtilRoutingSourceHash" BeforeTargets="GetAssemblyAttributes;CoreCompile">
+    <GetFileHash Files="@(RoutingSource)" Algorithm="SHA256">
+      <Output TaskParameter="Items" ItemName="RoutingSourceHashes" />
+    </GetFileHash>
+    <PropertyGroup>
+      <RoutingSourceSha256>@(RoutingSourceHashes->'%(FileHash)', '-')</RoutingSourceSha256>
+    </PropertyGroup>
+    <ItemGroup>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>RoutingSourceSha256</_Parameter1>
+        <_Parameter2>$(RoutingSourceSha256)</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
 
 </Project>

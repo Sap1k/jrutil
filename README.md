@@ -398,6 +398,13 @@ The input must be the Osmium-prepared demand clip and have its matching
 `.manifest.json` sidecar. `--no-estimated-posts` remains the complete rollback
 path.
 
+`--routing-cache=DIR` reuses routed context evidence across runs. Each entry
+records the 1 km tiles of the routing graph its computation read, and it is
+reused only while their fingerprints are unchanged, so a changed demand clip or
+OSM update recomputes only nearby contexts and output stays byte-identical to
+routing everything. A change to the routing sources invalidates the cache;
+entries unused for 45 days are dropped.
+
 For retraining, directed routing can be captured once into a policy-neutral
 evidence pack without writing a bundle:
 

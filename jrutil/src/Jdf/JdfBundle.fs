@@ -145,20 +145,26 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
                          executionOptions.maximumWorkers)
         progress "prepare-routing-snaps" "completed" (int64 graph.EdgeCount)
                  (Some(int64 graph.EdgeCount)) "edges" None 0
+        let routingHash=sha256File routingPbfPath
+        let routingCache =
+            executionOptions.routingCachePath
+            |> Option.map (fun directory ->
+                JdfRoutingCache.RoutingContextCache(directory, graph))
         use captured =
             JdfPostEvidence.captureToStoreRestricted
-                { maximumWorkers=executionOptions.maximumWorkers
+                { maximumWorkers=executionOptions.routingWorkers
                   memoryBudgetBytes=executionOptions.memoryBudgetBytes
                   preflight=capturePreflight
                   progress=fun phase count total detail ->
                       progress phase "running" count total "items" detail
-                               executionOptions.maximumWorkers }
+                               executionOptions.maximumWorkers
+                  routingCache=routingCache }
                 executionOptions.captureRestriction
                 graph batch
+        routingCache |> Option.iter _.Save()
         progress "capture-post-inference-evidence" "started" 0L None "rows" None 0
         writePostEvidenceStore descriptor captureToolVersion evidencePath routingPbfPath captured
             (fun phase count total -> progress phase "running" count total "rows" None 1)
-        let routingHash=sha256File routingPbfPath
         use store=JdfPostEvidenceStore.openValidatedStore
                       { mergedJdfSha256=Some descriptor.payloadSha256
                         routingPbfSha256=Some routingHash
@@ -358,13 +364,21 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     // temporary evidence pack, the same contract capture
                     // writes; every consolidation and publication decision is
                     // made by the evaluator below.
+                    let routingPath=routingPbfPath.Value
+                    let routingHash=sha256File routingPath
+                    let routingCache =
+                        executionOptions.routingCachePath
+                        |> Option.map (fun directory ->
+                            JdfRoutingCache.RoutingContextCache(directory, graph))
                     use evidenceStore =
                         JdfPostEvidence.captureToStore
-                            { maximumWorkers=executionOptions.maximumWorkers
+                            { maximumWorkers=executionOptions.routingWorkers
                               memoryBudgetBytes=executionOptions.memoryBudgetBytes
                               preflight=ignore
-                              progress=progress }
+                              progress=progress
+                              routingCache=routingCache }
                             graph batch
+                    routingCache |> Option.iter _.Save()
                     let evidencePath =
                         match executionOptions.capturePostInferenceEvidencePath with
                         | Some path -> path
@@ -372,8 +386,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                             let path=Path.Combine(Path.GetTempPath(),$"jrutil-post-evidence-{Guid.NewGuid():N}")
                             liveEvidenceTemporaryDirectory<-Some path
                             path
-                    let routingPath=routingPbfPath.Value
-                    let routingHash=sha256File routingPath
                     started "capture-post-inference-evidence" None "rows"
                     writePostEvidenceStore descriptor converterVersion evidencePath routingPath evidenceStore
                         (fun phase count total ->
@@ -666,6 +678,8 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
 let execute (options: BundleOptions) inputPath outputPath =
     if options.maximumWorkers <= 0 then
         invalidArg "options" "Bundle maximum workers must be positive"
+    if options.routingWorkers <= 0 then
+        invalidArg "options" "Bundle routing workers must be positive"
     if options.memoryBudgetBytes <= 0L then
         invalidArg "options" "Bundle memory budget must be positive"
     let executionMode =

@@ -123,6 +123,12 @@ type BundleOptions = {
     estimatedPosts: bool
     routingPbfPath: string option
     maximumWorkers: int
+    /// Post-inference routing workers. The routing graph is memory-mapped and
+    /// shared, and the capture stores divide the memory budget between workers,
+    /// so routing is not bound by the per-worker allowance of the other phases.
+    routingWorkers: int
+    /// Directory keeping routed post-inference evidence between runs.
+    routingCachePath: string option
     memoryBudgetBytes: int64
     capturePostInferenceEvidencePath: string option
     postInferenceEvidenceOnly: bool
@@ -145,6 +151,8 @@ let defaultBundleOptions = {
     estimatedPosts = true
     routingPbfPath = None
     maximumWorkers = 1
+    routingWorkers = 1
+    routingCachePath = None
     memoryBudgetBytes = Int64.MaxValue
     capturePostInferenceEvidencePath = None
     postInferenceEvidenceOnly = false

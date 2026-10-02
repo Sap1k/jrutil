@@ -432,7 +432,7 @@ type JdfBundleTests() =
             let phases=ResizeArray<string>()
             JdfPostInferencePolicy.PostInferencePhaseProbe.reset()
             let options={JdfBundleModel.defaultBundleOptions with
-                            maximumWorkers=3;memoryBudgetBytes=1L
+                            maximumWorkers=3;routingWorkers=3;memoryBudgetBytes=1L
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some evidence
                             progress=fun value -> phases.Add(value.phase)}
@@ -764,7 +764,7 @@ type JdfBundleTests() =
             use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(routing)
             let options:JdfPostEvidence.PostEvidenceCaptureOptions = {
                 maximumWorkers=2;memoryBudgetBytes=Int64.MaxValue;preflight=ignore
-                progress=fun _ _ _ _ -> () }
+                progress=(fun _ _ _ _ -> ());routingCache=None }
             use captured=JdfPostEvidence.captureToStore options graph withoutPreciseCentroid
             let observations=captured.observations.ReadRows() |> Seq.toArray
             let routePoints=captured.routePoints.ReadRows() |> Seq.toArray
@@ -795,7 +795,7 @@ type JdfBundleTests() =
             Assert.ThrowsExactly<OperationCanceledException>(fun () ->
                 JdfPostEvidence.captureToStoreWithCancellation cancellation.Token
                     {maximumWorkers=4;memoryBudgetBytes=1L;preflight=ignore
-                     progress=fun _ _ _ _ -> ()}
+                     progress=(fun _ _ _ _ -> ());routingCache=None}
                     graph batch |> ignore)
             |> ignore
             assertEqual before (spoolFiles())
@@ -825,7 +825,7 @@ type JdfBundleTests() =
             let sentinel=Path.Combine(collision,"owned.txt")
             File.WriteAllText(sentinel,"preserve")
             let options={JdfBundleModel.defaultBundleOptions with
-                            maximumWorkers=4;memoryBudgetBytes=1L
+                            maximumWorkers=4;routingWorkers=4;memoryBudgetBytes=1L
                             postInferenceEvidenceOnly=true
                             capturePostInferenceEvidencePath=Some collision}
             Assert.ThrowsExactly<ArgumentException>(fun () ->
@@ -866,13 +866,30 @@ type JdfBundleTests() =
                 let captureOptions:JdfPostEvidence.PostEvidenceCaptureOptions = {
                     maximumWorkers=workers;memoryBudgetBytes=budget
                     preflight=ignore
-                    progress=fun _ _ _ _ -> () }
+                    progress=(fun _ _ _ _ -> ());routingCache=None }
                 use captured=JdfPostEvidence.captureToStore captureOptions graph value
                 JdfBundleEvidence.writePostEvidenceStore snapshot "test-tool"
                     (Path.Combine(root,name)) routing captured (fun _ _ _ -> ())
+            // A cold cache routes everything; a warm one must return the same evidence.
+            let cacheDirectory=Path.Combine(root,"routing-cache")
+            let cachedCapture name =
+                let cache=JdfRoutingCache.RoutingContextCache(cacheDirectory,graph)
+                let captureOptions={JdfPostEvidence.defaultCaptureOptions with
+                                        maximumWorkers=4;routingCache=Some cache}
+                use captured=JdfPostEvidence.captureToStore captureOptions graph batch
+                JdfBundleEvidence.writePostEvidenceStore snapshot "test-tool"
+                    (Path.Combine(root,name)) routing captured (fun _ _ _ -> ())
+                cache.Save()
+                cache
+            let cold=cachedCapture "cache-cold"
+            Assert.AreEqual(0L,cold.Hits)
+            Assert.IsTrue(cold.Misses>0L)
+            let warm=cachedCapture "cache-warm"
+            Assert.AreEqual(cold.Misses,warm.Hits)
+            Assert.AreEqual(0L,warm.Misses)
             let baseline=Path.Combine(root,"one-worker-memory")
             let relativeFiles=Array.append JdfPostInference.RequiredEvidenceFiles [|"manifest.json"|]
-            for name,_,_,_ in variants |> Array.skip 1 do
+            for name in Array.append (variants |> Array.skip 1 |> Array.map (fun (name,_,_,_) -> name)) [|"cache-cold";"cache-warm"|] do
                 for relative in relativeFiles do
                     CollectionAssert.AreEqual(
                         File.ReadAllBytes(Path.Combine(baseline,relative)),
@@ -890,6 +907,83 @@ type JdfBundleTests() =
             if Directory.Exists(root) then Directory.Delete(root,true)
 
     [<TestMethod>]
+    member _.``Routing cache reuses evidence exactly across graph changes outside the read region``() =
+        let root=Path.Combine(Path.GetTempPath(),"jrutil-routing-cache-"+Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(root) |> ignore
+        try
+            let _,input,routing=routedCaptureFixture root
+            use archive=ZipFile.OpenRead(input)
+            let batch=Jdf.jdfBatchDirParser () (Jdf.ZipArchive archive)
+            let inputSha =
+                use stream=File.OpenRead(input)
+                Security.Cryptography.SHA256.HashData(stream) |> Convert.ToHexString
+                |> _.ToLowerInvariant()
+            let snapshot:JdfBundleModel.SnapshotDescriptor = {
+                sourceId="national-jdf";retrievedAt="2026-07-18T12:00:00+02:00"
+                retrievalMethod="fixture";sourceUri=None;licence="synthetic-test-data"
+                payloadKind="zip";payloadSha256=inputSha;payloadBytes=FileInfo(input).Length }
+            let baseObjects:OsmGeo array = [|
+                osmNode 1L 49.99 14.0;osmNode 2L 50.00 14.0;osmNode 3L 50.01 14.0;osmNode 4L 50.02 14.0
+                osmNode 11L 49.99 14.00012;osmNode 12L 50.00 14.00012
+                osmNode 13L 50.01 14.00012;osmNode 14L 50.02 14.00012
+                osmWay 10L [|1L;2L;3L;4L|] ["highway","residential"]
+                osmWay 11L [|11L;12L;13L;14L|] ["highway","residential"]
+                osmWay 12L [|1L;11L|] ["highway","residential"]
+                osmWay 13L [|4L;14L|] ["highway","residential"] |]
+            let writeGraph name (extra:OsmGeo array) =
+                let path=Path.Combine(root,name+".osm.pbf")
+                let objects=
+                    Array.append baseObjects extra
+                    |> Array.sortBy(fun value ->
+                        (match value with :? Node -> 0 | :? Way -> 1 | _ -> 2),value.Id.Value)
+                writeOsmPbf path objects
+                File.WriteAllText(path+".manifest.json",JsonSerializer.Serialize(
+                    {|filter_schema=JdfBundleInput.routingEnvelopePolicy;source_key="fixture"
+                      output={|bytes=FileInfo(path).Length|}|}))
+                path
+            let capture name (routingPath:string) cacheDirectory =
+                use graph=JrUtil.GeoData.Osm.PackedRoutingGraph.Open(routingPath)
+                let cache=cacheDirectory |> Option.map(fun directory ->
+                    JdfRoutingCache.RoutingContextCache(directory,graph))
+                let options={JdfPostEvidence.defaultCaptureOptions with
+                                maximumWorkers=2;routingCache=cache}
+                use captured=JdfPostEvidence.captureToStore options graph batch
+                let output=Path.Combine(root,name)
+                JdfBundleEvidence.writePostEvidenceStore snapshot "test-tool"
+                    output routingPath captured (fun _ _ _ -> ())
+                cache |> Option.iter _.Save()
+                output,cache
+            let assertSameEvidence expected actual =
+                for relative in JdfPostInference.RequiredEvidenceFiles do
+                    CollectionAssert.AreEqual(
+                        File.ReadAllBytes(Path.Combine(expected,relative)),
+                        File.ReadAllBytes(Path.Combine(actual,relative)),
+                        relative)
+            let cacheDirectory=Some(Path.Combine(root,"cache"))
+            let _,cold=capture "cold" routing cacheDirectory
+            Assert.AreEqual(0L,cold.Value.Hits)
+            // A road 20 km away whose lower OSM IDs renumber every later node
+            // and edge: nothing a context read changed.
+            let far=writeGraph "far" [|
+                osmNode 5L 50.2 14.0;osmNode 6L 50.2 14.01
+                osmWay 9L [|5L;6L|] ["highway","residential"] |]
+            let farFresh,_=capture "far-fresh" far None
+            let farCached,warm=capture "far-cached" far cacheDirectory
+            assertSameEvidence farFresh farCached
+            Assert.AreEqual(cold.Value.Misses,warm.Value.Hits)
+            Assert.AreEqual(0L,warm.Value.Invalidated)
+            // A side road at a stop invalidates the contexts that read it.
+            let near=writeGraph "near" [|
+                osmNode 15L 50.01 14.0004
+                osmWay 14L [|13L;15L|] ["highway","residential"] |]
+            let nearFresh,_=capture "near-fresh" near None
+            let nearCached,changed=capture "near-cached" near cacheDirectory
+            assertSameEvidence nearFresh nearCached
+            Assert.IsTrue(changed.Value.Invalidated>0L)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root,true)
+
+    [<TestMethod>]
     member _.``Evaluation is deterministic and diagnostics do not change decisions``() =
         let root=Path.Combine(Path.GetTempPath(),"jrutil-live-replay-equality-"+Guid.NewGuid().ToString("N"))
         Directory.CreateDirectory(root) |> ignore
@@ -897,7 +991,7 @@ type JdfBundleTests() =
             let descriptorPath,input,routing=routedCaptureFixture root
             let evidence=Path.Combine(root,"evidence")
             let captureOptions={JdfBundleModel.defaultBundleOptions with
-                                    maximumWorkers=3;memoryBudgetBytes=1L
+                                    maximumWorkers=3;routingWorkers=3;memoryBudgetBytes=1L
                                     postInferenceEvidenceOnly=true
                                     capturePostInferenceEvidencePath=Some evidence}
             JdfBundle.execute { captureOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing } input (Path.Combine(root,"capture-unused")) |> ignore
@@ -962,7 +1056,7 @@ type JdfBundleTests() =
             let liveOutput=Path.Combine(root,"live")
             JdfBundle.execute
                 {JdfBundleModel.defaultBundleOptions with
-                    maximumWorkers=3;memoryBudgetBytes=1L;postInferencePolicyPath=Some policyPath; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing} input liveOutput |> ignore
+                    maximumWorkers=3;routingWorkers=3;memoryBudgetBytes=1L;postInferencePolicyPath=Some policyPath; snapshotDescriptorPath=descriptorPath; converterVersion="test-tool"; routingPbfPath=Some routing} input liveOutput |> ignore
             JrUtil.Serving.Validation.validatePackage liveOutput |> ignore
             // A route stop is served at the calls' stop place, whatever post each trip uses.
             let serving name = Path.Combine(liveOutput,"serving",name+".parquet")
