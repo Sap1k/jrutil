@@ -172,6 +172,16 @@ type private RoutingSearchWorkspace = {
     reverseDistances: Dictionary<int,float>
     reverseSuccessors: Dictionary<int,int>
     reverseQueue: PriorityQueue<int,struct(float*int)>
+    /// Per-thread metrics, summed on read; shared atomic counters contend
+    /// on every restricted transition.
+    mutable restrictionLookups: int64
+    mutable restrictionRulesExamined: int64
+    /// Bounding box of every projected point whose graph data the current
+    /// tracked computation read; see PackedRoutingGraph.CaptureContextEvidenceTracked.
+    mutable readMinX: float
+    mutable readMinY: float
+    mutable readMaxX: float
+    mutable readMaxY: float
 }
 
 let private newRoutingSearchWorkspace () = {
@@ -183,7 +193,46 @@ let private newRoutingSearchWorkspace () = {
     forwardQueue=PriorityQueue<int,struct(float*int)>()
     reverseDistances=Dictionary<int,float>(); reverseSuccessors=Dictionary<int,int>()
     reverseQueue=PriorityQueue<int,struct(float*int)>()
+    restrictionLookups=0L
+    restrictionRulesExamined=0L
+    readMinX=Double.PositiveInfinity; readMinY=Double.PositiveInfinity
+    readMaxX=Double.NegativeInfinity; readMaxY=Double.NegativeInfinity
 }
+
+/// An axis-aligned box of projected metres; empty when min > max.
+[<Struct>]
+type RoutingReadBox = { minX: float; minY: float; maxX: float; maxY: float }
+
+let private emptyReadBox =
+    { minX=Double.PositiveInfinity; minY=Double.PositiveInfinity
+      maxX=Double.NegativeInfinity; maxY=Double.NegativeInfinity }
+
+let inline private recordRead (workspace: RoutingSearchWorkspace) (x: float) (y: float) =
+    if x < workspace.readMinX then workspace.readMinX <- x
+    if x > workspace.readMaxX then workspace.readMaxX <- x
+    if y < workspace.readMinY then workspace.readMinY <- y
+    if y > workspace.readMaxY then workspace.readMaxY <- y
+
+let private recordReadBox (workspace: RoutingSearchWorkspace) (box: RoutingReadBox) =
+    if box.minX <= box.maxX then
+        recordRead workspace box.minX box.minY
+        recordRead workspace box.maxX box.maxY
+
+let private resetReadBox (workspace: RoutingSearchWorkspace) =
+    workspace.readMinX <- Double.PositiveInfinity; workspace.readMinY <- Double.PositiveInfinity
+    workspace.readMaxX <- Double.NegativeInfinity; workspace.readMaxY <- Double.NegativeInfinity
+
+let private currentReadBox (workspace: RoutingSearchWorkspace) =
+    { minX=workspace.readMinX; minY=workspace.readMinY; maxX=workspace.readMaxX; maxY=workspace.readMaxY }
+
+/// Clear search state for reuse. `Dictionary.Clear` wipes the whole bucket
+/// array, so a table grown by one large search would slow every later small
+/// search; shrink those back.
+let private resetSearchTable (table: Dictionary<'key,'value>) =
+    if table.Count > 0 then
+        let capacity = table.EnsureCapacity(0)
+        table.Clear()
+        if capacity > 65_536 then table.TrimExcess(4_096)
 
 [<Struct; NoComparison; NoEquality>]
 type private RoutingNodeBuild = { id: int64; x: float32; y: float32; barrierBlocked: byte }
@@ -247,6 +296,8 @@ let private routingDirections (way: Way) =
 let private modeFlag = function RoadBus | Trolleybus -> routingRoad | TramRouting -> routingTram
 let private routingGridKey x y = (int64 x <<< 32) ||| int64 (uint32 y)
 let private routingGridCoordinate value = int (Math.Floor(value / routingCellSize))
+/// Routing-cache validity tiles: 1 km in projected metres.
+let private fingerprintTile (value: float) = int (Math.Floor(value / 1000.0))
 
 let inline private readMapped<'value when 'value : unmanaged> (pointer: nativeint) (offset: int64) =
     let address = NativePtr.ofNativeInt<byte>(pointer + nativeint offset)
@@ -264,7 +315,6 @@ type PackedRoutingGraph private
     let cache = ConcurrentDictionary<struct (byte * int * int * int * int * bool), RoutedDistance>()
     let cacheOrder = ConcurrentQueue<struct (byte * int * int * int * int * bool)>()
     let mutable cacheHits, cacheMisses, searches = 0L, 0L, 0L
-    let mutable restrictionLookups, restrictionRulesExamined = 0L, 0L
     let mutable maximumWorkers = 1
     let mutable disposed = false
     let searchWorkspaces = new ThreadLocal<RoutingSearchWorkspace>(newRoutingSearchWorkspace,true)
@@ -276,16 +326,20 @@ type PackedRoutingGraph private
             attempt <- attempt+1
     let preparedSnaps =
         Dictionary<struct (byte * int64 * int64), DirectedSnapState array>()
-    let coordinateKey mode px py =
+    // Exact coordinates: a rounded key let whichever nearby coordinate was
+    // prepared first decide the snaps of every coordinate sharing the key.
+    let coordinateKey mode (px: float) (py: float) =
         let modeKey = match mode with RoadBus -> 0uy | Trolleybus -> 1uy | TramRouting -> 2uy
-        struct (modeKey,
-                int64 (Math.Round(px * 10.0, MidpointRounding.AwayFromZero)),
-                int64 (Math.Round(py * 10.0, MidpointRounding.AwayFromZero)))
+        struct (modeKey, BitConverter.DoubleToInt64Bits(px), BitConverter.DoubleToInt64Bits(py))
     let sortedRestrictions =
         restrictions
         |> Array.sortBy (fun restriction ->
             restriction.viaNode, restriction.fromWay, restriction.only, restriction.toWay)
-    let restrictedViaNodes = HashSet<int>(sortedRestrictions |> Seq.map (fun value -> value.viaNode))
+    let restrictedViaNodes =
+        let bits = Array.zeroCreate<uint64> ((nodeCount + 63) / 64)
+        for restriction in sortedRestrictions do
+            bits.[restriction.viaNode >>> 6] <- bits.[restriction.viaNode >>> 6] ||| (1UL <<< (restriction.viaNode &&& 63))
+        bits
     let acquirePointer (accessor: MemoryMappedViewAccessor) =
         let mutable pointer = NativePtr.nullPtr<byte>
         accessor.SafeMemoryMappedViewHandle.AcquirePointer(&pointer)
@@ -309,10 +363,10 @@ type PackedRoutingGraph private
     let incomingEdge index = readMapped<int> reverseEdgePointer (int64 index*4L)
     let snapKey index = readMapped<int64> snapPointer (int64 index*routingSnapStride)
     let snapEdge index = readMapped<int> snapPointer (int64 index*routingSnapStride+8L)
-    let transitionAllowed incoming outgoing viaNode =
-        if not (restrictedViaNodes.Contains(viaNode)) then true else
+    let transitionAllowed (workspace: RoutingSearchWorkspace) incoming outgoing viaNode =
+        if restrictedViaNodes.[viaNode >>> 6] &&& (1UL <<< (viaNode &&& 63)) = 0UL then true else
         let incomingWay, outgoingWay = edgeWay incoming, edgeWay outgoing
-        Interlocked.Increment(&restrictionLookups) |> ignore
+        workspace.restrictionLookups <- workspace.restrictionLookups + 1L
         let compareKey (restriction: RoutingRestriction) =
             let viaComparison = compare restriction.viaNode viaNode
             if viaComparison <> 0 then viaComparison
@@ -326,7 +380,7 @@ type PackedRoutingGraph private
         while allowed && index < sortedRestrictions.Length
               && compareKey sortedRestrictions.[index] = 0 do
             let restriction = sortedRestrictions.[index]
-            Interlocked.Increment(&restrictionRulesExamined) |> ignore
+            workspace.restrictionRulesExamined <- workspace.restrictionRulesExamined + 1L
             allowed <-
                 if restriction.only then restriction.toWay = outgoingWay
                 else restriction.toWay <> outgoingWay
@@ -334,6 +388,9 @@ type PackedRoutingGraph private
         allowed
     let edgePenalty index = if edgeFlags index &&& routingSevere <> 0us then 8.0 else 1.0
     let edgeCost index = edgePenalty index * edgeLength index
+    let recordEdge workspace edge =
+        recordRead workspace (nodeX (edgeFrom edge)) (nodeY (edgeFrom edge))
+        recordRead workspace (nodeX (edgeTo edge)) (nodeY (edgeTo edge))
     let pointSegmentSnap px py edgeIndex =
         let left, right = edgeFrom edgeIndex, edgeTo edgeIndex
         let x0, y0, x1, y1 = nodeX left, nodeY left, nodeX right, nodeY right
@@ -360,9 +417,13 @@ type PackedRoutingGraph private
         while finish < snapCount && snapKey finish = key do finish <- finish + 1
         ValueSome(struct(first, finish))
     let snap mode px py =
+        let workspace = searchWorkspaces.Value
+        recordRead workspace px py
         match preparedSnaps.TryGetValue(coordinateKey mode px py) with
         | true, values -> values
         | _ ->
+            recordRead workspace (px-2.0*routingCellSize) (py-2.0*routingCellSize)
+            recordRead workspace (px+2.0*routingCellSize) (py+2.0*routingCellSize)
             let required = modeFlag mode
             let values, seen = ResizeArray<DirectedSnapState>(), HashSet<int>()
             let cx, cy = routingGridCoordinate px, routingGridCoordinate py
@@ -397,7 +458,10 @@ type PackedRoutingGraph private
         let predecessors=workspace.predecessors
         let depths=workspace.depths
         let queue=workspace.routeQueue
-        targets.Clear(); distances.Clear(); origins.Clear(); predecessors.Clear(); depths.Clear(); queue.Clear()
+        resetSearchTable targets; resetSearchTable distances; resetSearchTable origins
+        resetSearchTable predecessors; resetSearchTable depths; queue.Clear()
+        for state in startSnaps do recordEdge workspace state.edgeId
+        for state in finishSnaps do recordEdge workspace state.edgeId
         for state in finishSnaps do
             match targets.TryGetValue(state.edgeId) with
             | true, values -> values.Add(state)
@@ -470,11 +534,12 @@ type PackedRoutingGraph private
                                 resultEdge <- edge
                 | _ -> ()
                 let node = edgeTo edge
+                recordRead workspace (nodeX node) (nodeY node)
                 let first = int (outgoingOffset node)
                 let finish = int (outgoingOffset (node+1))
                 for outgoing = first to finish-1 do
                     let flags = edgeFlags outgoing
-                    if flags &&& required <> 0us && transitionAllowed edge outgoing node then
+                    if flags &&& required <> 0us && transitionAllowed workspace edge outgoing node then
                         let candidate = distance + edgeCost outgoing
                         match distances.TryGetValue(outgoing) with
                         | true, old when old <= candidate -> ()
@@ -506,26 +571,33 @@ type PackedRoutingGraph private
         let distances=workspace.forwardDistances
         let parents=workspace.forwardParents
         let queue=workspace.forwardQueue
-        distances.Clear(); parents.Clear(); queue.Clear()
+        resetSearchTable distances; resetSearchTable parents; queue.Clear()
         let startEdge = startSnap.edgeId
+        recordEdge workspace startEdge
         let initial = (1.0-startSnap.fraction)*edgeCost startEdge
         distances.[startEdge] <- initial
         queue.Enqueue(startEdge,struct(initial,startEdge))
         let mutable explored = 0
-        while queue.Count > 0 && explored < 100_000 do
+        let mutable bounded = true
+        while bounded && queue.Count > 0 && explored < 100_000 do
             let mutable edge = 0
             let mutable priority = Unchecked.defaultof<struct(float*int)>
             queue.TryDequeue(&edge,&priority) |> ignore
             let struct (queuedDistance,_) = priority
             let distance = distances.[edge]
-            if queuedDistance <= distance+0.0001 && distance <= maximumCost then
+            // Entries leave in priority order, and an entry is only expanded
+            // when its priority is within 0.0001 of a distance <= maximumCost,
+            // so nothing after this one can be expanded either.
+            if queuedDistance > maximumCost+0.0001 then bounded <- false
+            elif queuedDistance <= distance+0.0001 && distance <= maximumCost then
                 explored <- explored+1
                 let node = edgeTo edge
+                recordRead workspace (nodeX node) (nodeY node)
                 let first = int (outgoingOffset node)
                 let finish = int (outgoingOffset (node+1))
                 for outgoing=first to finish-1 do
                     let flags=edgeFlags outgoing
-                    if flags &&& required <> 0us && transitionAllowed edge outgoing node then
+                    if flags &&& required <> 0us && transitionAllowed workspace edge outgoing node then
                         let candidate=distance+edgeCost outgoing
                         match distances.TryGetValue(outgoing) with
                         | true,old when old <= candidate -> ()
@@ -543,27 +615,34 @@ type PackedRoutingGraph private
         let distances=workspace.reverseDistances
         let successors=workspace.reverseSuccessors
         let queue=workspace.reverseQueue
-        distances.Clear(); successors.Clear(); queue.Clear()
+        resetSearchTable distances; resetSearchTable successors; queue.Clear()
         let finishEdge = finishSnap.edgeId
+        recordEdge workspace finishEdge
         let initial = finishSnap.fraction*edgeCost finishEdge
         distances.[finishEdge] <- initial
         queue.Enqueue(finishEdge,struct(initial,finishEdge))
         let mutable explored = 0
-        while queue.Count > 0 && explored < 100_000 do
+        let mutable bounded = true
+        while bounded && queue.Count > 0 && explored < 100_000 do
             let mutable edge = 0
             let mutable priority = Unchecked.defaultof<struct(float*int)>
             queue.TryDequeue(&edge,&priority) |> ignore
             let struct (queuedDistance,_) = priority
             let distance = distances.[edge]
-            if queuedDistance <= distance+0.0001 && distance <= maximumCost then
+            // Entries leave in priority order, and an entry is only expanded
+            // when its priority is within 0.0001 of a distance <= maximumCost,
+            // so nothing after this one can be expanded either.
+            if queuedDistance > maximumCost+0.0001 then bounded <- false
+            elif queuedDistance <= distance+0.0001 && distance <= maximumCost then
                 explored <- explored+1
                 let node = edgeFrom edge
+                recordRead workspace (nodeX node) (nodeY node)
                 let first = int (incomingOffset node)
                 let finish = int (incomingOffset (node+1))
                 for index=first to finish-1 do
                     let incoming = incomingEdge index
                     if edgeFlags incoming &&& required <> 0us
-                       && transitionAllowed incoming edge node then
+                       && transitionAllowed workspace incoming edge node then
                         // Distance is measured at edgeFrom. Moving to the
                         // predecessor therefore adds the predecessor cost.
                         let candidate=distance+edgeCost incoming
@@ -593,10 +672,95 @@ type PackedRoutingGraph private
         let mutable hash=14695981039346656037UL
         for edge in path do hash <- (hash ^^^ uint64(uint32 edge))*1099511628211UL
         hash.ToString("x16",Globalization.CultureInfo.InvariantCulture)
-    let localThreadCache=ConcurrentDictionary<int,struct(string*bool)>()
-    let threadEndCache=ConcurrentDictionary<struct(uint16*int*int),struct(int64*bool)>()
+    /// Like corridorIdentity, but over OSM node and way IDs, so it does not
+    /// depend on the graph's edge numbering (which differs between clips).
+    let stableCorridorIdentity (path: int array) =
+        let mutable hash=14695981039346656037UL
+        let mix (value: int64) =
+            for shift in 0 .. 8 .. 56 do
+                hash <- (hash ^^^ ((uint64 value >>> shift) &&& 0xffUL))*1099511628211UL
+        for edge in path do
+            mix (nodeId (edgeFrom edge)); mix (nodeId (edgeTo edge)); mix (edgeWay edge)
+        hash.ToString("x16",Globalization.CultureInfo.InvariantCulture)
+    let tryNodeIndex (osmId: int64) =
+        // Node records are sorted by OSM ID (enforced while building).
+        let mutable low, high, found = 0, nodeCount-1, ValueNone
+        while found.IsNone && low <= high do
+            let middle = low + (high-low)/2
+            let value = nodeId middle
+            if value = osmId then found <- ValueSome middle
+            elif value < osmId then low <- middle+1
+            else high <- middle-1
+        found
+    /// Per-tile multiset hashes of everything routing can read: edges
+    /// (with endpoint coordinates and adjacency ranks, assigned to every tile
+    /// within the 75 m snap radius of the segment) and turn restrictions.
+    let tileFingerprints = lazy (
+        let tiles = Dictionary<int64, struct(uint64*uint64)>()
+        let merge (local: Dictionary<int64, struct(uint64*uint64)>) =
+            lock tiles (fun () ->
+                for KeyValue(key, struct(first, second)) in local do
+                    match tiles.TryGetValue(key) with
+                    | true, struct(oldFirst, oldSecond) -> tiles.[key] <- struct(oldFirst+first, oldSecond+second)
+                    | _ -> tiles.[key] <- struct(first, second))
+        let contribute (local: Dictionary<int64, struct(uint64*uint64)>) (record: byte array) length key =
+            let span = ReadOnlySpan<byte>(record, 0, length)
+            let first = System.IO.Hashing.XxHash3.HashToUInt64(span, 1L)
+            let second = System.IO.Hashing.XxHash3.HashToUInt64(span, 2L)
+            match local.TryGetValue(key) with
+            | true, struct(oldFirst, oldSecond) -> local.[key] <- struct(oldFirst+first, oldSecond+second)
+            | _ -> local.[key] <- struct(first, second)
+        let write (record: byte array) offset (value: int64) =
+            Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Span<byte>(record, offset, 8), value)
+        let bits (value: float) = BitConverter.DoubleToInt64Bits(value)
+        let edgeTag, restrictionTag = 2L, 3L
+        let chunkSize = 1_000_000
+        // Edge records carry every node ID and coordinate routing reads, so
+        // nodes no edge touches (also stored) cannot invalidate a tile.
+        Parallel.For(0, (edgeCount+chunkSize-1)/chunkSize, fun chunk ->
+            let local = Dictionary<int64, struct(uint64*uint64)>()
+            let record = Array.zeroCreate<byte> 96
+            for edge = chunk*chunkSize to min edgeCount ((chunk+1)*chunkSize) - 1 do
+                let from, target = edgeFrom edge, edgeTo edge
+                let x0, y0, x1, y1 = nodeX from, nodeY from, nodeX target, nodeY target
+                let firstIncoming = int (incomingOffset target)
+                let mutable low, high = firstIncoming, int (incomingOffset (target+1)) - 1
+                while low < high do
+                    let middle = low + (high-low)/2
+                    if incomingEdge middle < edge then low <- middle+1 else high <- middle
+                write record 0 edgeTag; write record 8 (nodeId from); write record 16 (nodeId target)
+                write record 24 (edgeWay edge); write record 32 (int64 (edgeFlags edge))
+                write record 40 (bits (edgeLength edge))
+                write record 48 (bits x0); write record 56 (bits y0); write record 64 (bits x1); write record 72 (bits y1)
+                write record 80 (int64 (edge - int (outgoingOffset from)))
+                write record 88 (int64 (low - firstIncoming))
+                for tileX = fingerprintTile (min x0 x1 - 75.0) to fingerprintTile (max x0 x1 + 75.0) do
+                    for tileY = fingerprintTile (min y0 y1 - 75.0) to fingerprintTile (max y0 y1 + 75.0) do
+                        contribute local record 96 (routingGridKey tileX tileY)
+            merge local) |> ignore
+        let local = Dictionary<int64, struct(uint64*uint64)>()
+        let record = Array.zeroCreate<byte> 40
+        for restriction in restrictions do
+            write record 0 restrictionTag; write record 8 (nodeId restriction.viaNode)
+            write record 16 restriction.fromWay; write record 24 restriction.toWay
+            write record 32 (if restriction.only then 1L else 0L)
+            contribute local record 40
+                (routingGridKey (fingerprintTile (nodeX restriction.viaNode)) (fingerprintTile (nodeY restriction.viaNode)))
+        merge local
+        tiles)
+    // Both caches store the read box of the walks that produced a value, so
+    // a hit still records which graph data the value depends on.
+    let localThreadCache=ConcurrentDictionary<int,struct(string*bool*RoutingReadBox)>()
+    let threadEndCache=ConcurrentDictionary<struct(uint16*uint16*int*int),struct(int64*bool*RoutingReadBox)>()
+    let mergeReadBox (left: RoutingReadBox) (right: RoutingReadBox) =
+        { minX=min left.minX right.minX; minY=min left.minY right.minY
+          maxX=max left.maxX right.maxX; maxY=max left.maxY right.maxY }
+    let pointReadBox node =
+        let x,y=nodeX node,nodeY node
+        { minX=x; minY=y; maxX=x; maxY=y }
     let localThreadIdentity edge =
-        localThreadCache.GetOrAdd(edge,fun seedEdge ->
+        let struct(identity,reversed,box) =
+          localThreadCache.GetOrAdd(edge,fun seedEdge ->
             let modeMask=edgeFlags seedEdge &&& (routingRoad ||| routingTram)
             let roadClass=if edgeFlags seedEdge &&& routingService<>0us then routingService else 0us
             let neighbours node previous =
@@ -620,45 +784,42 @@ type PackedRoutingGraph private
                            || edgeFlags candidate &&& routingService=roadClass) then add(edgeFrom candidate)
                     reverse<-reverse+1L
                 values
+            // A thread is a maximal chain of nodes with exactly one onward
+            // neighbour. A walk follows it to its end node, or around a pure
+            // cycle back to a visited node, whose identity is its smallest
+            // node. Both results are the same from every start on the thread,
+            // so walks share them through threadEndCache in any order. The
+            // key includes the road class because neighbours filter on it.
             let walk previous start =
                 let mutable prior=previous
                 let mutable current=start
-                let mutable count=0
-                let mutable loop=false
-                let mutable minimum=nodeId current
-                let mutable complete=false
-                let mutable cachedEnd=None
-                let visited=ResizeArray<struct(uint16*int*int)>()
-                while not complete && count<512 do
-                    let cacheKey=struct(modeMask,prior,current)
+                let mutable result=ValueNone
+                let mutable box=emptyReadBox
+                let visited=ResizeArray<struct(uint16*uint16*int*int)>()
+                let visitedNodes=HashSet<int>()
+                let mutable minimum=Int64.MaxValue
+                while result.IsNone do
+                    let cacheKey=struct(modeMask,roadClass,prior,current)
                     match threadEndCache.TryGetValue(cacheKey) with
-                    | true,value ->
-                        cachedEnd<-Some value
-                        complete<-true
+                    | true,struct(cachedEnd,cachedLoop,cachedBox) ->
+                        box<-mergeReadBox box cachedBox
+                        result<-ValueSome(struct(cachedEnd,cachedLoop))
+                    | _ when not (visitedNodes.Add(current)) -> result<-ValueSome(struct(minimum,true))
                     | _ ->
                         visited.Add(cacheKey)
+                        box<-mergeReadBox box (pointReadBox current)
                         minimum<-min minimum (nodeId current)
                         let next=neighbours current prior
-                        if next.Count<>1 then complete<-true
+                        if next.Count<>1 then result<-ValueSome(struct(nodeId current,false))
                         else
-                            let value=next.[0]
-                            if value=start || value=previous then
-                                loop<-true
-                                complete<-true
-                            else
-                                prior<-current
-                                current<-value
-                                count<-count+1
-                let result =
-                    match cachedEnd with
-                    | Some value -> value
-                    | None when loop || count>=512 -> struct(minimum,true)
-                    | None -> struct(nodeId current,false)
-                for key in visited do threadEndCache.TryAdd(key,result) |> ignore
-                result
+                            prior<-current
+                            current<-next.[0]
+                let struct(endNode,loop)=result.Value
+                for key in visited do threadEndCache.TryAdd(key,struct(endNode,loop,box)) |> ignore
+                struct(endNode,loop,box)
             let left,right=edgeFrom seedEdge,edgeTo seedEdge
-            let struct(leftEnd,leftLoop)=walk right left
-            let struct(rightEnd,rightLoop)=walk left right
+            let struct(leftEnd,leftLoop,leftBox)=walk right left
+            let struct(rightEnd,rightLoop,rightBox)=walk left right
             let first,last=min leftEnd rightEnd,max leftEnd rightEnd
             let payload = $"{modeMask}|{roadClass}|{first}|{last}|{leftLoop || rightLoop}"
             let bytes=Text.Encoding.UTF8.GetBytes(payload)
@@ -667,7 +828,9 @@ type PackedRoutingGraph private
             let reversed =
                 if leftLoop || rightLoop then nodeId left>nodeId right
                 else leftEnd>rightEnd
-            struct(identity,reversed))
+            struct(identity,reversed,mergeReadBox leftBox rightBox))
+        recordReadBox searchWorkspaces.Value box
+        struct(identity,reversed)
     let localFaceIdentity edge =
         let struct(identity,_)=localThreadIdentity edge
         identity
@@ -791,8 +954,8 @@ type PackedRoutingGraph private
                        match routeDetailed mode [|start|] [|finish|] turnback with
                        | Routed _,Some path -> yield path
                        | _ -> () |]
-            |> Array.distinctBy(fun path -> corridorIdentity path.edges)
-            |> Array.sortBy(fun path -> path.cost,corridorIdentity path.edges)
+            |> Array.distinctBy(fun path -> stableCorridorIdentity path.edges)
+            |> Array.sortBy(fun path -> path.cost,stableCorridorIdentity path.edges)
             |> Array.truncate 3
         let failureVariant reason = {
             variantRank=0;corridorId=None;absoluteCostMetres=None
@@ -821,7 +984,7 @@ type PackedRoutingGraph private
                 let service=path.edges |> Array.filter(fun edge -> edgeFlags edge &&& routingService<>0us) |> Array.length
                 let restricted=path.edges |> Array.filter(fun edge -> edgeFlags edge &&& routingSevere<>0us) |> Array.length
                 let relative=max 0.0(path.cost-baseline)
-                { variantRank=rank;corridorId=Some(corridorIdentity path.edges)
+                { variantRank=rank;corridorId=Some(stableCorridorIdentity path.edges)
                   absoluteCostMetres=Some path.cost;relativeCostMetres=Some relative
                   relativeCostFraction=Some(if baseline<=0.0 then 0.0 else relative/baseline)
                   pathLengthMetres=Some pathLength;directedEdgeCount=path.edges.Length
@@ -834,7 +997,7 @@ type PackedRoutingGraph private
         let projectedCandidates=candidateCoordinates |> Array.map(fun struct(lon,lat) -> projected lon lat)
         let attachments =
             paths |> Array.mapi(fun rank path ->
-                let corridorId=Some(corridorIdentity path.edges)
+                let corridorId=Some(stableCorridorIdentity path.edges)
                 let maximumCost=path.cost+PostInferenceEvidenceHorizonMetres
                 let forward,parents,forwardLimit=exploreForward mode path.origin maximumCost
                 let reverse,successors,reverseLimit=exploreReverse mode path.target maximumCost
@@ -1217,8 +1380,10 @@ type PackedRoutingGraph private
     member _.CacheHits = cacheHits
     member _.CacheMisses = cacheMisses
     member _.Searches = Interlocked.Read(&searches)
-    member _.RestrictionLookups = Interlocked.Read(&restrictionLookups)
-    member _.RestrictionRulesExamined = Interlocked.Read(&restrictionRulesExamined)
+    member _.RestrictionLookups =
+        searchWorkspaces.Values |> Seq.sumBy (fun workspace -> workspace.restrictionLookups)
+    member _.RestrictionRulesExamined =
+        searchWorkspaces.Values |> Seq.sumBy (fun workspace -> workspace.restrictionRulesExamined)
     member _.PrepareKnownSnaps(coordinates: struct (float * float) array,
                                progress: int64 -> int64 option -> unit) =
         if disposed then raise (ObjectDisposedException(nameof PackedRoutingGraph))
@@ -1228,9 +1393,7 @@ type PackedRoutingGraph private
         for struct (lon,lat) in coordinates do
             let mutable x,y = lon,lat
             wgs84ToEtrs89Ex.Transform(&x,&y)
-            let key = struct (
-                int64 (Math.Round(x * 10.0, MidpointRounding.AwayFromZero)),
-                int64 (Math.Round(y * 10.0, MidpointRounding.AwayFromZero)))
+            let key = struct (BitConverter.DoubleToInt64Bits(x), BitConverter.DoubleToInt64Bits(y))
             if not (coordinateIndexes.ContainsKey(key)) then
                 coordinateIndexes.[key] <- projected.Count
                 projected.Add(struct (x,y))
@@ -1385,6 +1548,62 @@ type PackedRoutingGraph private
                                            ?requireTurnback) =
         routeViaManyEvidence mode previousCoordinates candidateCoordinates nextCoordinates
                              (defaultArg requireTurnback false)
+    /// Context evidence plus the box of projected points whose graph data it
+    /// read; with RegionDigest this lets a cached result be reused exactly
+    /// while that region of a later graph is unchanged.
+    member _.CaptureContextEvidenceTracked(mode,
+                                           previousCoordinates: struct(float*float) array,
+                                           routePointCoordinates: struct(float*float) array,
+                                           nextCoordinates: struct(float*float) array) =
+        if disposed then raise(ObjectDisposedException(nameof PackedRoutingGraph))
+        let workspace = searchWorkspaces.Value
+        resetReadBox workspace
+        let evidence = routeContextEvidence mode previousCoordinates routePointCoordinates nextCoordinates false
+        struct(evidence, currentReadBox workspace)
+    /// The tile range covering a read box.
+    member _.RegionTiles(box: RoutingReadBox) =
+        if box.minX > box.maxX then struct(0, 0, -1, -1)
+        else struct(fingerprintTile box.minX, fingerprintTile box.minY,
+                    fingerprintTile box.maxX, fingerprintTile box.maxY)
+    /// Digest of the fingerprints of every tile in a range, in row-major order.
+    member _.RegionDigest(struct(minTileX: int, minTileY: int, maxTileX: int, maxTileY: int)) =
+        let fingerprints = tileFingerprints.Value
+        let hash = System.IO.Hashing.XxHash128()
+        let buffer = Array.zeroCreate<byte> 16
+        let append (first: uint64) (second: uint64) =
+            Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Span<byte>(buffer, 0, 8), first)
+            Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Span<byte>(buffer, 8, 8), second)
+            hash.Append(ReadOnlySpan<byte>(buffer))
+        append (uint64 (int64 minTileX)) (uint64 (int64 minTileY))
+        append (uint64 (int64 maxTileX)) (uint64 (int64 maxTileY))
+        for tileX = minTileX to maxTileX do
+            for tileY = minTileY to maxTileY do
+                match fingerprints.TryGetValue(routingGridKey tileX tileY) with
+                | true, struct(first, second) -> append first second
+                | _ -> append 0UL 0UL
+        Convert.ToHexString(hash.GetCurrentHash()).ToLowerInvariant()
+    /// Edge identity independent of the graph's numbering: OSM endpoint IDs,
+    /// way ID, and the occurrence among same-way edges between those nodes.
+    member _.StableEdge(edge: int) =
+        let from, target, way = edgeFrom edge, edgeTo edge, edgeWay edge
+        let mutable occurrence = 0
+        for other = int (outgoingOffset from) to edge-1 do
+            if edgeTo other = target && edgeWay other = way then occurrence <- occurrence+1
+        struct(nodeId from, nodeId target, way, occurrence)
+    member _.TryResolveEdge(struct(fromId: int64, targetId: int64, way: int64, occurrence: int)) =
+        match tryNodeIndex fromId, tryNodeIndex targetId with
+        | ValueSome from, ValueSome target ->
+            let mutable remaining = occurrence
+            let mutable found = ValueNone
+            let mutable edge = int (outgoingOffset from)
+            let finish = int (outgoingOffset (from+1))
+            while found.IsNone && edge < finish do
+                if edgeTo edge = target && edgeWay edge = way then
+                    if remaining = 0 then found <- ValueSome edge
+                    else remaining <- remaining-1
+                edge <- edge+1
+            found
+        | _ -> ValueNone
     member _.CaptureContextEvidence(mode,
                                     previousCoordinates: struct(float*float) array,
                                     routePointCoordinates: struct(float*float) array,

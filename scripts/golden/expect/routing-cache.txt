@@ -1,0 +1,25 @@
+# Intended differences between perf-final and the routing-cache prerequisites.
+# Only bundle-posts changes; bundle, overlay and czptt are unaffected.
+
+# Prepared snaps are keyed by the exact projected coordinate. A 0.1 m rounded
+# key used to serve every coordinate sharing it with the snaps of whichever was
+# prepared first, so a context's evidence depended on the other coordinates in
+# the batch. About 7% of attachments move their snap by under 10 cm, and
+# routed costs and headings follow. Thread walks are cached per road class, and
+# corridor identities use OSM IDs instead of edge numbering, which reorders
+# equal-cost corridors. Together these flip about 0.8% of close post decisions
+# on the golden subset.
+relation location
+relation trip_call
+relation source_entity_map
+relation source_trip_map
+relation source_call_map
+relation object_origin
+gtfs stop_times.txt
+gtfs stops.txt
+
+# The compiler section carries the evidence pack hash and the centroid
+# fallback count; relation row counts and the build spec follow.
+manifest compiler
+manifest relations
+manifest build_spec_sha256

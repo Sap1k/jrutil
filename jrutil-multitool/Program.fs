@@ -33,6 +33,7 @@ Options:
     --transport-mode-rules=FILE  Reviewed JDF effective transport-mode rule CSV
     --no-estimated-posts         Disable candidate-based internal post inference
     --routing-osm-pbf=FILE       Osmium demand-clipped road/tram PBF for routed inference
+    --routing-cache=DIR          Reuse routed inference evidence from earlier runs on the same routing PBF
     --capture-post-inference-evidence=DIR  Persist reusable policy-neutral routed evidence
     --post-inference-evidence-only         Stop after writing the evidence directory
     --capture-stop-region=BOX              Capture only stops in MINLON,MINLAT,MAXLON,MAXLAT (review/training packs)

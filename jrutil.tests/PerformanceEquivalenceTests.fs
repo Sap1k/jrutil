@@ -307,3 +307,16 @@ type ScratchSortEquivalenceTests() =
         Assert.AreEqual(0, Directory.GetFiles(storage.Directory).Length)
         let inMemory = JrUtil.RegionalOverlay.Scratch.sortRowsBy storage key compareKeys Int64.MaxValue input |> Seq.toArray
         Assert.IsTrue((expected = inMemory))
+
+[<TestClass>]
+type RoutingCacheIdentityTests() =
+    [<TestMethod>]
+    member _.``Routing cache identity uses the embedded routing source hash``() =
+        let attribute =
+            typeof<JrUtil.GeoData.Osm.PackedRoutingGraph>.Assembly
+                .GetCustomAttributes(typeof<System.Reflection.AssemblyMetadataAttribute>, false)
+            |> Seq.cast<System.Reflection.AssemblyMetadataAttribute>
+            |> Seq.tryFind (fun value -> value.Key = "RoutingSourceSha256")
+        Assert.IsTrue(attribute.IsSome)
+        Assert.IsTrue(attribute.Value.Value.Length >= 64)
+        StringAssert.Contains(JdfRoutingCache.routerIdentity, attribute.Value.Value)

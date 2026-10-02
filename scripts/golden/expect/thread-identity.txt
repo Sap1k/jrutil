@@ -1,0 +1,22 @@
+# Intended differences between the cuts reference and the speed pass.
+# bundle, overlay and czptt stay byte-identical; only bundle-posts changes.
+
+# Road thread identities used to depend on which routing worker first walked a
+# looped or 512+ node thread. They now follow each thread to its true end, so
+# a few estimated posts resolve differently: 215 calls move between an
+# estimated post and the unspecified fallback, and one estimated location
+# disappears with its mappings.
+relation location
+relation trip_call
+relation source_entity_map
+relation source_trip_map
+relation source_call_map
+relation object_origin
+gtfs stop_times.txt
+gtfs stops.txt
+
+# The compiler section carries the evidence pack hash and the centroid
+# fallback count; relation row counts and the build spec follow.
+manifest compiler
+manifest relations
+manifest build_spec_sha256

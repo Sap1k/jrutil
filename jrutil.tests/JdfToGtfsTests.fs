@@ -616,7 +616,7 @@ type JdfToGtfsTests() =
                 JdfPostEvidence.captureToStore
                     {maximumWorkers=workers;memoryBudgetBytes=budget
                      preflight=ignore
-                     progress=fun _ _ _ _ -> ()} graph input
+                     progress=(fun _ _ _ _ -> ());routingCache=None} graph input
             use baseline=capture 1 Int64.MaxValue fixture
             use manyWorkers=capture 4 Int64.MaxValue fixture
             use reordered=capture 4 Int64.MaxValue reversed
