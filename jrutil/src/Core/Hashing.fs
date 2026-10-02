@@ -19,5 +19,7 @@ let sha256Stream (stream: Stream) =
     Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant()
 
 let sha256File (path: string) =
-    use stream = File.OpenRead(path)
+    use stream =
+        new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                       1024 * 1024, FileOptions.SequentialScan)
     sha256Stream stream

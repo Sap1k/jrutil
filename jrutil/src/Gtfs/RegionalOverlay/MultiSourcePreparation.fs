@@ -22,6 +22,8 @@ open JrUtil.RegionalOverlay.Policy
 type Prepared = {
     policy: OverlayPolicy
     binding: SourceBinding
+    /// Hash of the combined payload, computed when it was written here.
+    payloadSha256: string
     sourceIds: string array
     descriptors: IReadOnlyDictionary<string, SourceDescriptor>
 }
@@ -348,6 +350,7 @@ let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding a
     {
         policy = generatedPolicy
         binding = { sourceId = "regional-all"; payloadPath = normalized; descriptorPath = descriptorPath }
+        payloadSha256 = payloadHash
         sourceIds = descriptors.Keys |> Seq.sort |> Seq.toArray
         descriptors = descriptors
     }

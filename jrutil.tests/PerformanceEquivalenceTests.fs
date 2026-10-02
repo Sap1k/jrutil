@@ -216,3 +216,94 @@ type PerformanceEquivalenceTests() =
         Assert.IsTrue((reference |> Array.choose (fun (_, entry, _) -> entry)) = actual.calendar.Value)
         Assert.IsTrue(
             (reference |> Array.collect (fun (_, _, exceptions) -> exceptions)) = actual.calendarExceptions.Value)
+
+/// Reads at most three characters per call, so record and line boundaries
+/// land on every buffer offset.
+type private ChunkedReader(text: string) =
+    inherit TextReader()
+    let mutable position = 0
+    override _.Peek() = if position < text.Length then int text.[position] else -1
+    override _.Read() =
+        if position < text.Length then
+            position <- position + 1
+            int text.[position - 1]
+        else -1
+    override _.Read(buffer: char array, index: int, count: int) =
+        let length = min (min count 3) (text.Length - position)
+        text.CopyTo(position, buffer, index, length)
+        position <- position + length
+        length
+
+let private textFieldParserRecords (text: string) =
+    let records = ResizeArray<string>()
+    try
+        use parser = new Microsoft.VisualBasic.FileIO.TextFieldParser(new StringReader(text))
+        parser.TextFieldType <- Microsoft.VisualBasic.FileIO.FieldType.Delimited
+        parser.SetDelimiters(",")
+        parser.HasFieldsEnclosedInQuotes <- true
+        parser.TrimWhiteSpace <- false
+        while not parser.EndOfData do
+            let fields = parser.ReadFields()
+            if not (isNull fields) then records.Add(String.Join("\u0001", fields))
+    with _ -> records.Add("<malformed>")
+    records.ToArray()
+
+let private delimitedTextRecords (reader: TextReader) =
+    let records = ResizeArray<string>()
+    try
+        for fields in DelimitedText.CsvRecordReader(reader, "test").Records() do
+            records.Add(String.Join("\u0001", fields))
+    with :? InvalidDataException -> records.Add("<malformed>")
+    records.ToArray()
+
+[<TestClass>]
+type DelimitedTextEquivalenceTests() =
+    [<TestMethod>]
+    member _.``CSV records match TextFieldParser on fuzzed input``() =
+        let random = Random(4242)
+        let alphabet =
+            [| 'a'; 'b'; ','; ','; '"'; '"'; ' '; '\t'; '\r'; '\n'; '\n'; 'é'; '\u00A0'; '\u2003'; '\u0085' |]
+        let structured () =
+            let field () =
+                match random.Next(5) with
+                | 0 -> ""
+                | 1 -> "plain"
+                | 2 -> "\"quoted, \"\"value\"\"\""
+                | 3 -> "\"multi\r\nline\n\n field\""
+                | _ -> " \"padded\" "
+            let lines =
+                Array.init (random.Next(1, 6)) (fun _ ->
+                    String.Join(",", Array.init (random.Next(1, 5)) (fun _ -> field ())))
+            String.Join([| "\n"; "\r\n"; "\r" |].[random.Next(3)], lines)
+            + (if random.Next(2) = 0 then "\n" else "")
+        let cases =
+            Seq.append
+                (Seq.init 20000 (fun _ ->
+                    String(Array.init (random.Next(0, 40)) (fun _ -> alphabet.[random.Next(alphabet.Length)]))))
+                (Seq.init 3000 (fun _ -> structured ()))
+        for text in cases do
+            let expected = textFieldParserRecords text
+            let escaped = text.Replace("\r", "\\r").Replace("\n", "\\n")
+            Assert.IsTrue((expected = delimitedTextRecords (new StringReader(text))), escaped)
+            Assert.IsTrue((expected = delimitedTextRecords (new ChunkedReader(text))), "chunked " + escaped)
+
+[<TestClass>]
+type ScratchSortEquivalenceTests() =
+    [<TestMethod>]
+    member _.``Keyed external sort is stable across multi-level merges``() =
+        let random = Random(99)
+        let input =
+            Array.init 5000 (fun index ->
+                [| $"trip-{random.Next(40)}"; string (random.Next(-5, 25)); string index |])
+        let key (row: string array) = struct(row.[0], Int32.Parse(row.[1]))
+        let compareKeys (struct(leftTrip: string, leftSequence: int)) (struct(rightTrip: string, rightSequence: int)) =
+            let trip = StringComparer.Ordinal.Compare(leftTrip, rightTrip)
+            if trip <> 0 then trip else compare leftSequence rightSequence
+        let expected = input |> Seq.sortWith (fun left right -> compareKeys (key left) (key right)) |> Seq.toArray
+        use storage = new JrUtil.RegionalOverlay.Scratch.Storage(Path.GetTempPath())
+        // A tiny buffer makes one run per row: 5000 runs need two merge levels.
+        let actual = JrUtil.RegionalOverlay.Scratch.sortRowsBy storage key compareKeys 1L input |> Seq.toArray
+        Assert.IsTrue((expected = actual))
+        Assert.AreEqual(0, Directory.GetFiles(storage.Directory).Length)
+        let inMemory = JrUtil.RegionalOverlay.Scratch.sortRowsBy storage key compareKeys Int64.MaxValue input |> Seq.toArray
+        Assert.IsTrue((expected = inMemory))

@@ -130,7 +130,8 @@ module PackageWriter =
         let files =
             Directory.EnumerateFiles(output, "*", SearchOption.AllDirectories)
             |> Seq.filter (fun path -> Path.GetFileName(path) <> "manifest.json")
-            |> Seq.map (fun path ->
+            |> Seq.toArray
+            |> Array.Parallel.map (fun path ->
                 let info = FileInfo(path)
                 dict [ "path", box (Path.GetRelativePath(output, path).Replace('\\', '/')); "size_bytes", box info.Length; "sha256", box (sha256File path) ] :> obj)
             |> Seq.sortBy (fun item -> (item :?> IDictionary<string,obj>).["path"] :?> string)

@@ -32,13 +32,17 @@ let write (context: Context) (zones: StopZones) =
     let regionalZonesByPlace = zones.regionalZonesByPlace
     let outputZoneIdentity = zones.outputZoneIdentity
     let isUsedPlace = zones.isUsedPlace
+    // Each read opens and parses the base table, so read the columns once.
+    let czRouteColumns = columnsOf prepared.baseExtensions "cz_routes.txt"
+    let czTripColumns = columnsOf prepared.baseExtensions "cz_trips.txt"
+    let czStopColumns = columnsOf prepared.baseExtensions "cz_stops.txt"
     let outputCzRouteRows =
         seq {
             yield! prepared.baseCzRouteRows |> Seq.filter (fun row -> usedRouteIds.Contains(rowValue row "route_id"))
             for KeyValue(outputRouteId, (sourceRoute, cisLineId)) in source.nativeRoutes do
                 if usedRouteIds.Contains(outputRouteId) then
                     let row = CsvRow(StringComparer.Ordinal)
-                    for column in columnsOf prepared.baseExtensions "cz_routes.txt" do row.[column] <- ""
+                    for column in czRouteColumns do row.[column] <- ""
                     row.["route_id"] <- outputRouteId
                     row.["cis_line_id"] <- cisLineId
                     row.["public_line_number"] <- rowValue sourceRoute "route_short_name"
@@ -47,7 +51,7 @@ let write (context: Context) (zones: StopZones) =
         }
         |> Seq.sortBy (fun row -> rowValue row "route_id")
         |> Seq.toArray
-    writeRows (Path.Combine(extensionsOutput, "cz_routes.txt")) (columnsOf prepared.baseExtensions "cz_routes.txt") outputCzRouteRows
+    writeRows (Path.Combine(extensionsOutput, "cz_routes.txt")) (czRouteColumns) outputCzRouteRows
     let mutable writtenCzTrips = 0L
     let outputCzTripRows = seq {
         for baseRow in csvRows prepared.baseExtensions "cz_trips.txt" do
@@ -63,14 +67,14 @@ let write (context: Context) (zones: StopZones) =
         for addition in projection.sourceTripAdditions |> Array.sortBy (fun value -> value.trip.id) do
             writtenCzTrips <- writtenCzTrips + 1L
             let row = CsvRow(StringComparer.Ordinal)
-            for column in columnsOf prepared.baseExtensions "cz_trips.txt" do row.[column] <- ""
+            for column in czTripColumns do row.[column] <- ""
             row.["trip_id"] <- addition.trip.id
             row.["cis_line_id"] <- if addition.projection.cisLineId.StartsWith("source:", StringComparison.Ordinal) then "" else addition.projection.cisLineId
             row.["source_trip_ids"] <- addition.projection.sourceTripReferences |> Array.map (fun (sourceId, tripId) -> sourceId + ":" + tripId) |> String.concat ";"
             row.["coverage_sources"] <- String.concat ";" addition.projection.sourceIds
             yield row
     }
-    writeRows (Path.Combine(extensionsOutput, "cz_trips.txt")) (columnsOf prepared.baseExtensions "cz_trips.txt") outputCzTripRows
+    writeRows (Path.Combine(extensionsOutput, "cz_trips.txt")) (czTripColumns) outputCzTripRows
     logProgress "write-cz-trips" writtenCzTrips (Some writtenCzTrips)
     let outputCzStopRows = ResizeArray<CsvRow>()
     for baseRow in csvRows prepared.baseExtensions "cz_stops.txt" do
@@ -78,7 +82,7 @@ let write (context: Context) (zones: StopZones) =
     for KeyValue(outputPlaceId, group) in source.nativeStopPlaces do
         if usedStopIds.Contains(outputPlaceId) then
             let row = CsvRow(StringComparer.Ordinal)
-            for column in columnsOf prepared.baseExtensions "cz_stops.txt" do row.[column] <- ""
+            for column in czStopColumns do row.[column] <- ""
             row.["stop_id"] <- outputPlaceId
             row.["stop_place_id"] <- outputPlaceId
             row.["asw_id"] <- group.members |> Array.map (fun memberRow -> rowValue memberRow prepared.policy.source.stopMatch.groupColumn) |> Array.distinct |> String.concat ";"
@@ -88,7 +92,7 @@ let write (context: Context) (zones: StopZones) =
         match projection.outputStopForSource.TryGetValue(sourceStopId) with
         | true, outputStopId when usedStopIds.Contains(outputStopId) && outputStopId <> source.mappedPlaceBySourceStop.[sourceStopId] ->
             let row = CsvRow(StringComparer.Ordinal)
-            for column in columnsOf prepared.baseExtensions "cz_stops.txt" do row.[column] <- ""
+            for column in czStopColumns do row.[column] <- ""
             row.["stop_id"] <- outputStopId
             row.["stop_place_id"] <- source.mappedPlaceBySourceStop.[sourceStopId]
             row.["post_id"] <- optionText (rowValue projection.sourceStops.[sourceStopId] prepared.policy.source.stopMatch.postColumn) |> Option.defaultValue (originalIdentity "stop_id" projection.sourceStops.[sourceStopId])
@@ -99,7 +103,7 @@ let write (context: Context) (zones: StopZones) =
     outputCzStopRows
     |> Seq.distinctBy (fun row -> rowValue row "stop_id")
     |> Seq.sortBy (fun row -> rowValue row "stop_id")
-    |> writeRows (Path.Combine(extensionsOutput, "cz_stops.txt")) (columnsOf prepared.baseExtensions "cz_stops.txt")
+    |> writeRows (Path.Combine(extensionsOutput, "cz_stops.txt")) (czStopColumns)
 
     let stopZonePath = Path.Combine(prepared.baseExtensions, "cz_stop_zones.txt")
     if File.Exists(stopZonePath) then

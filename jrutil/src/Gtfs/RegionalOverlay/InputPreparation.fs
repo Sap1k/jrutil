@@ -28,6 +28,9 @@ type Input = {
     policy: OverlayPolicy
     gvdYear: int
     binding: SourceBinding
+    /// Payload hash this process computed while generating the payload, so it
+    /// need not be hashed again; None hashes the payload.
+    verifiedPayloadSha256: string option
     baseBundle: string
     outputBundle: string
 }
@@ -77,6 +80,7 @@ let prepare ({
     policy = policy
     gvdYear = gvdYear
     binding = binding
+    verifiedPayloadSha256 = verifiedPayloadSha256
     baseBundle = baseBundle
     outputBundle = outputBundle
 }: Input) : Result =
@@ -93,8 +97,10 @@ let prepare ({
         invalidArg "--source" $"Source binding {binding.sourceId} does not match policy source {policy.source.sourceId}"
     let descriptor = readDescriptor binding.descriptorPath
     let actualSourceHash =
-        if File.Exists(binding.payloadPath) then sha256File binding.payloadPath
-        else sha256Tree binding.payloadPath
+        match verifiedPayloadSha256 with
+        | Some hash -> hash
+        | None when File.Exists(binding.payloadPath) -> sha256File binding.payloadPath
+        | None -> sha256Tree binding.payloadPath
     if actualSourceHash <> descriptor.payloadSha256 then
         invalidOp $"Source checksum mismatch: descriptor={descriptor.payloadSha256}, actual={actualSourceHash}"
     let baseRetrievedAt = descriptorRetrievedAtFromBase baseBundle

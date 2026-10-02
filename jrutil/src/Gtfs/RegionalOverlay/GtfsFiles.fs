@@ -13,7 +13,6 @@ open System.Text.RegularExpressions
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
-open Microsoft.VisualBasic.FileIO
 open NodaTime
 open NodaTime.Text
 open JrUtil.GtfsModel
@@ -44,21 +43,16 @@ let csvFields archivePath fileName =
         | Some (stream, owner) ->
             use stream = stream
             use _owner = owner |> Option.map (fun value -> value :> IDisposable) |> Option.toObj
-            use reader = new StreamReader(stream, Encoding.UTF8, true)
-            use parser = new TextFieldParser(reader)
-            parser.TextFieldType <- FieldType.Delimited
-            parser.SetDelimiters(",")
-            parser.HasFieldsEnclosedInQuotes <- true
-            parser.TrimWhiteSpace <- false
-            if not parser.EndOfData then
-                let header = parser.ReadFields()
+            use reader = new StreamReader(stream, Encoding.UTF8, true, 64 * 1024)
+            let records = JrUtil.DelimitedText.CsvRecordReader(reader, fileName)
+            let header = records.Read()
+            if not (isNull header) then
                 if header |> Array.exists String.IsNullOrWhiteSpace then
                     invalidOp $"{fileName} has an empty column name"
                 if header |> Array.distinct |> Array.length <> header.Length then
                     invalidOp $"{fileName} has duplicate column names"
-                while not parser.EndOfData do
-                    let fields = parser.ReadFields()
-                    if not (isNull fields) && not (fields.Length = 1 && fields.[0] = "") then
+                for fields in records.Records() do
+                    if not (fields.Length = 1 && fields.[0] = "") then
                         yield header, fields
     }
 
@@ -134,9 +128,8 @@ let writeCsvRow (writer: TextWriter) (fields: seq<string>) =
         first <- false
         writer.Write('"')
         if not (isNull field) then
-            for character in field do
-                if character = '"' then writer.Write('"')
-                writer.Write(character)
+            if field.Contains('"') then writer.Write(field.Replace("\"", "\"\""))
+            else writer.Write(field)
         writer.Write('"')
     writer.WriteLine()
 
