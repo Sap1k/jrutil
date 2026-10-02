@@ -50,6 +50,10 @@ function Invoke-Measured([string] $Name, [string[]] $Arguments, [string] $LogDir
     New-Item -ItemType Directory -Force $LogDir | Out-Null
     $stdout = Join-Path $LogDir "$Name.stdout.log"
     $stderr = Join-Path $LogDir "$Name.stderr.log"
+    # The log file timestamps every line, including the progress events.
+    $logFile = Join-Path $LogDir "$Name.log"
+    if (Test-Path $logFile) { Remove-Item -Force $logFile }
+    $Arguments = @($Arguments) + @("--logfile=$logFile")
     $quoted = $Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $process = Start-Process -FilePath $exe -ArgumentList $quoted -NoNewWindow -PassThru `
@@ -113,7 +117,7 @@ function Write-Descriptor([string] $Payload, [string] $Destination) {
     } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM $Destination
 }
 
-$common = @("--jobs=$Jobs", "--memory-budget=$MemoryBudget")
+$common = @("--jobs=$Jobs", "--memory-budget=$MemoryBudget", "--progress-events")
 $config = Join-Path $inputs "config"
 $czptt = Join-Path $inputs "czptt"
 $overlayInputs = Join-Path $inputs "overlay"
