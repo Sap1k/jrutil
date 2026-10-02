@@ -31,6 +31,7 @@ let compile (options: CompilationOptions) =
         policy = combined.policy
         gvdYear = options.gvdYear
         binding = combined.binding
+        verifiedPayloadSha256 = Some combined.payloadSha256
         baseBundle = options.baseBundle
         outputBundle = options.outputBundle
     }

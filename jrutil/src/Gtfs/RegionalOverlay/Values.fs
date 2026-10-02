@@ -42,10 +42,14 @@ let capabilityNames =
 
 let sha256Tree root =
     let builder = StringBuilder()
-    for path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories) |> Seq.sort do
+    let files =
+        Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+        |> Seq.sort
+        |> Seq.toArray
+        |> Array.Parallel.map (fun path -> path, FileInfo(path).Length, sha256File path)
+    for path, length, hash in files do
         let relative = Path.GetRelativePath(root, path).Replace('\\', '/')
-        let info = FileInfo(path)
-        builder.Append(relative).Append('\u001f').Append(info.Length).Append('\u001f').Append(sha256File path).Append('\n') |> ignore
+        builder.Append(relative).Append('\u001f').Append(length).Append('\u001f').Append(hash).Append('\n') |> ignore
     sha256Text (builder.ToString())
 
 let rowValue (row: CsvRow) name =

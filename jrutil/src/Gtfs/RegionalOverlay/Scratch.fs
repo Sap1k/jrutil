@@ -36,9 +36,14 @@ let writeRow (writer: BinaryWriter) (row: string array) =
 let readRow (reader: BinaryReader) =
     Array.init (reader.ReadInt32()) (fun _ -> reader.ReadString())
 
+let private streamBufferBytes = 64 * 1024
+
+/// Rows flushed before enumeration starts; the length is read once, not per row.
 let rows path = seq {
-    use reader = new BinaryReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite), Encoding.UTF8)
-    while reader.BaseStream.Position < reader.BaseStream.Length do yield readRow reader
+    use stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, streamBufferBytes, FileOptions.SequentialScan)
+    use reader = new BinaryReader(stream, Encoding.UTF8)
+    let length = stream.Length
+    while stream.Position < length do yield readRow reader
 }
 
 /// Append-only evidence. Readers see a flushed snapshot; no formatted rows are retained.
@@ -51,61 +56,79 @@ type RowLog(storage: Storage) =
     interface IDisposable with
         member _.Dispose() = writer.Dispose()
 
-/// Stable external sorting, with a 64 MiB row budget and at most 16 open merge inputs.
-/// The estimate includes row/string overhead; one oversized input row is allowed.
-let sortRows (storage: Storage) (compareRows: string array -> string array -> int) bufferBytes input =
-    let reclaimTransientMemory () =
-        let current = Process.GetCurrentProcess()
-        current.Refresh()
-        if current.PrivateMemorySize64 >= 3_250_000_000L then
-            JrUtil.MemoryReclaim.compactOnce ()
-    let spill (values: ResizeArray<int64 * string array>) =
+let private createSpill path =
+    new BinaryWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, streamBufferBytes), Encoding.UTF8)
+
+/// At most this many runs are merged at once, so one level suffices up to
+/// this many spills.
+let private mergeFanIn = 128
+
+/// Stable external sort with a row-size budget, ordered by a key extracted
+/// once per row (per run read), not once per comparison. Equal keys keep
+/// their input order; one oversized input row is allowed.
+let sortRowsBy (storage: Storage) (key: string array -> 'Key) (compareKeys: 'Key -> 'Key -> int) bufferBytes (input: seq<string array>) =
+    let reclaimGate =
+        JrUtil.MemoryReclaimGate(
+            3_250_000_000L, JrUtil.MemoryReclaim.DefaultMinimumGrowthBytes, JrUtil.MemoryReclaim.compactOnce)
+    let spill (values: ResizeArray<struct('Key * int64 * string array)>) =
         let ordered = values.ToArray()
-        Array.sortInPlaceWith (fun (ai, a) (bi, b) ->
-            let compared = compareRows a b
-            if compared = 0 then compare ai bi else compared) ordered
+        Array.Sort(ordered, Comparison(fun (struct(leftKey, leftOrdinal, _)) (struct(rightKey, rightOrdinal, _)) ->
+            let compared = compareKeys leftKey rightKey
+            if compared <> 0 then compared else compare leftOrdinal rightOrdinal))
         let path = storage.NewFile()
-        use writer = new BinaryWriter(File.Create(path), Encoding.UTF8)
-        for _, row in ordered do writeRow writer row
+        use writer = createSpill path
+        for struct(_, _, row) in ordered do writeRow writer row
         path
+    // Ties go to the earlier run; runs hold consecutive input ranges, so the merge is stable.
+    let runOrder =
+        { new IComparer<struct('Key * int)> with
+            member _.Compare(struct(leftKey, leftRun), struct(rightKey, rightRun)) =
+                let compared = compareKeys leftKey rightKey
+                if compared <> 0 then compared else compare leftRun rightRun }
     let merge (paths: string array) =
         let output = storage.NewFile()
         let readers = paths |> Array.map (fun path -> (rows path).GetEnumerator())
         try
-            use writer = new BinaryWriter(File.Create(output), Encoding.UTF8)
-            let active = readers |> Array.map (fun reader -> reader.MoveNext())
-            let mutable running = true
-            while running do
-                let mutable best = -1
-                for i in 0 .. readers.Length - 1 do
-                    if active.[i] && (best < 0 || compareRows readers.[i].Current readers.[best].Current < 0) then best <- i
-                if best < 0 then running <- false
-                else
-                    writeRow writer readers.[best].Current
-                    active.[best] <- readers.[best].MoveNext()
+            use writer = createSpill output
+            let queue = PriorityQueue<int, struct('Key * int)>(runOrder)
+            for index in 0 .. readers.Length - 1 do
+                if readers.[index].MoveNext() then
+                    queue.Enqueue(index, struct(key readers.[index].Current, index))
+            let mutable index = 0
+            let mutable priority = Unchecked.defaultof<struct('Key * int)>
+            while queue.TryDequeue(&index, &priority) do
+                writeRow writer readers.[index].Current
+                if readers.[index].MoveNext() then
+                    queue.Enqueue(index, struct(key readers.[index].Current, index))
         finally
             for reader in readers do reader.Dispose()
         for path in paths do File.Delete(path)
         output
-    let buffer = ResizeArray<int64 * string array>()
+    let buffer = ResizeArray<struct('Key * int64 * string array)>()
     let runs = ResizeArray<string>()
     let mutable size = 0L
     let mutable ordinal = 0L
     for row in input do
-        buffer.Add(ordinal, row)
+        buffer.Add(struct(key row, ordinal, row))
         ordinal <- ordinal + 1L
-        size <- size + 48L + int64 row.Length * 32L + (row |> Array.sumBy (fun value -> int64 value.Length * 2L))
+        let mutable characters = 0L
+        for value in row do characters <- characters + int64 value.Length
+        size <- size + 48L + int64 row.Length * 32L + characters * 2L
         if size >= bufferBytes then
             runs.Add(spill buffer)
             buffer.Clear()
             size <- 0L
             // The just-written run no longer needs its row/string arrays.
             // Return them before admitting the next national-sized chunk.
-            reclaimTransientMemory ()
+            reclaimGate.Check() |> ignore
     if buffer.Count > 0 then runs.Add(spill buffer)
     let mutable paths = runs.ToArray()
-    while paths.Length > 1 do paths <- paths |> Array.chunkBySize 16 |> Array.map merge
+    while paths.Length > 1 do paths <- paths |> Array.chunkBySize mergeFanIn |> Array.map merge
     if paths.Length = 0 then Seq.empty
     else seq { try yield! rows paths.[0] finally File.Delete(paths.[0]) }
+
+/// `sortRowsBy` comparing whole rows.
+let sortRows (storage: Storage) (compareRows: string array -> string array -> int) bufferBytes input =
+    sortRowsBy storage id compareRows bufferBytes input
 
 let defaultBufferBytes = 64L * 1024L * 1024L

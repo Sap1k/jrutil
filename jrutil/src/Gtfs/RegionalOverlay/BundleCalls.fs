@@ -103,15 +103,24 @@ let write (context: Context) sibling =
     }
     // Validity slices interleave output trip IDs. Normalize native output
     // once, before serialization, so every downstream call reader can stream.
-    let compareCalls left right =
-        let trip = StringComparer.Ordinal.Compare(getCallField left "trip_id", getCallField right "trip_id")
+    // Sequences are parsed once per row; an unparsable one keeps its text and
+    // still fails, as Int32.Parse, when a comparison reaches it.
+    let callKey row =
+        let sequence = getCallField row "stop_sequence"
+        match Int32.TryParse(sequence, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+        | true, value -> struct(getCallField row "trip_id", value, null)
+        | _ -> struct(getCallField row "trip_id", 0, sequence)
+    let compareCalls (struct(leftTrip, leftSequence, leftInvalid: string)) (struct(rightTrip, rightSequence, rightInvalid: string)) =
+        let trip = StringComparer.Ordinal.Compare(leftTrip, rightTrip)
         if trip <> 0 then trip
-        else compare (Int32.Parse(getCallField left "stop_sequence", CultureInfo.InvariantCulture))
-                     (Int32.Parse(getCallField right "stop_sequence", CultureInfo.InvariantCulture))
+        else
+            if not (isNull leftInvalid) then Int32.Parse(leftInvalid, CultureInfo.InvariantCulture) |> ignore
+            if not (isNull rightInvalid) then Int32.Parse(rightInvalid, CultureInfo.InvariantCulture) |> ignore
+            compare leftSequence rightSequence
     do
         use scratch = new Scratch.Storage(sibling)
         logProgress "sort-output-calls" 0L None
-        let ordered = Scratch.sortRows scratch compareCalls Scratch.defaultBufferBytes outputCalls
+        let ordered = Scratch.sortRowsBy scratch callKey compareCalls Scratch.defaultBufferBytes outputCalls
         let mutable written = 0L
         for row in ordered do
             writeCsvRow stopTimeWriter row

@@ -22,23 +22,24 @@ type Store = {
 
 /// Sort before source-call analysis, when its large indexes do not exist yet.
 let spool scratch payloadPath =
-    let comparePoints (a: string array) (b: string array) =
-        let shape = StringComparer.Ordinal.Compare(a.[0], b.[0])
-        if shape <> 0 then shape
-        else
-            let sequence (value: string) =
-                match Int32.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-                | true, number -> number
-                | _ -> Int32.MinValue // Only selected shapes are validated during projection.
-            compare (sequence a.[3]) (sequence b.[3])
-    Scratch.sortRows scratch comparePoints Scratch.defaultBufferBytes (csvValues payloadPath "shapes.txt" columns)
+    let pointKey (row: string array) =
+        let sequence =
+            match Int32.TryParse(row.[3], NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, number -> number
+            | _ -> Int32.MinValue // Only selected shapes are validated during projection.
+        struct(row.[0], sequence)
+    let comparePoints (struct(leftShape: string, leftSequence: int)) (struct(rightShape: string, rightSequence: int)) =
+        let shape = StringComparer.Ordinal.Compare(leftShape, rightShape)
+        if shape <> 0 then shape else compare leftSequence rightSequence
+    Scratch.sortRowsBy scratch pointKey comparePoints Scratch.defaultBufferBytes (csvValues payloadPath "shapes.txt" columns)
 
 let prepare (scratch: Scratch.Storage) sortedPoints (selected: Set<string>) diagnostics =
     let path = scratch.NewFile()
     let locations = Dictionary<string, int64 * int64>(StringComparer.Ordinal)
     let outputBySource = Dictionary<string, string>(StringComparer.Ordinal)
     use writer = new BinaryWriter(File.Create(path), Encoding.UTF8)
-    let input = sortedPoints |> Seq.filter (fun (row: string array) -> selected.Contains(row.[0]))
+    let selectedIds = HashSet<string>(selected, StringComparer.Ordinal)
+    let input = sortedPoints |> Seq.filter (fun (row: string array) -> selectedIds.Contains(row.[0]))
     use points = input.GetEnumerator()
     let mutable available = points.MoveNext()
     for shapeId in selected |> Seq.sort do

@@ -213,13 +213,20 @@ module Validation =
                 let actualInventory = inventory.Keys |> Set.ofSeq
                 for path in Set.difference expectedInventory actualInventory do errors.Add($"manifest.json: payload is not inventoried: {path}")
                 for path in Set.difference actualInventory expectedInventory do errors.Add($"manifest.json: undeclared inventory entry: {path}")
-                for path in Set.remove "manifest.json" expectedFiles do
+                let payloadPaths = Set.remove "manifest.json" expectedFiles |> Set.toArray
+                let payloadDigests =
+                    payloadPaths
+                    |> Array.Parallel.map (fun path ->
+                        if inventory.ContainsKey(path) && actualFiles.Contains(path) then
+                            sha256File (Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar)))
+                        else null)
+                for path, actualDigest in Array.zip payloadPaths payloadDigests do
                     match inventory.TryGetValue(path) with
                     | false, _ -> errors.Add($"manifest.json: payload is not inventoried: {path}")
                     | true, struct(size, digest) when actualFiles.Contains(path) ->
                         let absolute = Path.Combine(root, path.Replace('/', Path.DirectorySeparatorChar))
                         if FileInfo(absolute).Length <> size then errors.Add($"{path}: size does not match manifest")
-                        if sha256File absolute <> digest then errors.Add($"{path}: SHA-256 does not match manifest")
+                        if actualDigest <> digest then errors.Add($"{path}: SHA-256 does not match manifest")
                     | _ -> ()
                 let rowCounts = Dictionary<string,int64>(StringComparer.Ordinal)
                 match manifest.TryGetProperty("relations") with
