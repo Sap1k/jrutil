@@ -667,6 +667,73 @@ type JdfFixupsTests() =
             |> Array.find (fun value -> value.stopId = middle.id)
         assertEqual "estimated:route-time" source.source
 
+    member private _.TravelTimeFixture() =
+        let fixturePath =
+            Path.Combine(__SOURCE_DIRECTORY__, "data", "jdf", "obehy_extensions")
+        let source = Jdf.jdfBatchDirParser () (Jdf.FsPath fixturePath)
+        let template = source.tripStops.[0]
+        let stop id = { source.stops.[0] with id = id; nearbyPlace = Some (string id) }
+        let calls stopsWithMinutes =
+            stopsWithMinutes
+            |> Array.mapi (fun index (stop: JdfModel.Stop, minute) ->
+                { template with
+                    stopId = stop.id
+                    routeStopId = int64 (index + 1)
+                    arrivalTime = Some (StopTime(LocalTime(8, minute)))
+                    departureTime = Some (StopTime(LocalTime(8, minute))) })
+        let factory = (czechRegionPolygons () |> Map.toSeq |> Seq.head |> snd).Factory
+        let matchAt (stop: JdfModel.Stop) x source =
+            stop,
+            Some {
+                name = Jdf.jdfStopNameString stop
+                data =
+                    { regionId = stop.regionId; country = stop.country
+                      point = factory.CreatePoint(NetTopologySuite.Geometries.Coordinate(x, 0.0))
+                      source = Some source
+                      candidateObservation = None }
+            }
+        stop, calls, matchAt
+
+    [<TestMethod>]
+    member this.``Longer consistent run outvotes a short run of wrong matches``() =
+        let stop, calls, matchAt = this.TravelTimeFixture()
+        let s0, s1, good, wrong, wrongNext = stop 1L, stop 2L, stop 3L, stop 4L, stop 5L
+        let result =
+            [| matchAt s0 0.0 "external:test"
+               matchAt s1 3_000.0 "external:test"
+               matchAt good 6_000.0 "external:test"
+               matchAt wrong 200_000.0 "external:test"
+               matchAt wrongNext 203_000.0 "external:test" |]
+            |> rejectImplausibleMatches
+                (calls [| s0, 0; s1, 3; good, 6; wrong, 9; wrongNext, 12 |])
+            |> Array.map (snd >> Option.isSome)
+
+        assertEqual [| true; true; true; false; false |] result
+
+    [<TestMethod>]
+    member this.``Checked match survives a tied conflict with an OSM match``() =
+        let stop, calls, matchAt = this.TravelTimeFixture()
+        let good, wrong = stop 1L, stop 2L
+        let result =
+            [| matchAt good 0.0 "external:test"
+               matchAt wrong 200_000.0 "osm:czech-pbf" |]
+            |> rejectImplausibleMatches (calls [| good, 0; wrong, 5 |])
+            |> Array.map (snd >> Option.isSome)
+
+        assertEqual [| true; false |] result
+
+    [<TestMethod>]
+    member this.``Indistinguishable conflicting matches are both rejected``() =
+        let stop, calls, matchAt = this.TravelTimeFixture()
+        let left, right = stop 1L, stop 2L
+        let result =
+            [| matchAt left 0.0 "external:test"
+               matchAt right 200_000.0 "external:test" |]
+            |> rejectImplausibleMatches (calls [| left, 0; right, 5 |])
+            |> Array.map (snd >> Option.isSome)
+
+        assertEqual [| false; false |] result
+
     [<TestMethod>]
     member _.``Unmatched route origin is offset north of its first known stop``() =
         let fixturePath =
