@@ -25,6 +25,7 @@
     <Compile Include="RegionalGtfsOverlayTests.fs" />
     <Compile Include="RegionalOverlayStorageTests.fs" />
     <Compile Include="ServingContractTests.fs" />
+    <Compile Include="PerformanceEquivalenceTests.fs" />
     <Compile Include="EntryPoint.fs" />
   </ItemGroup>
 

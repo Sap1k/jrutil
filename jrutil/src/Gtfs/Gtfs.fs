@@ -153,7 +153,27 @@ let deduplicateCalendar (feed: GtfsFeed) =
                         |> Array.sort
             dataWithoutId, si
         )
-        |> Seq.groupBy fst
+        // A canonical text key: structural hashing of the exception arrays only
+        // looks at their first elements, so equal-prefix calendars collide.
+        |> Seq.groupBy (fun ((entry, exceptions), _) ->
+            let key = System.Text.StringBuilder()
+            let date (value: NodaTime.LocalDate) =
+                key.Append(value.Year).Append('-').Append(value.Month).Append('-').Append(value.Day) |> ignore
+            match entry with
+            | Some entry ->
+                key.Append('E') |> ignore
+                for day in entry.weekdayService do key.Append(if day then '1' else '0') |> ignore
+                date entry.startDate
+                key.Append('/') |> ignore
+                date entry.endDate
+            | None -> key.Append('N') |> ignore
+            for item in exceptions do
+                key.Append(';') |> ignore
+                date item.date
+                key.Append(match item.exceptionType with
+                           | ServiceAdded -> '+'
+                           | ServiceRemoved -> '-') |> ignore
+            key.ToString())
         |> Seq.mapi (fun i (_, items) ->
             let items = items |> Seq.toArray
             let oldIds = items |> Array.map (fun (_, si) -> si)

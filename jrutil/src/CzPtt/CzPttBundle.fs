@@ -270,37 +270,40 @@ let convert storagePolicy catalog options inputPath outputDirectory
         indexedNameCandidates osmByCoreName railwayNameCore identity
     let fuzzyNameCache =
         Dictionary<string * string, OsmCandidate array>()
+    let preparedOsmNames =
+        osmCandidates |> Array.map (fun candidate -> candidate.names |> Array.map prepareName)
+    let fuzzyNameTime = Diagnostics.Stopwatch()
     let fuzzyNameCandidates (identity: string * string) =
         match fuzzyNameCache.TryGetValue(identity) with
         | true, values -> values
         | _ ->
+            fuzzyNameTime.Start()
             let expectedNames =
                 Map.tryFind identity identityNames
                 |> Option.defaultValue Set.empty
                 |> Set.toArray
+                |> Array.map (fun name ->
+                    let prepared = prepareName name
+                    prepared, requiredQualifierTokens prepared)
+            let minimumScore = 0.58
             let values =
-                osmCandidates
-                |> Array.choose (fun candidate ->
-                    let score =
-                        candidate.names
-                        |> Array.collect (fun candidateName ->
-                            expectedNames
-                            |> Array.choose (fun expectedName ->
-                                if fuzzyQualifierCompatible
-                                       expectedName candidateName
-                                then
-                                    Some (
-                                        nameSimilarity
-                                            expectedName candidateName)
-                                else None))
-                        |> fun scores ->
-                            if scores.Length = 0 then 0. else Array.max scores
-                    if score >= 0.58 then Some (score, candidate) else None)
+                Array.zip osmCandidates preparedOsmNames
+                |> Array.Parallel.choose (fun (candidate, candidateNames) ->
+                    let mutable score = None
+                    for candidateName in candidateNames do
+                        for expectedName, required in expectedNames do
+                            if preparedQualifierCompatible required candidateName then
+                                match preparedNameSimilarityAtLeast minimumScore expectedName candidateName with
+                                | Some value when score |> Option.forall (fun best -> value > best) ->
+                                    score <- Some value
+                                | _ -> ()
+                    score |> Option.map (fun score -> score, candidate))
                 |> Array.sortBy (fun (score, candidate) ->
                     -score, candidate.objectId)
                 |> Array.truncate 32
                 |> Array.map snd
             fuzzyNameCache.Add(identity, values)
+            fuzzyNameTime.Stop()
             values
     let candidateGroups (identity: string * string) =
         let country, code = identity
@@ -474,6 +477,7 @@ let convert storagePolicy catalog options inputPath outputDirectory
         |> Seq.map (fun call -> call.countryCode, call.primaryCode)
         |> Seq.distinct
         |> Seq.toArray
+    progress "resolve-coordinates" "started"
     let mutable selectedCoordinates:
             Map<string * string, SelectedCoordinate> = authoritativeCoordinates
     for identity in resolutionOrder do
@@ -493,6 +497,10 @@ let convert storagePolicy catalog options inputPath outputDirectory
                     selectedCoordinates <- Map.add identity coordinate withoutCurrent
                 | None ->
                     selectedCoordinates <- withoutCurrent
+    progress "resolve-coordinates" "completed"
+    Serilog.Log.Information(
+        "CZPTT fuzzy OSM name matching: {Points} points against {Candidates} candidates in {ElapsedMs} ms",
+        fuzzyNameCache.Count, osmCandidates.Length, fuzzyNameTime.ElapsedMilliseconds)
     let callTime (call: CzPttModel.OperationalCall) =
         call.arrivalSeconds |> Option.orElse call.departureSeconds
     let coordinateForCall

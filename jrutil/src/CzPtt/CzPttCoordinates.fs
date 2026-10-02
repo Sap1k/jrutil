@@ -145,6 +145,10 @@ let internal optionalTag name (node: Node) =
     then Option.ofObj value |> Option.filter (String.IsNullOrWhiteSpace >> not)
     else None
 
+let private nonAlphanumericRun = Regex(@"[^\p{L}\p{N}]+", RegexOptions.Compiled)
+let private trailingOperationalQualifier = Regex(@"\s*\([^)]*\)\s*$", RegexOptions.Compiled)
+let private routeSectionToken = Regex(@"^R[0-9]+$", RegexOptions.Compiled)
+
 let internal normalizedName (value: string) =
     let transliterated =
         value
@@ -157,39 +161,34 @@ let internal normalizedName (value: string) =
             .Replace("Æ", "AE")
             .Replace("æ", "ae")
     let decomposed = transliterated.Normalize(NormalizationForm.FormD)
-    let withoutMarks =
-        decomposed
-        |> Seq.filter (fun character ->
-            Globalization.CharUnicodeInfo.GetUnicodeCategory(character)
-            <> Globalization.UnicodeCategory.NonSpacingMark)
-        |> Seq.toArray
-        |> String
-    Regex.Replace(withoutMarks, @"[^\p{L}\p{N}]+", " ")
+    let withoutMarks = StringBuilder(decomposed.Length)
+    for character in decomposed do
+        if Globalization.CharUnicodeInfo.GetUnicodeCategory(character)
+           <> Globalization.UnicodeCategory.NonSpacingMark then
+            withoutMarks.Append(character) |> ignore
+    nonAlphanumericRun.Replace(withoutMarks.ToString(), " ")
         .Trim().ToUpperInvariant()
+
+let private railwayNameSuffixTokens =
+    Set.ofList [
+        "Bf"; "Fbf"; "Gr"; "Hp"; "Hst"; "N"; "Nz"; "Pzs"; "S"; "St";
+        "Z"; "Zast"; "Zastavka"
+    ]
+    |> Set.map normalizedName
 
 let internal railwayNameCore (value: string) =
     let withoutOperationalQualifier =
-        Regex.Replace(value, @"\s*\([^)]*\)\s*$", "")
-    let removable =
-        Set.ofList [
-            "Bf"; "Fbf"; "Gr"; "Hp"; "Hst"; "N"; "Nz"; "Pzs"; "S"; "St";
-            "Z"; "Zast"; "Zastavka"
-        ]
-        |> Set.map normalizedName
+        trailingOperationalQualifier.Replace(value, "")
     let tokens =
         (normalizedName withoutOperationalQualifier)
             .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-        |> Array.toList
-    let rec trimSuffix values =
-        match List.tryLast values with
-        | Some token when
-            Set.contains token removable
-            || Regex.IsMatch(token, @"^R[0-9]+$") ->
-            values |> List.take (values.Length - 1) |> trimSuffix
-        | _ -> values
-    match trimSuffix tokens with
-    | [] -> normalizedName value
-    | values -> String.concat " " values
+    let mutable kept = tokens.Length
+    while kept > 0
+          && (Set.contains tokens.[kept - 1] railwayNameSuffixTokens
+              || routeSectionToken.IsMatch(tokens.[kept - 1])) do
+        kept <- kept - 1
+    if kept = 0 then normalizedName value
+    else String.Join(" ", tokens, 0, kept)
 
 let internal editSimilarity (left: string) (right: string) =
     if left = right then 1.
@@ -211,18 +210,58 @@ let internal editSimilarity (left: string) (right: string) =
             Array.blit current 0 previous 0 current.Length
         1. - float previous.[right.Length] / float (max left.Length right.Length)
 
-let internal nameSimilarity (left: string) (right: string) =
-    let leftFull = normalizedName left
-    let rightFull = normalizedName right
-    let leftCore = railwayNameCore left
-    let rightCore = railwayNameCore right
-    let compact (value: string) = value.Replace(" ", "")
+/// The normalized forms `nameSimilarity` and `fuzzyQualifierCompatible`
+/// compare, computed once per name instead of once per compared pair.
+type internal PreparedName = {
+    full: string
+    core: string
+    compactCore: string
+    tokens: string array
+}
+
+let internal prepareName (value: string) =
+    let full = normalizedName value
+    let core = railwayNameCore value
+    {
+        full = full
+        core = core
+        compactCore = core.Replace(" ", "")
+        tokens = full.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+    }
+
+/// Upper bound of `editSimilarity`: the edit distance is at least the length difference.
+let private editSimilarityBound (left: string) (right: string) =
+    if left = right then 1.
+    elif String.IsNullOrEmpty(left) || String.IsNullOrEmpty(right) then 0.
+    else
+        1. - float (abs (left.Length - right.Length))
+             / float (max left.Length right.Length)
+
+/// `nameSimilarity` over prepared names; `None` when it is provably below `minimum`.
+let internal preparedNameSimilarityAtLeast minimum (left: PreparedName) (right: PreparedName) =
+    let fullBound = editSimilarityBound left.full right.full
+    let coreBound = editSimilarityBound left.core right.core
+    let compactBound = editSimilarityBound left.compactCore right.compactCore
+    if max fullBound (max coreBound compactBound) < minimum then None
+    else
+        let score value bound (leftValue: string) rightValue =
+            if bound < minimum || bound <= value then value
+            else max value (editSimilarity leftValue rightValue)
+        let full = if fullBound < minimum then 0. else editSimilarity left.full right.full
+        let core = score full coreBound left.core right.core
+        let best = score core compactBound left.compactCore right.compactCore
+        if best < minimum then None else Some best
+
+let internal preparedNameSimilarity (left: PreparedName) (right: PreparedName) =
     [|
-        editSimilarity leftFull rightFull
-        editSimilarity leftCore rightCore
-        editSimilarity (compact leftCore) (compact rightCore)
+        editSimilarity left.full right.full
+        editSimilarity left.core right.core
+        editSimilarity left.compactCore right.compactCore
     |]
     |> Array.max
+
+let internal nameSimilarity (left: string) (right: string) =
+    preparedNameSimilarity (prepareName left) (prepareName right)
 
 let internal protectedFuzzyNameTokens =
     [
@@ -234,23 +273,25 @@ let internal protectedFuzzyNameTokens =
     |> Seq.map normalizedName
     |> Set
 
-let internal fuzzyQualifierCompatible (expected: string) (candidate: string) =
-    let tokens value =
-        (normalizedName value).Split(
-            ' ',
-            StringSplitOptions.RemoveEmptyEntries)
-    let required =
-        tokens expected
-        |> Array.filter (fun token -> Set.contains token protectedFuzzyNameTokens)
-    let available = tokens candidate
+/// Protected qualifier tokens of a prepared expected name.
+let internal requiredQualifierTokens (expected: PreparedName) =
+    expected.tokens
+    |> Array.filter (fun token -> Set.contains token protectedFuzzyNameTokens)
+
+let internal preparedQualifierCompatible (required: string array) (candidate: PreparedName) =
     required
     |> Array.forall (fun requiredToken ->
-        available
+        candidate.tokens
         |> Array.exists (fun candidateToken ->
             candidateToken = requiredToken
             || candidateToken.StartsWith(
                 requiredToken,
                 StringComparison.Ordinal)))
+
+let internal fuzzyQualifierCompatible (expected: string) (candidate: string) =
+    preparedQualifierCompatible
+        (requiredQualifierTokens (prepareName expected))
+        (prepareName candidate)
 
 let internal normalizedCountryCode (value: string) =
     match value.Trim().ToUpperInvariant() with
