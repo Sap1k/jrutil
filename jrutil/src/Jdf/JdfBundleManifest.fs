@@ -32,7 +32,7 @@ let internal diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
     let filteredTrips =
         batch.trips
         |> Seq.choose (fun trip ->
-            let gtfsId = JdfGtfsRules.jdfTripId trip.routeId trip.routeDistinction trip.id
+            let gtfsId = JdfGtfsRules.jdfTripId batch trip.routeId trip.routeDistinction trip.id
             if retainedTrips.Contains gtfsId then None else Some {
                 severity = "warning"; code = "filtered_trip"; sourceObjectId = gtfsId
                 message = "Trip has no retained service dates and was omitted"
@@ -43,7 +43,7 @@ let internal diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
             |> Seq.choose (fun note ->
                 let hasText = nonEmptyText note.note |> Option.isSome
                 let isUnhandled = note.noteType.IsNone && not (String.IsNullOrWhiteSpace(note.designation))
-                let gtfsTripId = JdfGtfsRules.jdfTripId note.routeId note.routeDistinction note.tripId
+                let gtfsTripId = JdfGtfsRules.jdfTripId batch note.routeId note.routeDistinction note.tripId
                 if (hasText || isUnhandled) && not (retainedTrips.Contains gtfsTripId) then
                     Some (tripNoticeId note.routeId note.routeDistinction note.tripId note.id)
                 else None)
@@ -51,7 +51,7 @@ let internal diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
             batch.reservationOptions
             |> withOwnerOrdinals (fun note -> note.routeId, note.routeDistinction, note.tripId)
             |> Seq.choose (fun (ordinal, note) ->
-                let gtfsTripId = JdfGtfsRules.jdfTripId note.routeId note.routeDistinction note.tripId
+                let gtfsTripId = JdfGtfsRules.jdfTripId batch note.routeId note.routeDistinction note.tripId
                 if not (retainedTrips.Contains gtfsTripId) then
                     Some (reservationNoticeId note.routeId note.routeDistinction note.tripId ordinal)
                 else None)
@@ -60,7 +60,7 @@ let internal diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
             |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
             |> Seq.choose (fun (ordinal, transfer) ->
                 let gtfsTripId =
-                    JdfGtfsRules.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+                    JdfGtfsRules.jdfTripId batch transfer.routeId transfer.routeDistinction transfer.tripId
                 if not (retainedTrips.Contains gtfsTripId) then
                     Some (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)
                 else None)
@@ -77,7 +77,7 @@ let internal diagnostics (batch: JdfModel.JdfBatch) (feed: GtfsModel.GtfsFeed)
             |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
             |> Seq.choose (fun (ordinal, transfer) ->
                 let gtfsTripId =
-                    JdfGtfsRules.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+                    JdfGtfsRules.jdfTripId batch transfer.routeId transfer.routeDistinction transfer.tripId
                 if retainedTrips.Contains gtfsTripId
                    && not (emittedTransferCalls.Contains(struct (gtfsTripId, transfer.routeStopId))) then
                     Some (transferId transfer.routeId transfer.routeDistinction transfer.tripId ordinal)

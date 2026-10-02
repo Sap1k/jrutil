@@ -170,7 +170,7 @@ let internal scanCallDerivedFacts (batch: JdfModel.JdfBatch) (retainedTrips: Has
             currentRoute <- call.routeId
             currentDistinction <- call.routeDistinction
             currentTrip <- call.tripId
-            currentTripId <- JdfGtfsRules.jdfTripId call.routeId call.routeDistinction call.tripId
+            currentTripId <- JdfGtfsRules.jdfTripId batch call.routeId call.routeDistinction call.tripId
             retained <- retainedTrips.Contains(currentTripId)
         let tripId = currentTripId
         let emitted=callIsEmitted call
@@ -341,7 +341,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
     let tripFeatures () : seq<JrUtil.Serving.FeatureWriter.Row> =
         batch.trips
         |> Seq.collect (fun trip ->
-            let gtfsTripId = JdfGtfsRules.jdfTripId trip.routeId trip.routeDistinction trip.id
+            let gtfsTripId = JdfGtfsRules.jdfTripId batch trip.routeId trip.routeDistinction trip.id
             if not (retainedTripIds.Contains(gtfsTripId)) then Seq.empty
             else
                 Jdf.parseAttributes batch trip.attributes
@@ -392,14 +392,14 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
             let text = nonEmptyText notice.note
             let label = nonEmptyText (Some notice.designation)
             if not (notice.noteType.IsSome && text.IsNone) && (text.IsSome || label.IsSome) then
-                let trip = JdfGtfsRules.jdfTripId notice.routeId notice.routeDistinction notice.tripId
+                let trip = JdfGtfsRules.jdfTripId batch notice.routeId notice.routeDistinction notice.tripId
                 if retainedTripIds.Contains(trip) then
                     yield { empty (tripNoticeId notice.routeId notice.routeDistinction notice.tripId notice.id) "service_note" "" trip with
                                 text = text |> Option.defaultValue ""; label = label |> Option.defaultValue ""
                                 validFrom = date notice.dateFrom; validTo = date notice.dateTo
                                 serviceNoteType = notice.noteType |> Option.map serviceNoteTypeName |> Option.defaultValue "" }
         for ordinal, notice in batch.reservationOptions |> withOwnerOrdinals (fun notice -> notice.routeId, notice.routeDistinction, notice.tripId) do
-            let trip = JdfGtfsRules.jdfTripId notice.routeId notice.routeDistinction notice.tripId
+            let trip = JdfGtfsRules.jdfTripId batch notice.routeId notice.routeDistinction notice.tripId
             if not (String.IsNullOrWhiteSpace(notice.note)) && retainedTripIds.Contains(trip) then
                 yield { empty (reservationNoticeId notice.routeId notice.routeDistinction notice.tripId ordinal) "reservation" "" trip with text = notice.note }
     }
@@ -408,7 +408,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
         |> withOwnerOrdinals (fun transfer -> transfer.routeId, transfer.routeDistinction, transfer.tripId)
         |> Seq.choose (fun (ordinal, transfer) ->
             let gtfsTripId =
-                JdfGtfsRules.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId
+                JdfGtfsRules.jdfTripId batch transfer.routeId transfer.routeDistinction transfer.tripId
             if not (retainedTripIds.Contains gtfsTripId)
                || not (emittedTransferCalls.Contains(struct (gtfsTripId, transfer.routeStopId))) then None
             else Some (row [

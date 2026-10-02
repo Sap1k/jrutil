@@ -60,7 +60,7 @@ let internal applyInternationalRoutePolicyInternal
 
     let activeTripKeys = HashSet<struct (string * int * int64)>()
     for trip in batch.trips do
-        let gtfsId = jdfTripId trip.routeId trip.routeDistinction trip.id
+        let gtfsId = jdfTripId batch trip.routeId trip.routeDistinction trip.id
         if not (tripsToDelete.Contains gtfsId) then
             activeTripKeys.Add(struct (trip.routeId, trip.routeDistinction, trip.id)) |> ignore
     let activeTripContains routeId distinction tripId =
@@ -321,7 +321,9 @@ let internal applyInternationalRoutePolicyInternal
                     && (value.nextStopId
                         |> Option.map retainedStopIds.Contains
                         |> Option.defaultValue true))
+            routeVersions = batch.routeVersions |> Array.filter (fun value -> routeKept value.routeId value.routeDistinction)
         }
+    inheritTripVersionKeys batch filteredBatch
     { batch = filteredBatch; decisions = decisions }
 
 let applyInternationalRoutePolicyWithCalendar

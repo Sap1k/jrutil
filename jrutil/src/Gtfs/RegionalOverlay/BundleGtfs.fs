@@ -95,12 +95,8 @@ let writeRoutes (context: Context) =
                     optionText (rowValue row "agency_id") |> Option.iter (fun value -> usedAgencyIds.Add(value) |> ignore)
                     match acceptedRouteSources.TryGetValue(routeId) with
                     | true, sourceRows ->
-                        // Detour routes keep their colours: the text colour marks
-                        // the non-regular timetable and was chosen for that background.
-                        let detour = prepared.baseDetourRoutes.Contains(routeId)
                         for capabilityName, column in displayFields do
-                            let keepsBaseColor = detour && (column = "route_color" || column = "route_text_color")
-                            if enabled prepared.policy capabilityName && not keepsBaseColor then
+                            if enabled prepared.policy capabilityName then
                                 let values = sourceRows |> Seq.map (fun source -> rowValue source column) |> Seq.filter (String.IsNullOrWhiteSpace >> not) |> Seq.distinct |> Seq.toArray
                                 if values.Length = 1 then
                                     row.[column] <- values.[0]

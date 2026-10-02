@@ -162,10 +162,6 @@ let jdfSourceZoneId (routeId: string) routeDistinction (zoneCode: string) =
             routeDistinction
             (Uri.EscapeDataString(zoneCode))
 
-let jdfTripId (routeId: string) routeDistinction (id: int64) =
-    sprintf "jdf:trip:%s:%d:%d"
-            (Uri.EscapeDataString(routeId)) routeDistinction id
-
 let getGtfsRouteType (jdfRoute: JdfModel.Route) =
     match (jdfRoute.transportMode, jdfRoute.routeType) with
     | (JdfModel.Bus, JdfModel.City)
@@ -283,29 +279,8 @@ let internal publicLineNumberCache =
 let getPublicLineNumbers (jdfBatch: JdfModel.JdfBatch) =
     publicLineNumberCache.GetValue(jdfBatch, fun batch -> computePublicLineNumbers batch)
 
-// Detour (výluka) timetables keep the route colour but get amber text, or a dark
-// orange where amber would be unreadable on a light background.
-let detourTextColor = "ffd23f"
-let detourFallbackTextColor = "7a3500"
-
-let internal relativeLuminance (hex: string) =
-    let channel index =
-        let value = float (Convert.ToInt32(hex.Substring(index, 2), 16)) / 255.0
-        if value <= 0.03928 then value / 12.92 else ((value + 0.055) / 1.055) ** 2.4
-    0.2126 * channel 0 + 0.7152 * channel 2 + 0.0722 * channel 4
-
-/// WCAG contrast ratio of two RRGGBB colours.
-let contrastRatio (first: string) (second: string) =
-    let a, b = relativeLuminance first, relativeLuminance second
-    (max a b + 0.05) / (min a b + 0.05)
-
-let getGtfsRouteColorsWithDetour publicLineNumber (jdfRoute: JdfModel.Route) =
-    let color, textColor = getGtfsRouteColors publicLineNumber jdfRoute
-    if not jdfRoute.detour then color, textColor else
-    let background = color |> Option.defaultValue "ffffff"
-    color,
-    Some (if contrastRatio detourTextColor background >= 3.0 then detourTextColor
-          else detourFallbackTextColor)
+/// route_desc of detour (výluka) routes; they keep the line's own colours.
+let detourRouteDescription = "Výlukový jízdní řád"
 
 /// Output GTFS routes group all merged versions of a CIS line that share route
 /// semantics, keeping detour timetables apart. The group holding the line's
@@ -359,6 +334,64 @@ let getRouteGrouping (jdfBatch: JdfModel.JdfBatch) =
 /// Output GTFS route id of one merged route version.
 let gtfsRouteId (jdfBatch: JdfModel.JdfBatch) (routeId: string) routeDistinction =
     (getRouteGrouping jdfBatch).routeIds.[struct (routeId, routeDistinction)]
+
+/// Trip ids name the published schedule rather than the merge-assigned
+/// distinction: `<licence>:<yymmdd>[:det][:<hash>][:pN]`. The date is the
+/// version's original validity start. Versions of one licence sharing it get
+/// a hash of their original validity and batch date, except the one ending
+/// first; chunks the merger split from one version get `:p2`, `:p3`… by date.
+let internal tripVersionKeyCache =
+    System.Runtime.CompilerServices.ConditionalWeakTable<JdfModel.JdfBatch, IReadOnlyDictionary<struct (string * int), string>>()
+
+let internal buildTripVersionKeys (jdfBatch: JdfModel.JdfBatch) =
+    let versions =
+        jdfBatch.routeVersions
+        |> Array.map (fun value -> struct (value.routeId, value.routeDistinction), value)
+        |> dict
+    let sourceOf (route: JdfModel.Route) =
+        match versions.TryGetValue(struct (route.id, route.idDistinction)) with
+        | true, value -> value.originalValidFrom, value.originalValidTo, value.sourceCreationDate
+        | _ -> route.timetableValidFrom, route.timetableValidTo, jdfBatch.version.creationDate
+    let dateText (date: LocalDate) =
+        date.ToString("yyMMdd", Globalization.CultureInfo.InvariantCulture)
+    let keys = Dictionary<struct (string * int), string>()
+    for licence, routes in jdfBatch.routes |> Array.groupBy (fun route -> route.id) do
+        let seen = HashSet<string>(StringComparer.Ordinal)
+        for (validFrom, detour), starting in
+                routes |> Array.groupBy (fun route -> (let from, _, _ = sourceOf route in from), route.detour) do
+            let baseKey =
+                Uri.EscapeDataString(licence) + ":" + dateText validFrom + (if detour then ":det" else "")
+            starting
+            |> Array.groupBy sourceOf
+            |> Array.sortBy (fun ((_, validTo, created), _) -> validTo, created)
+            |> Array.iteri (fun sourceIndex ((_, validTo, created), chunks) ->
+                let sourceKey =
+                    if sourceIndex = 0 then baseKey
+                    else
+                        let createdText = created |> Option.map dateText |> Option.defaultValue ""
+                        let payload = $"{dateText validFrom}|{dateText validTo}|{createdText}"
+                        let hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload))
+                        baseKey + ":" + Convert.ToHexString(hash, 0, 4).ToLowerInvariant()
+                chunks
+                |> Array.sortBy (fun route -> route.timetableValidFrom, route.idDistinction)
+                |> Array.iteri (fun part route ->
+                    let key = if part = 0 then sourceKey else $"{sourceKey}:p{part + 1}"
+                    if not (seen.Add(key)) then
+                        invalidOp $"JDF route {route.id}/{route.idDistinction} repeats trip version key {key}"
+                    keys.[struct (route.id, route.idDistinction)] <- key))
+    keys :> IReadOnlyDictionary<_, _>
+
+/// Stable trip-version key of each merged route version, computed once per batch.
+let getTripVersionKeys (jdfBatch: JdfModel.JdfBatch) =
+    tripVersionKeyCache.GetValue(jdfBatch, fun batch -> buildTripVersionKeys batch)
+
+/// A batch derived by dropping route versions keeps its parent's keys, so trip
+/// ids prepared on the parent stay valid for the derived batch.
+let inheritTripVersionKeys (parent: JdfModel.JdfBatch) (derived: JdfModel.JdfBatch) =
+    tripVersionKeyCache.AddOrUpdate(derived, getTripVersionKeys parent)
+
+let jdfTripId (jdfBatch: JdfModel.JdfBatch) (routeId: string) routeDistinction (id: int64) =
+    sprintf "jdf:trip:%s:%d" (getTripVersionKeys jdfBatch).[struct (routeId, routeDistinction)] id
 
 let applyTransportModeRules (ruleSet: TransportModeRuleSet) (batch: JdfModel.JdfBatch) =
     let publicLines = getPublicLineNumbers batch

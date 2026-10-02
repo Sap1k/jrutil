@@ -145,11 +145,11 @@ type JdfToGtfsTests() =
         let czTrip =
             feed.czTrips
             |> Option.get
-            |> Array.find (fun item -> item.tripId = "jdf:trip:586001:1:1")
-        assertEqual "jdf:trip:586001:1:1" czTrip.tripId
+            |> Array.find (fun item -> item.tripId = "jdf:trip:586001:260101:1")
+        assertEqual "jdf:trip:586001:260101:1" czTrip.tripId
         assertEqual (Some "586001") czTrip.cisLineId
         assertEqual (Some 1L) czTrip.cisTripId
-        assertEqual (Some "jdf:trip:586001:1:1") czTrip.sourceTripIds
+        assertEqual (Some "jdf:trip:586001:260101:1") czTrip.sourceTripIds
         assertEqual (Some "jdf") czTrip.coverageSources
 
         let routeIds = feed.routes |> Array.map (fun item -> item.id) |> set
@@ -261,8 +261,8 @@ type JdfToGtfsTests() =
             { source with trips = [| first; second |]; serviceNotes = [| note; { note with tripId = second.id } |] }
             |> JdfCalendar.prepareGtfsCalendarWithWorkers 4
         assertEqual
-            (set [JdfGtfsRules.jdfTripId first.routeId first.routeDistinction first.id
-                  JdfGtfsRules.jdfTripId second.routeId second.routeDistinction second.id])
+            (set [JdfGtfsRules.jdfTripId source first.routeId first.routeDistinction first.id
+                  JdfGtfsRules.jdfTripId source second.routeId second.routeDistinction second.id])
             prepared.tripsToDelete
         Assert.IsTrue(prepared.schedules.IsEmpty)
 
@@ -492,7 +492,7 @@ type JdfToGtfsTests() =
         let numericStopTimes =
             feed.stopTimes
             |> Array.filter (fun stopTime ->
-                stopTime.tripId = "jdf:trip:586001:1:1")
+                stopTime.tripId = "jdf:trip:586001:260101:1")
             |> Array.sortBy (fun stopTime -> stopTime.stopSequence)
         assertEqual "jdf:stop:100:post:1" numericStopTimes.[0].stopId
         assertEqual None numericStopTimes.[0].stopZoneIds
@@ -500,7 +500,7 @@ type JdfToGtfsTests() =
         let formalStopTimes =
             feed.stopTimes
             |> Array.filter (fun stopTime ->
-                stopTime.tripId = "jdf:trip:446002:1:1")
+                stopTime.tripId = "jdf:trip:446002:260101:1")
             |> Array.sortBy (fun stopTime -> stopTime.stopSequence)
         assertEqual "jdf:stop:100:post:id:8" formalStopTimes.[0].stopId
         assertEqual "jdf:stop:200:post:id:7" formalStopTimes.[1].stopId
@@ -691,9 +691,10 @@ type JdfToGtfsTests() =
             |> Array.filter (fun route -> route.id.StartsWith("jdf:route:586001"))
             |> Array.sortBy (fun route -> route.id)
         assertEqual [| "jdf:route:586001"; "jdf:route:586001:detour" |] (routes |> Array.map (fun route -> route.id))
-        assertEqual (Some "ffffff") routes.[0].textColor
-        assertEqual (Some JdfGtfsRules.detourTextColor) routes.[1].textColor
         assertEqual routes.[0].color routes.[1].color
+        assertEqual routes.[0].textColor routes.[1].textColor
+        assertEqual None routes.[0].description
+        assertEqual (Some JdfGtfsRules.detourRouteDescription) routes.[1].description
 
     [<TestMethod>]
     member this.``A later version with different semantics gets a hashed route id``() =
@@ -706,15 +707,6 @@ type JdfToGtfsTests() =
         Assert.IsTrue(
             Text.RegularExpressions.Regex.IsMatch(renamed, "^jdf:route:586001:[0-9a-f]{8}$"),
             renamed)
-
-    [<TestMethod>]
-    member _.``Detour text falls back to dark orange on light route colours``() =
-        let route = (batch ()).routes |> Array.find (fun route -> route.id = "586001")
-        let metro = { route with transportMode = JdfModel.Metro; detour = true }
-        let color, textColor = JdfGtfsRules.getGtfsRouteColorsWithDetour (Some "B") metro
-        assertEqual (Some "fbaf33") color
-        assertEqual (Some JdfGtfsRules.detourFallbackTextColor) textColor
-        Assert.IsTrue(JdfGtfsRules.contrastRatio JdfGtfsRules.detourFallbackTextColor "fbaf33" >= 3.0)
 
     [<TestMethod>]
     member _.``Route stop keys stay unique across versions of one route``() =

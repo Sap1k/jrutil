@@ -402,6 +402,17 @@ type RoutingDemand = {
     searchClass: string
 }
 
+// JrUtil extension written by merge-jdf: the published identity of each
+// merged route version, which the merge-assigned distinction does not keep.
+type RouteVersion = {
+    routeId: string
+    routeDistinction: int
+    // Validity as published, before overlap resolution or GVD bounding
+    originalValidFrom: LocalDate
+    originalValidTo: LocalDate
+    sourceCreationDate: LocalDate option
+}
+
 type JdfBatch = {
     version: JdfVersion
     stops: Stop array
@@ -424,6 +435,7 @@ type JdfBatch = {
     stopLocationSources: StopLocationSource array
     postCandidateEvidence: PostCandidateEvidence array
     routingDemands: RoutingDemand array
+    routeVersions: RouteVersion array
 }
 
 let validatePostCandidateEvidence (observations:PostCandidateEvidence array) =

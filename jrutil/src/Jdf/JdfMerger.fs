@@ -73,7 +73,7 @@ type JdfMerger(
         Dictionary<int option array, int option array>(HashIdentity.Structural)
     let stopsByIds = Dictionary()
     let stopPostsSet = HashSet()
-    let batchDateByRoute = Dictionary()
+    let batchDateByRoute = Dictionary<string * int, LocalDate option>()
     // Validity as published, before overlap resolution cuts it
     let originalValidityByRoute = Dictionary<string * int, LocalDate * LocalDate>()
 
@@ -194,6 +194,17 @@ type JdfMerger(
             |> Seq.sortBy (fun value -> value.stopId, value.candidateId, value.observationId)
             |> Seq.toArray
         routingDemands = routingDemands
+        routeVersions =
+            routesByLicNum.Values
+            |> Seq.collect id
+            |> Seq.map (fun route ->
+                let key = route.id, route.idDistinction
+                let validFrom, validTo = originalValidityByRoute.[key]
+                { routeId = route.id; routeDistinction = route.idDistinction
+                  originalValidFrom = validFrom; originalValidTo = validTo
+                  sourceCreationDate = batchDateByRoute.[key] }: RouteVersion)
+            |> Seq.sortBy (fun value -> value.routeId, value.routeDistinction)
+            |> Seq.toArray
     }
 
     member this.batch =
@@ -713,13 +724,24 @@ type JdfMerger(
                     idDistinction = (Seq.length other) + 1
                     agencyId = aid
                     agencyDistinction = aidd})
-        for r in newRoutes do
+        // Already merged input keeps the identity of its source versions
+        let inputVersions =
+            batch.routeVersions
+            |> Array.map (fun value -> (value.routeId, value.routeDistinction), value)
+            |> dict
+        for source, r in Seq.zip batch.routes newRoutes do
             routesByLicNum.[r.id].Add(r)
 
-            batchDateByRoute.[(r.id, r.idDistinction)] <-
-                batch.version.creationDate
-            originalValidityByRoute.[(r.id, r.idDistinction)] <-
-                (r.timetableValidFrom, r.timetableValidTo)
+            match inputVersions.TryGetValue((source.id, source.idDistinction)) with
+            | true, version ->
+                batchDateByRoute.[(r.id, r.idDistinction)] <- version.sourceCreationDate
+                originalValidityByRoute.[(r.id, r.idDistinction)] <-
+                    (version.originalValidFrom, version.originalValidTo)
+            | _ ->
+                batchDateByRoute.[(r.id, r.idDistinction)] <-
+                    batch.version.creationDate
+                originalValidityByRoute.[(r.id, r.idDistinction)] <-
+                    (r.timetableValidFrom, r.timetableValidTo)
         let routeIdMap = Dictionary<string * int, string * int>()
         for source, mapped in Seq.zip batch.routes newRoutes do
             routeIdMap.[(source.id, source.idDistinction)] <-

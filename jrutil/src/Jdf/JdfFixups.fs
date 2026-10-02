@@ -825,7 +825,7 @@ let dropDegenerateBatch (jdfBatch: JdfBatch) =
         Some {
             jdfBatch with
                 stops = [||]; stopPosts = [||]; agencies = [||]
-                routes = [||]; routeIntegrations = [||]; routeStops = [||]
+                routes = [||]; routeIntegrations = [||]; routeStops = [||]; routeVersions = [||]
                 trips = [||]; tripGroups = [||]; tripStops = [||]
                 routeInfo = [||]; attributeRefs = [||]; serviceNotes = [||]
                 transfers = [||]; agencyAlternations = [||]

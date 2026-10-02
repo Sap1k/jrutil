@@ -44,5 +44,6 @@ let jdf110To111Converter () =
                 "stopLocationSources", (fun _ -> [||]: JdfModel.StopLocationSource array)
                 "postCandidateEvidence", (fun _ -> [||]: JdfModel.PostCandidateEvidence array)
                 "routingDemands", (fun _ -> [||]: JdfModel.RoutingDemand array)
+                "routeVersions", (fun _ -> [||]: JdfModel.RouteVersion array)
             ])
     batchAC

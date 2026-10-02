@@ -161,7 +161,7 @@ let prepareGtfsCalendarWithWorkersAndProgress
             then [| for i in [1..7] -> true |]
             else [| for i in [1..7] -> servicedDays
                                        |> List.contains i |]
-        let tripId = jdfTripId jdfTrip.routeId
+        let tripId = jdfTripId jdfBatch jdfTrip.routeId
                                jdfTrip.routeDistinction
                                jdfTrip.id
 
@@ -259,7 +259,7 @@ let prepareGtfsCalendarWithWorkersAndProgress
             let deleted, entries, tripExceptions = values.[index]
             if deleted.Length > 0 then
                 let trip = chunk.[index]
-                tripsToDelete.Add(jdfTripId trip.routeId trip.routeDistinction trip.id)
+                tripsToDelete.Add(jdfTripId jdfBatch trip.routeId trip.routeDistinction trip.id)
             if deleted.Length = 0 then
                 let entry = entries |> Array.tryHead |> Option.map (fun value -> { value with id = "" })
                 let changes = tripExceptions |> Array.map (fun value -> { value with id = "" }) |> Array.sort
@@ -269,7 +269,7 @@ let prepareGtfsCalendarWithWorkersAndProgress
                     | true, existing -> existing
                     | _ -> unique.Add(candidate, candidate); candidate
                 let trip = chunk.[index]
-                schedules.Add(jdfTripId trip.routeId trip.routeDistinction trip.id, shared)
+                schedules.Add(jdfTripId jdfBatch trip.routeId trip.routeDistinction trip.id, shared)
     {
         tripsToDelete = set tripsToDelete
         schedules = Map schedules
@@ -285,7 +285,7 @@ let filterCalendarPreparation (batch: JdfModel.JdfBatch)
                               (prepared: CalendarPreparation) =
     let retained =
         batch.trips
-        |> Seq.map (fun trip -> jdfTripId trip.routeId trip.routeDistinction trip.id)
+        |> Seq.map (fun trip -> jdfTripId batch trip.routeId trip.routeDistinction trip.id)
         |> HashSet
     {
         tripsToDelete = prepared.tripsToDelete |> Set.filter retained.Contains

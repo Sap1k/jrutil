@@ -132,7 +132,7 @@ let internal writePostContextCalls descriptor captureToolVersion routingPbfSha25
         (fun group fields chunk ->
             let strings index mapping = writeEvidenceMappedStrings group fields index chunk mapping
             strings 0 (fun ((call:JdfPostEvidence.PostContextCall),_) ->
-                JdfGtfsRules.jdfTripId call.routeId call.routeDistinction call.tripId)
+                JdfGtfsRules.jdfTripId batch call.routeId call.routeDistinction call.tripId)
             strings 1 (fun (call,_) -> call.routeId)
             writeEvidenceMappedValues group fields 2 chunk (fun (call,_) -> call.routeDistinction)
             writeEvidenceMappedValues group fields 3 chunk (fun (call,_) -> call.tripId)
