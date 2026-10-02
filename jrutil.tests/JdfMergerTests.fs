@@ -384,6 +384,66 @@ type JdfMergerTests() =
         |> Array.sortBy (fun (_, validFrom, _) -> validFrom)
         |> Array.toList
 
+    member private _.mergedTripKeys(versions: (LocalDate * bool * LocalDate * LocalDate) list) =
+        let batch (created, detour, validFrom, validTo) =
+            { template.Value with
+                version = { template.Value.version with creationDate = Some created }
+                routes =
+                    template.Value.routes
+                    |> Array.map (fun route -> {
+                        route with
+                            detour = detour
+                            timetableValidFrom = validFrom
+                            timetableValidTo = validTo
+                    }) }
+        use merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
+        versions |> List.iter (batch >> merger.add)
+        merger.resolveRouteOverlaps()
+        let licNum = template.Value.routes.[0].id
+        let keysOf (merged: JdfBatch) =
+            let keys = JdfGtfsRules.getTripVersionKeys merged
+            merged.routes
+            |> Array.filter (fun route -> route.id = licNum)
+            |> Array.sortBy (fun route -> route.timetableValidFrom)
+            |> Array.map (fun route -> route.timetableValidFrom, keys.[struct (route.id, route.idDistinction)])
+            |> Array.toList
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-trip-keys-" + Guid.NewGuid().ToString("N"))
+        try
+            merger.write(root)
+            let reread = Jdf.jdfBatchDirParser () (Jdf.FsPath root)
+            let inMemory = keysOf merger.batch
+            assertEqual inMemory (keysOf reread)
+            inMemory
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member this.``Trip version keys name the published schedule in any merge order``() =
+        let date (month: int) (day: int) = LocalDate(2026, month, day)
+        let regular = date 1 1, false, date 1 1, date 12 31
+        let detour = date 2 1, true, date 4 1, date 6 30
+        let expected =
+            [ date 1 1, "586001:260101"
+              date 4 1, "586001:260401:det"
+              date 7 1, "586001:260101:p2" ]
+        assertEqual expected (this.mergedTripKeys [ regular; detour ])
+        assertEqual expected (this.mergedTripKeys [ detour; regular ])
+
+    [<TestMethod>]
+    member this.``Versions starting on one day get a hashed trip version key``() =
+        let date (month: int) (day: int) = LocalDate(2026, month, day)
+        let keys =
+            this.mergedTripKeys [
+                date 1 2, false, date 1 1, date 3 31
+                date 1 1, false, date 1 1, date 12 31 ]
+        // The newer short version cuts the older one to start in April; both
+        // keep their published start, and the one ending first keeps the plain key.
+        assertEqual [ date 1 1; date 4 1 ] (keys |> List.map fst)
+        assertEqual "586001:260101" (snd keys.[0])
+        Assert.IsTrue(
+            Text.RegularExpressions.Regex.IsMatch(snd keys.[1], "^586001:260101:[0-9a-f]{8}$"),
+            snd keys.[1])
+
     [<TestMethod>]
     member this.``Later versions supersede an open-ended older detour``() =
         let date (month: int) (day: int) = LocalDate(2026, month, day)

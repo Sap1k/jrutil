@@ -10,6 +10,8 @@ Consumers must validate `bundle_format`, all schema versions, the closed file in
 
 JDF output routes now group all versions of a CIS line (`jdf:route:<line>`, with a separate `jdf:route:<line>:detour` for výluka timetables) instead of emitting `jdf:route:<line>:<distinction>` per version. JDF route-stop keys include the version distinction. Serving `route` gains the nullable `timetable_kind` (`regular` | `detour`); it is null for non-JDF routes. JDF service is bounded to the GVD recorded in `service_horizon`.
 
+JDF trip ids are `jdf:trip:<line>:<yymmdd>[:det][:<hash>][:pN]:<trip>`, keyed by the version's published validity start instead of the merge-assigned distinction, so the same schedule keeps its trip ids between runs. Detour routes keep the line's own colours (no amber text) and carry `route_desc` "Výlukový jízdní řád".
+
 ## Bundle version 2 (serving schema 3)
 
 - `extensions/` is removed. The four former public extensions (`cz_zones`, `cz_route_stop_zones`, `cz_call_zones`, `cz_transfer_constraints`) are already fully represented by `fare_zone`, `location_zone`, `route_stop_zone`, `call_zone` and `transfer`. `extension_schema_version` is gone from the manifest.

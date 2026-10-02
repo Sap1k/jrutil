@@ -42,7 +42,8 @@ let jdfToBundle (ctx: CommandContext) =
         estimatedPosts = (estimatedPostActivation args).runRoutedInference
         routingPbfPath = optArgValue args "--routing-osm-pbf"
         maximumWorkers = min 8 bundlePlan.resolvedWorkers
-        routingWorkers = min 8 (min bundlePlan.requestedJobs bundlePlan.processorCount)
+        // Capture admits fewer workers when the memory budget is tight.
+        routingWorkers = min bundlePlan.requestedJobs bundlePlan.processorCount
         routingCachePath = optArgValue args "--routing-cache"
         memoryBudgetBytes = bundlePlan.memoryBudgetBytes
         capturePostInferenceEvidencePath = optArgValue args "--capture-post-inference-evidence"

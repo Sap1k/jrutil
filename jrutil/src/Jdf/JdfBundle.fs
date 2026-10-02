@@ -86,7 +86,7 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
             (fun phase count total ->
                 progress phase "running" count total "items" None 1),
             buildGlobalSnaps=false)
-    graph.MaximumWorkers<-executionOptions.maximumWorkers
+    graph.MaximumWorkers<-executionOptions.routingWorkers
     withJdfInput inputPath (fun source ->
         progress "parse-jdf" "started" 0L None "bytes" None 0
         let sourceBatch=Jdf.jdfBatchDirParser () source
@@ -142,7 +142,7 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
             queryCoordinates,
             fun count total ->
                 progress "routing-snaps" "running" count total "edges" None
-                         executionOptions.maximumWorkers)
+                         executionOptions.routingWorkers)
         progress "prepare-routing-snaps" "completed" (int64 graph.EdgeCount)
                  (Some(int64 graph.EdgeCount)) "edges" None 0
         let routingHash=sha256File routingPbfPath
@@ -157,7 +157,7 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
                   preflight=capturePreflight
                   progress=fun phase count total detail ->
                       progress phase "running" count total "items" detail
-                               executionOptions.maximumWorkers
+                               executionOptions.routingWorkers
                   routingCache=routingCache }
                 executionOptions.captureRestriction
                 graph batch
@@ -280,7 +280,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                             reportProgress executionOptions phaseTimer phase "running"
                                            count total "items" None 1),
                         buildGlobalSnaps=false)
-                graph.MaximumWorkers <- executionOptions.maximumWorkers
+                graph.MaximumWorkers <- executionOptions.routingWorkers
                 Some graph)
         | _ -> Task.FromResult(None)
     let mutable routingGraph: GeoData.Osm.PackedRoutingGraph option = None
@@ -349,7 +349,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     queryCoordinates,
                     fun count total ->
                         reportProgress executionOptions phaseTimer "routing-snaps" "running"
-                                       count total "edges" None executionOptions.maximumWorkers)
+                                       count total "edges" None executionOptions.routingWorkers)
                 progressCompleted "prepare-routing-snaps" (int64 graph.EdgeCount)
                                   (Some (int64 graph.EdgeCount)) "edges")
             started "prepare-inference" None "contexts"
@@ -359,7 +359,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                 | Some graph ->
                     let progress phase count total detail =
                         reportProgress executionOptions phaseTimer phase "running"
-                                       count total "items" detail executionOptions.maximumWorkers
+                                       count total "items" detail executionOptions.routingWorkers
                     // The routing pass emits raw route-point facts into a
                     // temporary evidence pack, the same contract capture
                     // writes; every consolidation and publication decision is
@@ -432,7 +432,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                 |> HashSet
             let retainedTripIdsForCalls =
                 batch.trips
-                |> Seq.map (fun trip -> JdfGtfsRules.jdfTripId trip.routeId trip.routeDistinction trip.id)
+                |> Seq.map (fun trip -> JdfGtfsRules.jdfTripId batch trip.routeId trip.routeDistinction trip.id)
                 |> Seq.filter (preparation.tripsToDelete.Contains >> not)
                 |> HashSet
             started "prepare-call-diagnostics" (Some(int64 batch.tripStops.Count)) "calls"
@@ -447,7 +447,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             let transferCallQueries = HashSet<struct (string * int64)>()
             for transfer in batch.transfers do
                 transferCallQueries.Add(
-                    struct (JdfGtfsRules.jdfTripId transfer.routeId transfer.routeDistinction transfer.tripId,
+                    struct (JdfGtfsRules.jdfTripId batch transfer.routeId transfer.routeDistinction transfer.tripId,
                             transfer.routeStopId))
                 |> ignore
             let emittedTransferCalls = HashSet<struct (string * int64)>()

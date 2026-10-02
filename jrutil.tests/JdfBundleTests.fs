@@ -315,7 +315,7 @@ type JdfBundleTests() =
                     [|"binding_id"; "trip_id"|]
                 |> Seq.toArray
             let tripIds = bindings |> Array.map (fun row -> row.[1])
-            let copiedTripId = "jdf:trip:586001:1:11"
+            let copiedTripId = "jdf:trip:586001:260101:11"
             assertEqual true (tripIds |> Array.contains copiedTripId)
 
             let scratch = Path.Combine(root, "compiler-view")

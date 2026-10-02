@@ -210,14 +210,12 @@ type RegionalGtfsOverlayTests() =
         Assert.AreEqual(None, RegionalGtfsOverlay.resolveFullHeadsign "Centrum přes Nádraží" [| "Centrum" |])
 
     [<TestMethod>]
-    member _.``Detour base routes keep their colours and never take line authority``() =
+    member _.``Detour base routes take source display fields but never line authority``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-detour-" + Guid.NewGuid().ToString("N"))
         try
             let basePath, sourceZip, descriptor, policy = makeFixture root
             let czRoutes = Path.Combine(basePath, "extensions", "cz_routes.txt")
             write czRoutes "route_id,cis_line_id,public_line_number,source_provenance,timetable_kind\nr1,100,100,jdf,regular\nr1v,100,100,jdf,detour\nr2,199010,10,jdf,regular\nr3,101,101,jdf,regular\nr4,102,102,jdf,regular\n"
-            let routesPath = Path.Combine(basePath, "gtfs-intermediate", "routes.txt")
-            write routesPath (File.ReadAllText(routesPath).Replace("r1v,a,100,National bus variant,,701,,111111,ffffff,", "r1v,a,100,National bus variant,,701,,111111,ffd23f,"))
             let json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(policy))
             json.["source"].["trip_set_authority"].["modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"bus\"]")
             json.["source"].["trip_set_authority"].["source_native_modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"bus\"]")
@@ -228,9 +226,7 @@ type RegionalGtfsOverlayTests() =
             let routes = readGtfs output "routes.txt"
             let routeLine id =
                 routes.Split('\n') |> Array.find (fun line -> line.StartsWith(id + ",", StringComparison.Ordinal) || line.StartsWith("\"" + id + "\",", StringComparison.Ordinal))
-            let detourLine = routeLine "r1v"
-            Assert.IsTrue(detourLine.Contains("111111") && detourLine.Contains("ffd23f"), detourLine)
-            Assert.IsTrue((routeLine "r1").Contains("abcdef"), "The regular route still takes source display fields")
+            Assert.IsTrue((routeLine "r1").Contains("abcdef"), "The regular route takes source display fields")
             Assert.IsFalse(
                 routes.Contains("overlay:pid-gtfs:route:"),
                 "A line with one regular and one detour route must not get a source-native route:

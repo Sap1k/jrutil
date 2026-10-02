@@ -205,14 +205,14 @@ let getGtfsRoutesWithPublicLines
     let publicLineNumber =
         publicLineNumbers.[jdfRoute.id, jdfRoute.idDistinction]
     let routeColor, routeTextColor =
-        getGtfsRouteColorsWithDetour publicLineNumber jdfRoute
+        getGtfsRouteColors publicLineNumber jdfRoute
     {
         id = routeId
         agencyId = Some (jdfAgencyId jdfRoute.agencyId
                                      jdfRoute.agencyDistinction)
         shortName = publicLineNumber
         longName = Some jdfRoute.name
-        description = None
+        description = if jdfRoute.detour then Some detourRouteDescription else None
         // TODO: Deal with routes that don't allow national service
         // (only international)
         routeType = getGtfsRouteType jdfRoute
@@ -236,7 +236,7 @@ let private getGtfsTripsWithEndpoints (endpoints: IDictionary<struct(string * in
     let stopById = jdfBatch.stops |> Seq.map (fun s -> s.id, s) |> Map
     jdfBatch.trips
     |> Seq.map (fun jdfTrip ->
-        let id = jdfTripId jdfTrip.routeId jdfTrip.routeDistinction jdfTrip.id
+        let id = jdfTripId jdfBatch jdfTrip.routeId jdfTrip.routeDistinction jdfTrip.id
         let attrs = Jdf.parseAttributes jdfBatch jdfTrip.attributes
         let wheelchairAccessible =
                 attrs |> Set.contains JdfModel.WheelchairAccessible
@@ -426,7 +426,7 @@ let private getGtfsStopTimeRowsInternal
         let calls = jdfBatch.tripStops
         let spans = ResizeArray<struct (string * int * int64 * int * int * string)>()
         for struct(route, distinction, trip, start, count) in JdfCallStore.tripSpans calls do
-            spans.Add(struct(route, distinction, trip, start, count, jdfTripId route distinction trip))
+            spans.Add(struct(route, distinction, trip, start, count, jdfTripId jdfBatch route distinction trip))
         spans.Sort(Comparer<struct (string * int * int64 * int * int * string)>.Create(
             fun struct (leftRoute,leftDistinction,leftTrip,_,_,leftId)
                 struct (rightRoute,rightDistinction,rightTrip,_,_,rightId) ->
@@ -450,7 +450,7 @@ let private getGtfsStopTimeRowsInternal
     |> Seq.collect (fun ((routeId, routeDistinction, tripId), jdfTripStops) ->
         assert (jdfTripStops.Length >= 2)
         let isReverseTrip = jdfTripStops.[0].tripId % 2L = 0L
-        let gtfsTripId = jdfTripId routeId routeDistinction tripId
+        let gtfsTripId = jdfTripId jdfBatch routeId routeDistinction tripId
         let orderedCalls =
             jdfTripStops
             |> Array.sortBy (fun call ->
@@ -576,7 +576,7 @@ let getCzTrips (tripsToDelete: Set<string>)
     jdfBatch.trips
     |> Seq.choose (fun trip ->
         let sourceTripId =
-            jdfTripId trip.routeId trip.routeDistinction trip.id
+            jdfTripId jdfBatch trip.routeId trip.routeDistinction trip.id
         if tripsToDelete |> Set.contains sourceTripId then None
         else
             Some ({

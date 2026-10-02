@@ -99,6 +99,7 @@ let private jdf111BatchDirParserWithCalls tripStopsParser =
     let stopLocationSourcesParser = fileParserOrEmpty "PolzastZdroj.txt"
     let postCandidateEvidenceParser = fileParserOrEmpty "JrutilPostCandidateEvidence.txt"
     let routingDemandsParser = fileParserOrEmpty "JrutilRoutingDemands.txt"
+    let routeVersionsParser = fileParserOrEmpty "JrutilRouteVersions.txt"
     fun path ->
         let batch = {
             version = (versionParser path).[0]
@@ -122,6 +123,7 @@ let private jdf111BatchDirParserWithCalls tripStopsParser =
             stopLocationSources = stopLocationSourcesParser path
             postCandidateEvidence = postCandidateEvidenceParser path
             routingDemands = routingDemandsParser path
+            routeVersions = routeVersionsParser path
         }
         validatePostCandidateEvidence batch.postCandidateEvidence
         batch
@@ -323,6 +325,7 @@ let jdfBatchDirWriter () =
     let stopLocationSourcesWriter = fileWriter "PolzastZdroj.txt"
     let postCandidateEvidenceWriter = fileWriter "JrutilPostCandidateEvidence.txt"
     let routingDemandsWriter = fileWriter "JrutilRoutingDemands.txt"
+    let routeVersionsWriter = fileWriter "JrutilRouteVersions.txt"
 
     fun dir (batch: JdfBatch) ->
         validatePostCandidateEvidence batch.postCandidateEvidence
@@ -355,3 +358,5 @@ let jdfBatchDirWriter () =
             postCandidateEvidenceWriter dir batch.postCandidateEvidence ()
         if batch.routingDemands.Length > 0 then
             routingDemandsWriter dir batch.routingDemands ()
+        if batch.routeVersions.Length > 0 then
+            routeVersionsWriter dir batch.routeVersions ()

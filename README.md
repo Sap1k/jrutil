@@ -247,12 +247,23 @@ agency, public line number, name, route type and colours form one route, and
 detour (výluka) timetables form a separate route. The group containing the
 line's earliest-starting version is `jdf:route:<line>` (detours:
 `jdf:route:<line>:detour`). Any other group appends eight hex characters hashed
-from its semantics. Detour routes keep the route colour and use amber text
-(`ffd23f`), or dark orange (`7a3500`) where amber would contrast below 3:1.
-Serving `route.timetable_kind` is `regular` or `detour` for JDF routes. Trips,
-zones and diagnostics keep the per-version `(line, distinction)` identity, and
-route-stop keys include the version (`<route>/<distinction>/<route stop>`)
-because route stop numbers are unique only within one version.
+from its semantics. Detour routes keep the line's own colours and carry
+`route_desc` "Výlukový jízdní řád".
+Serving `route.timetable_kind` is `regular` or `detour` for JDF routes.
+
+Trip ids name the published schedule rather than the merge-assigned
+distinction, so they stay the same between runs:
+`jdf:trip:<line>:<yymmdd>[:det][:<hash>][:pN]:<trip>`. `<yymmdd>` is the
+version's published validity start, before overlap resolution or GVD
+bounding. merge-jdf keeps it in the `JrutilRouteVersions.txt` extension. `:det`
+marks detours. When several versions of one line start on the same day, the one
+ending first keeps the plain key and the others append eight hex characters
+hashed from their published validity and batch date. When the merger splits one
+version into date chunks, the later chunks append `:p2`, `:p3` and so on.
+Zones, notices, transfers and diagnostics keep the per-version
+`(line, distinction)` identity, and route-stop keys include the version
+(`<route>/<distinction>/<route stop>`) because route stop numbers are unique
+only within one version.
 
 Generated intermediate identifiers consistently use colon-separated
 namespaces: `jdf:agency:…`, `jdf:route:…`, `jdf:trip:…`, `jdf:stop:…`,
