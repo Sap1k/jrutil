@@ -1019,8 +1019,16 @@ let rejectImplausibleMatches
         |> Array.choose (fun (stop, match_) ->
             match_ |> Option.map (fun value -> stop.id, value))
         |> Map
-    let conflicts = Dictionary<int64, HashSet<int64>>()
-    let supports = Dictionary<int64, HashSet<int64>>()
+    let timedMatchedTrips =
+        orderedTimedTrips tripStops
+        |> Array.map (Array.choose (fun (call, time) ->
+            match time, matchesByStop |> Map.tryFind call.stopId with
+            | Some value, Some match_ -> Some (call.stopId, value, match_)
+            | _ -> None))
+    let isChecked (match_: JdfStopToMatch) =
+        match_.data.source
+        |> Option.forall (fun source ->
+            not (source.StartsWith("osm:", StringComparison.Ordinal)))
     let addNeighbor (target: Dictionary<int64, HashSet<int64>>) left right =
         let found, neighbors = target.TryGetValue(left)
         let neighbors =
@@ -1033,44 +1041,76 @@ let rejectImplausibleMatches
     let addEdge target left right =
         addNeighbor target left right
         addNeighbor target right left
-
-    orderedTimedTrips tripStops
-    |> Array.iter (fun calls ->
-        calls
-        |> Array.choose (fun (call, time) ->
-            match time, matchesByStop |> Map.tryFind call.stopId with
-            | Some value, Some match_ -> Some (call.stopId, value, match_)
-            | _ -> None)
-        |> Array.pairwise
-        |> Array.iter (fun ((leftId, leftTime, left), (rightId, rightTime, right)) ->
-            let elapsedMinutes = rightTime - leftTime
-            if elapsedMinutes >= 0.0 then
-                let distanceKm = left.data.point.Distance(right.data.point) / 1000.0
-                // 2 km of local slack plus a deliberately generous 150 km/h.
-                // This catches impossible matches without policing timetables.
-                let maximumKm = 2.0 + elapsedMinutes * 2.5
-                if distanceKm > maximumKm then addEdge conflicts leftId rightId
-                else addEdge supports leftId rightId))
-
-    let neighborCount (source: Dictionary<int64, HashSet<int64>>) stopId =
+    let neighbors (source: Dictionary<int64, HashSet<int64>>) stopId =
         match source.TryGetValue(stopId) with
-        | true, values -> values.Count
-        | _ -> 0
+        | true, values -> values :> seq<int64>
+        | _ -> Seq.empty
+
     let rejected = HashSet<int64>()
-    for pair in conflicts do
-        if pair.Value.Count >= 2 then rejected.Add(pair.Key) |> ignore
-    for pair in conflicts do
-        for neighbor in pair.Value do
-            if not (rejected.Contains(pair.Key) || rejected.Contains(neighbor)) then
-                let leftSupport = neighborCount supports pair.Key
-                let rightSupport = neighborCount supports neighbor
-                if leftSupport > rightSupport then rejected.Add(neighbor) |> ignore
-                else if rightSupport > leftSupport then rejected.Add(pair.Key) |> ignore
-                else
-                    // With no contextual reason to trust either endpoint,
-                    // keeping both would preserve a known-impossible edge.
-                    rejected.Add(pair.Key) |> ignore
-                    rejected.Add(neighbor) |> ignore
+    let mutable unresolved = true
+    // Rejecting a match makes its surviving neighbours adjacent, so the
+    // check repeats until every remaining consecutive pair is plausible.
+    while unresolved do
+        let conflicts = Dictionary<int64, HashSet<int64>>()
+        let supports = Dictionary<int64, HashSet<int64>>()
+        timedMatchedTrips
+        |> Array.iter (fun calls ->
+            calls
+            |> Array.filter (fun (stopId, _, _) -> not (rejected.Contains stopId))
+            |> Array.pairwise
+            |> Array.iter (fun ((leftId, leftTime, left), (rightId, rightTime, right)) ->
+                let elapsedMinutes = rightTime - leftTime
+                if elapsedMinutes >= 0.0 && leftId <> rightId then
+                    let distanceKm = left.data.point.Distance(right.data.point) / 1000.0
+                    // 2 km of local slack plus a deliberately generous 150 km/h.
+                    // This catches impossible matches without policing timetables.
+                    let maximumKm = 2.0 + elapsedMinutes * 2.5
+                    if distanceKm > maximumKm then addEdge conflicts leftId rightId
+                    else addEdge supports leftId rightId))
+
+        if conflicts.Count = 0 then unresolved <- false
+        else
+            // Plausible consecutive matches chain into consistent groups.
+            // Counting the whole group, not only direct neighbours, lets a
+            // long consistent route outvote a short run of wrong matches.
+            let parent = Dictionary<int64, int64>()
+            let rec find stopId =
+                match parent.TryGetValue(stopId) with
+                | true, value when value <> stopId ->
+                    let root = find value
+                    parent.[stopId] <- root
+                    root
+                | _ -> stopId
+            for pair in supports do
+                for neighbor in pair.Value do
+                    if not (neighbors conflicts pair.Key |> Seq.contains neighbor) then
+                        let left = find pair.Key
+                        let right = find neighbor
+                        if left <> right then parent.[left] <- right
+            let groupSizes =
+                matchesByStop
+                |> Map.toSeq
+                |> Seq.map fst
+                |> Seq.filter (rejected.Contains >> not)
+                |> Seq.countBy find
+                |> dict
+            let strength stopId =
+                groupSizes.[find stopId],
+                -(Seq.length (neighbors conflicts stopId)),
+                isChecked matchesByStop.[stopId]
+            let losers = HashSet<int64>()
+            for pair in conflicts do
+                for neighbor in pair.Value do
+                    let leftStrength = strength pair.Key
+                    let rightStrength = strength neighbor
+                    if leftStrength > rightStrength then losers.Add(neighbor) |> ignore
+                    else if rightStrength > leftStrength then losers.Add(pair.Key) |> ignore
+                    else
+                        // With no contextual reason to trust either endpoint,
+                        // keeping both would preserve a known-impossible edge.
+                        losers.Add(pair.Key) |> ignore
+                        losers.Add(neighbor) |> ignore
+            rejected.UnionWith(losers)
 
     if rejected.Count > 0 then
         Log.Warning(
