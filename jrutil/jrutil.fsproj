@@ -67,6 +67,7 @@
     <Compile Include="src/Serving/TripWriter.fs" />
     <Compile Include="src/Serving/SourceCallWriter.fs" />
     <Compile Include="src/Serving/NoteWriter.fs" />
+    <Compile Include="src/Serving/RouteStopOrder.fs" />
     <Compile Include="src/Serving/RouteStopWriter.fs" />
     <Compile Include="src/Serving/FeatureWriter.fs" />
     <Compile Include="src/Serving/BindingWriter.fs" />

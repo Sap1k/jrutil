@@ -149,3 +149,78 @@ module ColumnWriter =
                     disposed <- true
                     try writer.DisposeAsync().AsTask().GetAwaiter().GetResult()
                     finally stream.Dispose()
+
+/// Typed row-group reads of a relation written by ColumnWriter, in schema
+/// field order. Used to rewrite finalized relations without materializing them.
+module ColumnReader =
+    open ColumnWriter
+
+    let private values<'T when 'T : (new : unit -> 'T) and 'T : struct and 'T :> ValueType>
+            (group: ParquetRowGroupReader) field count =
+        let result = Array.zeroCreate<'T> count
+        group.ReadAsync<'T>(field, result.AsMemory(), Nullable(), CancellationToken.None).AsTask().GetAwaiter().GetResult()
+        result
+
+    let private optionalValues<'T when 'T : (new : unit -> 'T) and 'T : struct and 'T :> ValueType>
+            (group: ParquetRowGroupReader) field count =
+        let result = Array.zeroCreate<Nullable<'T>> count
+        group.ReadAsync<'T>(field, result.AsMemory(), Nullable(), CancellationToken.None).AsTask().GetAwaiter().GetResult()
+        result
+
+    let private column (group: ParquetRowGroupReader) (field: DataField) (expected: JrUtil.Serving.Schema.Field) count =
+        match expected.dataType, expected.nullable with
+        | Schema.Text, _ ->
+            let result = Array.zeroCreate<string> count
+            group.ReadAsync(field, result.AsMemory(), Nullable(), CancellationToken.None).AsTask().GetAwaiter().GetResult()
+            Text result
+        | Schema.Int16, false -> Int16 (values<int16> group field count)
+        | Schema.Int16, true -> OptionalInt16 (optionalValues<int16> group field count)
+        | Schema.Int32, false -> Int32 (values<int> group field count)
+        | Schema.Int32, true -> OptionalInt32 (optionalValues<int> group field count)
+        | Schema.Int64, false -> Int64 (values<int64> group field count)
+        | Schema.Int64, true -> OptionalInt64 (optionalValues<int64> group field count)
+        | Schema.Float64, false -> Float64 (values<double> group field count)
+        | Schema.Float64, true -> OptionalFloat64 (optionalValues<double> group field count)
+        | Schema.Boolean, false -> Boolean (values<bool> group field count)
+        | Schema.Boolean, true -> OptionalBoolean (optionalValues<bool> group field count)
+        | Schema.Date, false -> Date (values<DateOnly> group field count)
+        | Schema.Date, true -> OptionalDate (optionalValues<DateOnly> group field count)
+
+    /// Row groups of `path` as typed column batches in schema field order.
+    let groups (path: string) (relation: JrUtil.Serving.Schema.Relation) = seq {
+        use stream = File.OpenRead(path)
+        let reader = ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
+        try
+            let fields = reader.Schema.DataFields
+            if fields.Length <> relation.fields.Length then
+                invalidOp $"{relation.name}: expected {relation.fields.Length} fields, found {fields.Length}"
+            for index in 0 .. reader.RowGroupCount - 1 do
+                use group = reader.OpenRowGroupReader(index)
+                let count = int group.RowCount
+                yield Array.map2 (fun field expected -> column group field expected count) fields relation.fields
+        finally
+            reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
+    }
+
+    /// Rows `start .. start + count - 1` of a column batch.
+    let slice start count (columns: Column array) =
+        let take (values: 'T array) = Array.sub values start count
+        columns |> Array.map (function
+            | Text values -> Text (take values)
+            | Int16 values -> Int16 (take values)
+            | OptionalInt16 values -> OptionalInt16 (take values)
+            | Int32 values -> Int32 (take values)
+            | OptionalInt32 values -> OptionalInt32 (take values)
+            | Int64 values -> Int64 (take values)
+            | OptionalInt64 values -> OptionalInt64 (take values)
+            | Float64 values -> Float64 (take values)
+            | OptionalFloat64 values -> OptionalFloat64 (take values)
+            | Boolean values -> Boolean (take values)
+            | OptionalBoolean values -> OptionalBoolean (take values)
+            | Date values -> Date (take values)
+            | OptionalDate values -> OptionalDate (take values))
+
+    let text = function Text values -> values | _ -> invalidOp "Expected a text column"
+    let int32 = function Int32 values -> values | _ -> invalidOp "Expected a required int32 column"
+    let optionalInt16 = function OptionalInt16 values -> values | _ -> invalidOp "Expected a nullable int16 column"
+    let optionalInt32 = function OptionalInt32 values -> values | _ -> invalidOp "Expected a nullable int32 column"

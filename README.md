@@ -216,9 +216,8 @@ typed serving relations documented in `docs/PRODUCTION_CONTRACT.md`:
 
 | Relation | Purpose |
 | --- | --- |
-| `fare_zone` | Zone identity and optional fare-system ownership |
-| `route_stop_zone` | Ordered route-stop-specific zone memberships |
-| `call_zone` | Ordered call-specific zone memberships |
+| `call_zone` | Ordered zone codes of each call, with the IDS system when known |
+| `route_stop` | Ordered stop slots of each route direction, for line timetables |
 | `transfer` | Standard transfers plus waiting limits |
 
 The selected public line number is written to `routes.txt`'s
@@ -235,10 +234,8 @@ hierarchy while retaining source semantics: `:post:id:` is an authoritative
 `Oznacniky` ID and bare `:post:<value>` is a textual `Zasspoje` designation.
 
 Raw zone lists are split, trimmed and deduplicated without attempting to infer
-their IDS system. `fare_system_id` therefore remains null when ownership is
-unknown. A route
-distinction and raw token form the source zone identity. Standard GTFS
-route-stop occurrences and source order are retained in `route_stop_zone`.
+their IDS system, so a JDF `call_zone.zone_system` is null. Each token is
+written, in source order, onto every served call of its route stop.
 Standard `stop_times.txt` never contains
 the old non-standard `stop_zone_ids` column.
 

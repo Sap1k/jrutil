@@ -123,30 +123,6 @@ module PackageGtfsRelations =
             "wheelchair_accessible", nullableParsed int16 (value "wheelchair_accessible" row); "bikes_allowed", nullableParsed int16 (value "bikes_allowed" row)
             "shape_id", nullableString (value "shape_id" row) ])
         let parentByStop = CompilerOutput.rows input.gtfs "stops.txt" |> Seq.map (fun row -> value "stop_id" row, value "parent_station" row) |> dict
-        let hasJdfCallMetadata =
-            CompilerOutput.has input.sidecars "source_call_metadata"
-            && (CompilerOutput.has input.sidecars "source_route_stop_zone_metadata"
-                || CompilerOutput.has input.sidecars "source_notice_metadata")
-        let routeByTrip =
-            if hasJdfCallMetadata then
-                CompilerOutput.rows input.gtfs "trips.txt" |> Seq.map (fun row -> value "trip_id" row, value "route_id" row) |> dict
-            else dict []
-        let metadataRows =
-            if hasJdfCallMetadata then
-                CompilerOutput.values input.sidecars "source_call_metadata"
-                    [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
-            else Seq.empty
-        let pairedCalls = seq {
-            use calls = (CompilerOutput.rows input.gtfs "stop_times.txt").GetEnumerator()
-            use metadata = metadataRows.GetEnumerator()
-            let mutable reading = true
-            while reading do
-                match calls.MoveNext(), metadata.MoveNext() with
-                | false, false -> reading <- false
-                | true, false when not hasJdfCallMetadata -> yield calls.Current, None
-                | true, true -> yield calls.Current, Some metadata.Current
-                | _ -> invalidOp "GTFS stop_times and JDF call metadata row counts differ"
-        }
         let calls = seq {
             let completed = HashSet<string>(StringComparer.Ordinal)
             let mutable currentTrip = ""
@@ -179,7 +155,7 @@ module PackageGtfsRelations =
                     if not contiguousSequences then
                         nonContiguousTripSequences.Add(currentTrip, HashSet<int>(currentSequences))
                     completed.Add(currentTrip) |> ignore
-            for row, metadata in pairedCalls do
+            for row in CompilerOutput.rows input.gtfs "stop_times.txt" do
                 let tripId = value "trip_id" row
                 let sequence = integer (value "stop_sequence" row)
                 if tripId <> currentTrip then
@@ -208,19 +184,9 @@ module PackageGtfsRelations =
                 let stopId = value "stop_id" row
                 let parent = match parentByStop.TryGetValue(stopId) with | true, result -> result | _ -> ""
                 let location, boarding = if String.IsNullOrEmpty(parent) then stopId, null else parent, box stopId
-                let routeStop =
-                    match metadata with
-                    | None -> null
-                    | Some fact ->
-                        let stopSequence = value "stop_sequence" row
-                        if fact.[0] <> tripId
-                           || integer fact.[1] <> integer stopSequence
-                           || fact.[3] <> stopId then
-                            invalidOp $"GTFS stop_times and JDF call metadata ordering differs at {tripId}/{stopSequence}"
-                        box (Identity.compositeKey [ routeByTrip.[fact.[0]]; fact.[2] ])
                 yield objectRow [
                     "trip_id", box tripId; "sequence", box sequence; "location_id", box location
-                    "passenger_service", box true; "boarding_point_id", boarding; "route_stop_id", routeStop
+                    "passenger_service", box true; "boarding_point_id", boarding; "route_stop_id", null
                     "scheduled_arrival", seconds (value "arrival_time" row); "scheduled_departure", seconds (value "departure_time" row); "scheduled_passage", null
                     "pickup_type", box (if String.IsNullOrEmpty(value "pickup_type" row) then 0s else int16 (value "pickup_type" row))
                     "dropoff_type", box (if String.IsNullOrEmpty(value "drop_off_type" row) then 0s else int16 (value "drop_off_type" row))
@@ -255,20 +221,6 @@ module PackageGtfsRelations =
         let parentByStop =
             CompilerOutput.values input.gtfs "stops.txt" [| "stop_id"; "parent_station" |]
             |> Seq.map (fun row -> row.[0], row.[1]) |> dict
-        let hasMetadata =
-            CompilerOutput.has input.sidecars "source_call_metadata"
-            && (CompilerOutput.has input.sidecars "source_route_stop_zone_metadata"
-                || CompilerOutput.has input.sidecars "source_notice_metadata")
-        let routeByTrip =
-            if hasMetadata then
-                CompilerOutput.values input.gtfs "trips.txt" [| "trip_id"; "route_id" |]
-                |> Seq.map (fun row -> row.[0], row.[1]) |> dict
-            else dict []
-        let metadataRows =
-            if hasMetadata then
-                CompilerOutput.values input.sidecars "source_call_metadata"
-                    [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
-            else Seq.empty
         let parsedSeconds value =
             if String.IsNullOrWhiteSpace(value) then Nullable()
             else
@@ -288,7 +240,6 @@ module PackageGtfsRelations =
         let mutable count = 0L
         use pattern = IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
         use output = new TripCallWriter.Writer(path, CancellationToken.None, bufferedOutput = true)
-        use metadata = metadataRows.GetEnumerator()
         let finish () =
             if currentTrip <> "" then
                 tripCallSummaries.Add(currentTrip, {
@@ -329,18 +280,11 @@ module PackageGtfsRelations =
             scheduledEnd <- parsedSeconds (if String.IsNullOrWhiteSpace(row.[1]) then row.[2] else row.[1])
             let parent = match parentByStop.TryGetValue(stopId) with | true, value -> value | _ -> ""
             let location, boarding = if String.IsNullOrEmpty(parent) then stopId, null else parent, stopId
-            let routeStop =
-                if not hasMetadata then null else
-                if not (metadata.MoveNext()) then invalidOp "GTFS stop_times and JDF call metadata row counts differ"
-                let fact = metadata.Current
-                if fact.[0] <> tripId || integer fact.[1] <> sequence || fact.[3] <> stopId then
-                    invalidOp $"GTFS stop_times and JDF call metadata ordering differs at {tripId}/{sequence}"
-                Identity.compositeKey [ routeByTrip.[tripId]; fact.[2] ]
             let arrival, departure = parsedSeconds row.[1], parsedSeconds row.[2]
             if wantedTargetTrips.Contains(tripId) then targetTimes.Add(struct(sequence, arrival, departure))
             output.Append({
                 tripId = tripId; sequence = sequence; locationId = location; passengerService = true
-                boardingPointId = boarding; routeStopId = routeStop
+                boardingPointId = boarding; routeStopId = null
                 arrival = arrival; departure = departure; passage = Nullable()
                 pickup = if String.IsNullOrEmpty(row.[5]) then 0s else int16 row.[5]
                 dropoff = if String.IsNullOrEmpty(row.[6]) then 0s else int16 row.[6]
@@ -349,7 +293,6 @@ module PackageGtfsRelations =
             count <- count + 1L
             if count % 100000L = 0L then progress count
         finish ()
-        if hasMetadata && metadata.MoveNext() then invalidOp "GTFS stop_times and JDF call metadata row counts differ"
         let written = output.Complete()
         progress written
         int written

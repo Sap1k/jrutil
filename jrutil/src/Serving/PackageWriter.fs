@@ -30,21 +30,40 @@ open JrUtil.Serving.PackageBindingRelations
 open JrUtil.Serving.PackageSemanticRelations
 
 module PackageWriter =
-    let private extensionRows (input: CompilerOutput.Output) =
-        let stopZones = CompilerOutput.rows input.czech "cz_stop_zones.txt" |> Seq.toArray
-        let callZones = CompilerOutput.rows input.czech "cz_trip_stop_zones.txt" |> Seq.toArray
-        let zones =
-            Seq.append
-                (stopZones |> Seq.map (fun row -> value "zone_id" row, value "zone_code" row, value "ids_system_id" row, value "source_provenance" row, "route_stop"))
-                (callZones |> Seq.map (fun row -> value "zone_id" row, value "zone_code" row, value "ids_system_id" row, value "source_provenance" row, "call"))
-            |> Seq.filter (fun (id, _, _, _, _) -> not (String.IsNullOrEmpty id))
-            |> Seq.distinctBy (fun (id, _, _, _, _) -> id)
-            |> Seq.map (fun (id, code, system, source, scope) -> objectRow [
-                "zone_id", box id; "fare_system_id", nullableString system; "zone_code", box code; "name", null
-                "source_id", box (if String.IsNullOrEmpty source then "national-jdf-vld-drahy" else source); "source_scope", box scope ])
-        let callZoneRows = callZones |> Seq.map (fun row -> objectRow [
-            "trip_id", box (value "trip_id" row); "sequence", box (integer (value "stop_sequence" row)); "zone_id", box (value "zone_id" row); "source_order", box 0 ])
-        zones, callZoneRows
+    /// Zone facts the route-stop post-pass projects onto final calls.
+    let private zoneInputs (input: CompilerOutput.Output) : RouteStopWriter.ZoneInputs =
+        let zone code system : RouteStopWriter.Zone =
+            { code = code; system = if String.IsNullOrWhiteSpace(system) then null else system }
+        let collect (rows: seq<'key * RouteStopWriter.Zone>) (comparer: IEqualityComparer<'key>) =
+            let result = Dictionary<'key, ResizeArray<RouteStopWriter.Zone>>(comparer)
+            for key, value in rows do
+                match result.TryGetValue(key) with
+                | true, values -> if not (values.Contains(value)) then values.Add(value)
+                | _ -> result.Add(key, ResizeArray([ value ]))
+            let final = Dictionary<'key, RouteStopWriter.Zone array>(comparer)
+            for KeyValue(key, values) in result do final.Add(key, values.ToArray())
+            final :> IDictionary<_, _>
+        let calls =
+            CompilerOutput.rows input.czech "cz_trip_stop_zones.txt"
+            |> Seq.filter (fun row -> not (String.IsNullOrWhiteSpace(value "zone_code" row)))
+            |> Seq.map (fun row ->
+                struct(value "trip_id" row, integer (value "stop_sequence" row)),
+                zone (value "zone_code" row) (value "ids_system_id" row))
+        let routeStops =
+            if CompilerOutput.has input.sidecars "source_route_stop_zone_metadata" then
+                CompilerOutput.values input.sidecars "source_route_stop_zone_metadata"
+                    [| "gtfs_route_id"; "source_route_version"; "source_route_stop_id"; "zone_code"; "zone_order" |]
+                |> Seq.sortBy (fun row -> row.[0], row.[1], row.[2], integer row.[4])
+                |> Seq.map (fun row -> Identity.routeStopKey row.[0] row.[1] row.[2], zone row.[3] null)
+            else Seq.empty
+        let places =
+            CompilerOutput.rows input.czech "cz_stop_zones.txt"
+            |> Seq.filter (fun row ->
+                String.IsNullOrWhiteSpace(value "route_id" row) && not (String.IsNullOrWhiteSpace(value "zone_code" row)))
+            |> Seq.map (fun row -> value "stop_place_id" row, zone (value "zone_code" row) (value "ids_system_id" row))
+        { calls = collect calls HashIdentity.Structural
+          routeStops = collect routeStops StringComparer.Ordinal
+          places = collect places StringComparer.Ordinal }
 
     let private writeCsv (path: string) (columns: string array) (rows: seq<string array>) =
         Directory.CreateDirectory(Path.GetDirectoryName(path)) |> ignore
@@ -83,7 +102,7 @@ module PackageWriter =
                 writer.NewLine <- "\n"
                 CompilerOutput.writeCsv writer table
 
-    let private writeDiagnosticsSummary (input: CompilerOutput.Output) output =
+    let private writeDiagnosticsSummary (input: CompilerOutput.Output) output (routeStops: RouteStopWriter.Summary) =
         let events = ResizeArray<string * string * string * string>()
         match input.diagnostics with
         | None -> ()
@@ -122,7 +141,11 @@ module PackageWriter =
             "schema_version", box Schema.DiagnosticsSchemaVersion
             "counts_by_code", box counts
             "examples_by_code", box examples
-            "coverage_populations", box coverage ]
+            "coverage_populations", box coverage
+            "route_stop_order", box (dict [
+                "route_directions", box routeStops.routeDirections; "patterns", box routeStops.patterns
+                "slots", box routeStops.slots; "maximum_patterns_per_route_direction", box routeStops.maximumPatterns
+                "call_zones", box routeStops.callZones; "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ]
         File.WriteAllText(Path.Combine(output, "diagnostics.json"), JsonSerializer.Serialize(diagnostics, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
     let private writeManifest (input: CompilerOutput.Output) output (relationCounts: IDictionary<string,int>) =
@@ -312,7 +335,6 @@ module PackageWriter =
                     // lookup tables before constructing identity/semantic
                     // relations from the same nationwide bindings.
                     reclaimManagedPhaseMemory ()
-                let zones, callZones = extensionRows input
                 let projectedBase = projectedBaseRelations input
                 phase "prepare-serving-identities"
                 reclaimManagedPhaseMemory ()
@@ -331,8 +353,6 @@ module PackageWriter =
                     |> Map.add "source_trip_map" (bindings |> Seq.map bindingRow)
                     |> fun state -> if nativeSummaries.IsSome then state |> Map.add "source_call_map" czpttCalls else state
                     |> Map.add "source_trip_coverage" (Seq.append (czptt |> Map.tryFind "source_trip_coverage" |> Option.defaultValue Seq.empty) baseCoverage)
-                    |> Map.add "fare_zone" zones
-                    |> Map.add "call_zone" callZones
                 let preferBase name baseRows currentRows = seq {
                     let relation = Schema.relations |> Array.find (fun relation -> relation.name = name)
                     let seen = HashSet<string>(StringComparer.Ordinal)
@@ -353,7 +373,8 @@ module PackageWriter =
                 ref bindings, ref supplied
             for relation in Schema.relations do
                 let target = Path.Combine(serving, relation.name + ".parquet")
-                if counts.ContainsKey(relation.name) then () else
+                // route_stop and call_zone are derived from the finished calls below.
+                if counts.ContainsKey(relation.name) || relation.name = "route_stop" || relation.name = "call_zone" then () else
                 match compiled |> Map.tryFind relation.name with
                 | Some (path, count) ->
                     phase ("finalize-" + relation.name)
@@ -384,12 +405,6 @@ module PackageWriter =
                         phase ("write-ordered-" + relation.name)
                         let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
                         counts.[relation.name] <- writeParquet advance target relation rows
-                    | _ when relation.name = "object_origin"
-                             || relation.name = "binding_evidence"
-                             || relation.name = "route_stop" ->
-                        phase ("typed-" + relation.name)
-                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
-                        counts.[relation.name] <- writeRequiredTextRelation (fun _ count -> advance count) target relation rows
                     | _ ->
                         phase ("dedup-" + relation.name)
                         let sourceRows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
@@ -405,8 +420,14 @@ module PackageWriter =
                 currentProcess.Refresh()
                 if currentProcess.PrivateMemorySize64 >= 3_000_000_000L then
                     reclaimManagedPhaseMemory ()
+            phase "route-stop-order"
+            suppliedState.Value <- Map.empty
+            let routeStops =
+                RouteStopWriter.finalize serving (zoneInputs input) (fun name count ->
+                    lock progressLock (fun () -> currentPhase <- name; completed <- count))
+            for KeyValue(name, count) in routeStops.counts do counts.[name] <- count
             phase "write-diagnostics-summary"
-            writeDiagnosticsSummary input output
+            writeDiagnosticsSummary input output routeStops.summary
             phase "hash-production-payloads"
             writeManifest input output counts
             phase "validate-production-package"

@@ -824,8 +824,8 @@ type RegionalGtfsOverlayTests() =
             CollectionAssert.AreEqual(files1, files2)
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
-            Assert.AreEqual(2, manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            Assert.AreEqual(3, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
+            Assert.AreEqual(3, manifest.RootElement.GetProperty("bundle_version").GetInt32())
+            Assert.AreEqual(4, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
             // The production base contributes its own source.
             Assert.AreEqual(3, manifest.RootElement.GetProperty("sources").GetArrayLength())
             JrUtil.Serving.Validation.validatePackage output1 |> ignore
@@ -854,6 +854,11 @@ type RegionalGtfsOverlayTests() =
                 "PID native-mode permissions must not make an unmatched JMK trolleybus native")
             let zones = File.ReadAllText(diagnosticPath output1 "projection/czech" "cz_stop_zones.txt")
             Assert.IsTrue(zones.Contains("ids-jmk-gtfs") && zones.Contains("overlay:ids-jmk-gtfs:zone:"), zones)
+            // IDS JMK stop zones become call zones of the trips serving those places.
+            let callZoneSystems =
+                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output1, "serving", "call_zone.parquet")) [| "zone_system" |]
+                |> Seq.map (fun row -> row.[0]) |> Seq.toArray
+            Assert.IsTrue(callZoneSystems |> Array.contains "ids-jmk", String.Join(",", callZoneSystems))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("cross_source_fact_coalesced"))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "stop_group_matches.csv").Contains("coordinate_identity_unique"))
 

@@ -14,8 +14,8 @@ module Model =
         trip_id: string; service_id: string; valid_from: DateOnly; valid_to: DateOnly
         binding_status: string; scheduled_start: Nullable<int>; scheduled_end: Nullable<int>
         source_route_id: string; source_direction_id: string; source_start_location_id: string
-        source_end_location_id: string; source_block_id: string; source_run_id: string
-        source_duty_id: string; call_pattern_sha256: string; variant_key: string
+        source_end_location_id: string; source_block_id: string
+        call_pattern_sha256: string; variant_key: string
     }
 
     /// Native facts emitted alongside the GTFS sink, owned by the compilation scratch scope.

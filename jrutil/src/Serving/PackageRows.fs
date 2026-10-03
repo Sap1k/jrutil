@@ -89,8 +89,6 @@ module PackageRows =
             "source_start_location_id", nullableString binding.source_start_location_id
             "source_end_location_id", nullableString binding.source_end_location_id
             "source_block_id", nullableString binding.source_block_id
-            "source_run_id", nullableString binding.source_run_id
-            "source_duty_id", nullableString binding.source_duty_id
             "call_pattern_sha256", box binding.call_pattern_sha256
             "variant_key", nullableString binding.variant_key
         ]
@@ -160,29 +158,6 @@ module PackageRows =
             if buffer.Count = 65536 then flush ()
         flush ()
         int writer.RowCount
-
-    let internal writeRequiredTextRelation progress path (relation: Schema.Relation) rows =
-        if relation.fields |> Array.exists (fun field -> field.dataType <> Schema.Text || field.nullable) then
-            invalidArg "relation" $"{relation.name} is not an all-required-text relation"
-        let indexes =
-            relation.fields
-            |> Array.mapi (fun index field -> field.name, index)
-            |> dict
-        let keyIndexes = relation.primaryKey |> Array.map (fun name -> indexes.[name])
-        let typed =
-            rows |> Seq.map (fun (row: IDictionary<string,obj>) ->
-                relation.fields |> Array.map (fun field -> unbox<string> row.[field.name]))
-        let key (row: string array) = keyIndexes |> Array.map (fun index -> row.[index]) |> String.concat "\u001f"
-        let size (row: string array) =
-            48L + int64 row.Length * 32L + (row |> Array.sumBy (fun value -> 2L * int64 value.Length))
-        let encode (output: BinaryWriter) (row: string array) =
-            for value in row do output.Write(value)
-        let decode (input: BinaryReader) = Array.init relation.fields.Length (fun _ -> input.ReadString())
-        let columns (values: string array array) =
-            relation.fields
-            |> Array.mapi (fun index _ -> ColumnWriter.Text(values |> Array.map (fun row -> row.[index])))
-        RelationWriter.write path relation (256L * 1024L * 1024L)
-            (16L * 1024L * 1024L) 65536 CancellationToken.None progress size key encode decode columns typed
 
     let internal value column (row: CsvRow) = rowValue row column
 
