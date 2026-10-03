@@ -67,6 +67,8 @@ let jdfToBundle (ctx: CommandContext) =
                 match Int32.TryParse(value) with
                 | true, year when year >= 2000 && year <= 9999 -> year
                 | _ -> invalidArg "--gvd-year" "Expected a four-digit year")
+        stopRegistry = optArgValue args "--stop-registry" |> Option.map StopRegistry.load
+        stopRegistryCandidatesPath = optArgValue args "--stop-registry-candidates"
     }
     ctx.Phase "jdf-to-bundle" "write-bundle" "started"
     match JdfBundle.execute bundleOptions (argValue args "<JDF-input>") (argValue args "<bundle-out-dir>") with

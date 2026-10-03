@@ -149,11 +149,23 @@ let mergeJdf (ctx: CommandContext) =
             outParent,
             $".{Path.GetFileName(outPath)}.trip-stops.{Guid.NewGuid():N}.tmp")
 
+    let stopRegistry = optArgValue args "--stop-registry" |> Option.map StopRegistry.load
+    let stopRegistryCandidates = optArgValue args "--stop-registry-candidates"
+    if stopRegistryCandidates.IsSome && stopRegistry.IsNone then
+        invalidArg "--stop-registry-candidates" "Requires --stop-registry"
     use merger =
-        new JdfMerger.JdfMerger(
-            JdfMerger.MergeStopsByName,
-            spillPath,
-            mergePlan.maximumWorkers)
+        match stopRegistry with
+        | Some registry ->
+            new JdfMerger.JdfMerger(
+                JdfMerger.MergeStopsByName,
+                spillPath,
+                mergePlan.maximumWorkers,
+                registry)
+        | None ->
+            new JdfMerger.JdfMerger(
+                JdfMerger.MergeStopsByName,
+                spillPath,
+                mergePlan.maximumWorkers)
     let jdfPar = Jdf.jdfBatchDirParser ()
     Log.Information("Parsing merge inputs with {Jobs} workers", mergePlan.resolvedWorkers)
     ctx.Phase "merge-jdf" "parse-batches" "started"
@@ -207,6 +219,7 @@ let mergeJdf (ctx: CommandContext) =
             if strict then raise error
     ctx.Phase "merge-jdf" "parse-batches" "completed"
     merger.logStopMergeSummary()
+    merger.logStopRegistrySummary()
     ctx.ResourceUsage "merge-jdf" "parse-batches" merger.tripStopSpillBytes
 
     ctx.Phase "merge-jdf" "resolve-route-overlaps" "started"
@@ -219,6 +232,11 @@ let mergeJdf (ctx: CommandContext) =
     ctx.Phase "merge-jdf" "write-merged-jdf" "started"
     Log.Information("Writing merged JDF")
     merger.write(outDir)
+    stopRegistryCandidates
+    |> Option.iter (fun path ->
+        let rows = merger.stopRegistryCandidates
+        StopRegistry.writeCsv path StopRegistry.stopCandidatesHeader rows
+        Log.Information("Wrote {Count} stop registry candidates to {Path}", rows.Length, path))
     ctx.Phase "merge-jdf" "write-merged-jdf" "completed"
     ctx.ResourceUsage "merge-jdf" "write-merged-jdf" merger.tripStopSpillBytes
     Log.Information("Finished!")

@@ -135,6 +135,10 @@ type CompilationOptions = {
     converterVersion: string
     diagnosticsOutput: string option
     diagnosticTraces: bool
+    /// Pins source-native stop-place IDs (`overlay_places.csv`) when set.
+    stopRegistry: JrUtil.StopRegistry.StopRegistry option
+    /// Review CSV for source-native stop places that are not pinned yet.
+    stopRegistryCandidatesPath: string option
 }
 
 type MultiSourceOverlayResult = {

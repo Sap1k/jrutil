@@ -32,7 +32,8 @@ type StopMergeStrategy =
 type JdfMerger(
     stopMergeStrategy: StopMergeStrategy,
     ?tripStopSpoolPath: string,
-    ?tripStopTransformWorkers: int) =
+    ?tripStopTransformWorkers: int,
+    ?stopRegistry: StopRegistry.StopRegistry) =
     // The merged batch is dated by the build's reference date, not the wall
     // clock, so identical inputs produce identical merged JDF bytes.
     let mutable referenceDate: LocalDate option = None
@@ -63,6 +64,56 @@ type JdfMerger(
         Dictionary<struct (int64 * string), PostCandidateEvidence>()
     let stopIndexesById = Dictionary<int64, int>()
     let stopReconciler = StopReconciler()
+    // Registered numbers (after merged_into resolution), their reference
+    // coordinates and the identities already recorded for them.
+    let registryIds = HashSet<int64>()
+    let registryReferences = Dictionary<int64, float * float>()
+    let registryIdentities = HashSet<struct (int64 * string)>()
+    let registryStopsByTown = Dictionary<string, ResizeArray<Stop>>(StringComparer.Ordinal)
+    let provisionalReasons = Dictionary<int64, string>()
+    let provisionalSpellings = Dictionary<int64, Dictionary<string, Stop>>()
+    let unregisteredAliases = Dictionary<string, int64 * Stop>(StringComparer.Ordinal)
+    let localityKey (stop: Stop) =
+        String.concat "\u001f" [|
+            stop.regionId |> Option.defaultValue "" |> fun value -> value.Trim().ToUpperInvariant()
+            stop.country |> Option.defaultValue "" |> fun value -> value.Trim().ToUpperInvariant()
+        |]
+    let spellingKey (stop: Stop) = stopDisplayName stop + "\u001f" + localityKey stop
+    do
+        stopRegistry
+        |> Option.iter (fun registry ->
+            if stopMergeStrategy <> MergeStopsByName then
+                invalidArg "stopRegistry" "A stop registry requires the name-based merge strategy"
+            for row in registry.stops do
+                let id = row.resolvedId
+                let stop = {
+                    id = id
+                    town = row.town
+                    district = row.district
+                    nearbyPlace = row.nearbyPlace
+                    regionId = row.regionId
+                    country = row.country
+                    attributes = Array.create 6 None
+                }
+                registryIds.Add(id) |> ignore
+                registryIdentities.Add(struct (id, stopIdentityKey stop)) |> ignore
+                row.reference
+                |> Option.iter (fun point -> registryReferences.TryAdd(id, point) |> ignore)
+                // Registered identities are known before any batch, so they
+                // resolve the same way whatever the merge order. Reference
+                // coordinates apply the usual 75 m gate to precise locations.
+                let reference =
+                    row.reference
+                    |> Option.map (fun (lat, lon) ->
+                        { stopId = id; lat = decimal lat; lon = decimal lon; precision = StopPrecise })
+                stopReconciler.AddAlias(id, stop, reference)
+                let town = row.town.Trim().ToLowerInvariant()
+                match registryStopsByTown.TryGetValue(town) with
+                | true, values -> values.Add(stop)
+                | false, _ -> registryStopsByTown.[town] <- ResizeArray([stop])
+            Log.Information(
+                "Loaded stop registry {Sha256}: {Rows} rows, {Ids} numbers",
+                registry.sha256, registry.stops.Length, registryIds.Count))
 
     let mutable lastStopId = 0L
     let mutable lastAttributeRefId = 0
@@ -525,6 +576,89 @@ type JdfMerger(
             NodaTime.Text.LocalDatePattern.Iso.Format(gvdStart), NodaTime.Text.LocalDatePattern.Iso.Format(gvdEnd),
             NodaTime.Text.LocalDatePattern.Iso.Format(reference), expired, nextGvd, clamped)
 
+    /// Several registered stops share a name: take the one whose reference
+    /// coordinates are nearest to a precise incoming location.
+    member private _.nearestRegisteredCandidate(candidates: StopReconciliationMatch array,
+                                                location: StopLocation option) =
+        match location with
+        | Some location when location.precision = StopPrecise
+                             && candidates |> Array.forall (fun candidate ->
+                                 registryReferences.ContainsKey candidate.stopId) ->
+            let point = float location.lat, float location.lon
+            candidates
+            |> Array.sortBy (fun candidate ->
+                StopRegistry.distanceMetres point registryReferences.[candidate.stopId], candidate.stopId)
+            |> Array.tryHead
+        | _ -> None
+
+    member private _.recordStopIdentity(stopId: int64, stop: Stop) =
+        if stopRegistry.IsSome then
+            match provisionalSpellings.TryGetValue(stopId) with
+            | true, spellings -> spellings.TryAdd(spellingKey stop, stop) |> ignore
+            | false, _ when provisionalReasons.ContainsKey stopId ->
+                provisionalSpellings.[stopId] <- Dictionary([KeyValuePair(spellingKey stop, stop)], StringComparer.Ordinal)
+            | false, _ ->
+                if registryIds.Contains stopId
+                   && not (registryIdentities.Contains(struct (stopId, stopIdentityKey stop))) then
+                    unregisteredAliases.TryAdd(spellingKey stop, (stopId, stop)) |> ignore
+
+    /// Stops without a registered number, and spellings of registered stops
+    /// that matched only by suffix, fuzzy name or locality, as review rows in
+    /// `StopRegistry.stopCandidatesHeader` order.
+    member _.stopRegistryCandidates =
+        let text = Option.defaultValue ""
+        let locationColumns stopId =
+            match stopLocationsByStop.TryGetValue(stopId) with
+            | true, location when location.precision = StopPrecise ->
+                StopRegistry.formatCoordinate (float location.lat),
+                StopRegistry.formatCoordinate (float location.lon)
+            | _ -> "", ""
+        let suggestions (stop: Stop) =
+            match registryStopsByTown.TryGetValue(stop.town.Trim().ToLowerInvariant()) with
+            | true, registered ->
+                registered
+                |> Seq.filter (fun candidate ->
+                    compatibleLocality stop candidate && stopNameSimilarity stop candidate >= 0.85)
+                |> Seq.map _.id
+                |> Seq.distinct
+                |> Seq.sort
+                |> Seq.truncate 3
+                |> Seq.map string
+                |> String.concat ";"
+            | false, _ -> ""
+        let row (provisionalId: string) (stop: Stop) lat lon reason suggestion = [|
+            provisionalId; stop.town; text stop.district; text stop.nearbyPlace
+            text stop.regionId; text stop.country; lat; lon; reason; suggestion
+        |]
+        let provisional =
+            provisionalSpellings
+            |> Seq.sortBy _.Key
+            |> Seq.collect (fun pair ->
+                let lat, lon = locationColumns pair.Key
+                pair.Value
+                |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left.Key, right.Key))
+                |> Seq.map (fun spelling ->
+                    row (string pair.Key) spelling.Value lat lon provisionalReasons.[pair.Key] (suggestions spelling.Value)))
+        let aliases =
+            unregisteredAliases
+            |> Seq.sortWith (fun left right -> StringComparer.Ordinal.Compare(left.Key, right.Key))
+            |> Seq.map (fun pair ->
+                let stopId, stop = pair.Value
+                let lat, lon = locationColumns stopId
+                row "" stop lat lon "alias" (string stopId))
+        Seq.append provisional aliases |> Seq.toArray
+
+    member _.logStopRegistrySummary() =
+        if stopRegistry.IsSome then
+            let registered = stops |> Seq.filter (fun stop -> stop.id < StopRegistry.provisionalBase) |> Seq.length
+            Log.Information(
+                "Stop registry: {Registered} registered, {Provisional} provisional "
+                + "({Ambiguous} ambiguous), {Aliases} unregistered spellings",
+                registered,
+                provisionalReasons.Count,
+                provisionalReasons.Values |> Seq.filter ((=) "ambiguous") |> Seq.length,
+                unregisteredAliases.Count)
+
     member this.beginAdd(batch: JdfBatch) =
         let attributeRefIdMap = Dictionary<int, int>()
         let existingAttributeRefsByValue =
@@ -570,24 +704,41 @@ type JdfMerger(
                     stops.Add(mappedStop)
                     stopIdMap.[sourceStop.id] <- sourceStop.id
             | MergeStopsByName ->
-                match stopReconciler.FindMatch(sourceStop, sourceLocation) with
+                let resolved =
+                    match stopReconciler.FindMatch(sourceStop, sourceLocation) with
+                    | Choice2Of2 candidates when candidates.Length > 1 ->
+                        match this.nearestRegisteredCandidate(candidates, sourceLocation) with
+                        | Some candidate -> Choice1Of2 candidate
+                        | None -> Choice2Of2 candidates
+                    | result -> result
+                match resolved with
                 | Choice1Of2 candidate ->
-                    let stopIndex = stopIndexesById.[candidate.stopId]
-                    let current = stops.[stopIndex]
-                    let incomingPreferred = isCanonicalNamePreferred mappedStop current
-                    let preferred = if incomingPreferred then mappedStop else current
-                    let other = if incomingPreferred then current else mappedStop
-                    stops.[stopIndex] <- {
-                        preferred with
-                            id = candidate.stopId
-                            regionId = preferred.regionId |> Option.orElse other.regionId
-                            country = preferred.country |> Option.orElse other.country
-                            attributes = mergeAttributes candidate.stopId current.attributes mappedStop.attributes
-                    }
-                    if incomingPreferred then
-                        preferredIncomingLocationSources.Add(sourceStop.id) |> ignore
+                    let stopIndex =
+                        match stopIndexesById.TryGetValue(candidate.stopId) with
+                        | true, stopIndex ->
+                            let current = stops.[stopIndex]
+                            let incomingPreferred = isCanonicalNamePreferred mappedStop current
+                            let preferred = if incomingPreferred then mappedStop else current
+                            let other = if incomingPreferred then current else mappedStop
+                            stops.[stopIndex] <- {
+                                preferred with
+                                    id = candidate.stopId
+                                    regionId = preferred.regionId |> Option.orElse other.regionId
+                                    country = preferred.country |> Option.orElse other.country
+                                    attributes = mergeAttributes candidate.stopId current.attributes mappedStop.attributes
+                            }
+                            if incomingPreferred then
+                                preferredIncomingLocationSources.Add(sourceStop.id) |> ignore
+                            stopIndex
+                        | false, _ ->
+                            // First use of a registered number in this merge.
+                            let stopIndex = stops.Count
+                            stopIndexesById.[candidate.stopId] <- stopIndex
+                            stops.Add({ mappedStop with id = candidate.stopId })
+                            stopIndex
                     stopIdMap.[sourceStop.id] <- candidate.stopId
                     stopReconciler.AddAlias(candidate.stopId, sourceStop, sourceLocation)
+                    this.recordStopIdentity(candidate.stopId, sourceStop)
                     let aliasName = stopDisplayName sourceStop
                     let canonicalName = stopDisplayName stops.[stopIndex]
                     if aliasName <> canonicalName then
@@ -605,19 +756,32 @@ type JdfMerger(
                         let candidateDetails =
                             candidates
                             |> Array.map (fun candidate ->
-                                let existing = stops.[stopIndexesById.[candidate.stopId]]
-                                $"{stopDisplayName existing} "
+                                let existing =
+                                    match stopIndexesById.TryGetValue(candidate.stopId) with
+                                    | true, stopIndex -> stopDisplayName stops.[stopIndex]
+                                    | false, _ -> $"registered {candidate.stopId}"
+                                $"{existing} "
                                 + $"[{candidate.kind}; distance={candidate.distance}]" )
                         Log.Warning(
                             "Ambiguous stop reconciliation for {StopName}; candidates: {Candidates}",
                             stopDisplayName sourceStop,
                             candidateDetails)
-                    lastStopId <- lastStopId + 1L
-                    let added = { mappedStop with id = lastStopId }
+                    let newId =
+                        match stopRegistry with
+                        | None ->
+                            lastStopId <- lastStopId + 1L
+                            lastStopId
+                        | Some _ ->
+                            let identity = stopIdentityKey sourceStop + "\u001f" + localityKey sourceStop
+                            let id = StopRegistry.provisionalStopId identity stopIndexesById.ContainsKey
+                            provisionalReasons.[id] <- if candidates.Length > 0 then "ambiguous" else "new"
+                            id
+                    let added = { mappedStop with id = newId }
                     stopIndexesById.[added.id] <- stops.Count
                     stops.Add(added)
                     stopIdMap.[sourceStop.id] <- added.id
                     stopReconciler.AddAlias(added.id, sourceStop, sourceLocation)
+                    this.recordStopIdentity(added.id, sourceStop)
         let batchLocationSources = Dictionary<int64, string>()
         for value in batch.stopLocationSources do
             batchLocationSources.[value.stopId] <- value.source

@@ -27,7 +27,12 @@ open JrUtil.RegionalOverlay
 
 type Input = {
     prepared: InputPreparation.Result
+    /// Reviewed stop-place IDs for source-native groups, keyed by
+    /// `pinnedPlaceKey`; unpinned groups keep their hashed ID.
+    pinnedStopPlaces: IReadOnlyDictionary<string, string>
 }
+
+let pinnedPlaceKey (sourceId: string) (groupId: string) = sourceId + "\u001f" + groupId
 
 type Result = {
     sourceId: string
@@ -69,7 +74,7 @@ type MatchingIndexes = {
 }
 
 /// Collect source-qualified stop, route and authority evidence without writing output.
-let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
+let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input) : Result * MatchingIndexes =
     let sourceAgencyRows = requireTable prepared.binding.payloadPath "agency.txt"
     let sourceAgencies = sourceAgencyRows |> Array.map (fun row -> rowValue row "agency_id", row) |> dict
     let sourceStopRows = requireTable prepared.binding.payloadPath "stops.txt"
@@ -348,7 +353,10 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
                     let groupId = sourceGroupByMember.[call.stopId]
                     let group = sourceStopGroupById.[groupId]
                     let sourceId = sourceIdentity prepared.binding.sourceId group.members.[0]
-                    let outputPlaceId = sourceStopPlaceId sourceId groupId
+                    let outputPlaceId =
+                        match pinnedStopPlaces.TryGetValue(pinnedPlaceKey sourceId groupId) with
+                        | true, placeId -> placeId
+                        | false, _ -> sourceStopPlaceId sourceId groupId
                     sourceNativeStopPlaces.[outputPlaceId] <- group
                     stopMatching.stopGroupMatches.[groupId] <- outputPlaceId
                     stopMatching.stopMatchMethods.[groupId] <- "source_native"
@@ -511,3 +519,36 @@ let analyze ({ prepared = prepared }: Input) : Result * MatchingIndexes =
         baseTripIdsByRouteAndPattern = routeMatching.baseTripIdsByRouteAndPattern
         candidateEquivalenceKey = routeMatching.candidateEquivalenceKey
     }
+
+/// Source-native stop places without a reviewed ID, as review rows in
+/// `StopRegistry.overlayPlaceCandidatesHeader` order. A group split by name
+/// suggests pinned places of the same source group, which is how a renamed
+/// stop keeps its ID.
+let stopPlaceRegistryCandidates (prepared: InputPreparation.Result) (source: Result)
+                                (pinnedStopPlaces: IReadOnlyDictionary<string, string>) =
+    let sourceGroupPrefix (groupId: string) =
+        if groupId.StartsWith("group:", StringComparison.Ordinal) then
+            match groupId.LastIndexOf(':') with
+            | index when index > "group:".Length -> Some (groupId.Substring(0, index + 1))
+            | _ -> None
+        else None
+    let coordinate (value: decimal option) =
+        value |> Option.map (fun value -> JrUtil.StopRegistry.formatCoordinate (float value)) |> Option.defaultValue ""
+    source.nativeStopPlaces
+    |> Seq.choose (fun (KeyValue(placeId, group)) ->
+        let sourceId = sourceIdentity prepared.binding.sourceId group.members.[0]
+        if pinnedStopPlaces.ContainsKey(pinnedPlaceKey sourceId group.groupId) then None
+        else
+            let suggestions =
+                match sourceGroupPrefix group.groupId with
+                | Some prefix ->
+                    pinnedStopPlaces
+                    |> Seq.filter (fun (KeyValue(key, _)) -> key.StartsWith(pinnedPlaceKey sourceId prefix, StringComparison.Ordinal))
+                    |> Seq.map _.Value
+                    |> Seq.distinct
+                    |> Seq.sort
+                    |> String.concat ";"
+                | None -> ""
+            Some [| sourceId; group.groupId; placeId; group.name; coordinate group.lat; coordinate group.lon; "new"; suggestions |])
+    |> Seq.sortBy (fun row -> row.[0], row.[1])
+    |> Seq.toArray
