@@ -121,14 +121,46 @@ type ServingContractTests() =
                 |> Seq.collect (fun columns -> JrUtil.Serving.ColumnReader.int32 columns.[3]) |> Seq.toArray
             CollectionAssert.AreEqual([| 1; 2 |], sequences)
             CollectionAssert.AreEqual(routeStops, parquetStrings (serving "trip_call") "route_stop_id")
-            let zones =
-                JrUtil.Serving.ColumnReader.groups (serving "call_zone") (schema "call_zone")
-                |> Seq.collect (fun columns ->
-                    let sequence, order = JrUtil.Serving.ColumnReader.int32 columns.[1], JrUtil.Serving.ColumnReader.int32 columns.[2]
-                    let code, system = JrUtil.Serving.ColumnReader.text columns.[3], JrUtil.Serving.ColumnReader.text columns.[4]
-                    Array.init sequence.Length (fun row -> $"{sequence.[row]}:{order.[row]}:{code.[row]}:{system.[row]}"))
-                |> Seq.toArray
-            CollectionAssert.AreEqual([| "1:0:P:pid"; "1:1:0:pid"; "2:0:100:ids-jmk" |], zones)
+            let rows name columns =
+                JrUtil.Serving.PackageReader.readTextRows (serving name) columns |> Seq.map (String.concat "|") |> Seq.toArray
+            // One trip agrees with itself, so every zone sits on its slot.
+            CollectionAssert.AreEqual(
+                [| "jdf:route:000645:1/0/s1/1|0|P|pid"; "jdf:route:000645:1/0/s1/1|1|0|pid"; "jdf:route:000645:1/0/s2/1|0|100|ids-jmk" |],
+                rows "route_stop_zone" [| "route_stop_id"; "source_order"; "zone_code"; "zone_system" |])
+            Assert.AreEqual(0, (rows "call_zone" [| "trip_id" |]).Length)
+            CollectionAssert.AreEquivalent(
+                [| "s1|P|pid"; "s1|0|pid"; "s2|100|ids-jmk" |],
+                rows "location_zone" [| "location_id"; "zone_code"; "zone_system" |])
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Zones fall back to calls where trips at a slot disagree``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-zone-fallback-" + Guid.NewGuid().ToString("N"))
+        try
+            let stage = staging root
+            let gtfs = Path.Combine(stage, "gtfs-intermediate")
+            write (Path.Combine(gtfs, "trips.txt"))
+                "route_id,service_id,trip_id,trip_headsign,direction_id,wheelchair_accessible,bikes_allowed\nr,svc,out,Two,0,2,2\nr,svc,late,Two,0,2,2\n"
+            write (Path.Combine(gtfs, "stop_times.txt"))
+                ("trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type,timepoint\n"
+                 + "late,26:00:00,26:00:00,s1,1,0,0,1\nlate,26:10:00,26:10:00,s2,2,0,0,1\n"
+                 + "out,25:00:00,25:00:00,s1,1,0,0,1\nout,25:10:00,25:10:00,s2,2,0,0,1\n")
+            write (Path.Combine(stage, "extensions", "cz_trip_stop_zones.txt"))
+                ("trip_id,stop_sequence,zone_id,zone_code,ids_system_id,source_provenance\n"
+                 + "out,1,,P,pid,provider\nlate,1,,0,pid,provider\nout,2,,1,pid,provider\nlate,2,,1,pid,provider\n")
+            let output = Path.Combine(root, "output")
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage output
+            let rows name columns =
+                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output, "serving", name + ".parquet")) columns
+                |> Seq.map (String.concat "|") |> Seq.sort |> Seq.toArray
+            CollectionAssert.AreEqual([| "r/0/s2/1|1" |], rows "route_stop_zone" [| "route_stop_id"; "zone_code" |])
+            CollectionAssert.AreEqual([| "late|1|0"; "out|1|P" |], rows "call_zone" [| "trip_id"; "sequence"; "zone_code" |])
+            CollectionAssert.AreEqual([| "s1|0"; "s1|P"; "s2|1" |], rows "location_zone" [| "location_id"; "zone_code" |])
+            // The overlay compiler view expands slot zones back onto every call.
+            let _, extensions = JrUtil.Serving.PackageReader.prepareCompilerView output (Path.Combine(root, "scratch"))
+            let view = File.ReadAllText(Path.Combine(extensions, "cz_trip_stop_zones.txt")).Replace("\"", "")
+            for expected in [ "out,2,,1,pid"; "late,2,,1,pid"; "out,1,,P,pid"; "late,1,,0,pid" ] do
+                StringAssert.Contains(view, expected)
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -390,8 +422,8 @@ type ServingContractTests() =
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage first
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage second
             let result = JrUtil.Serving.Validation.validatePackage first
-            Assert.AreEqual(28, result.relationCount)
-            Assert.AreEqual(31, result.fileCount)
+            Assert.AreEqual(30, result.relationCount)
+            Assert.AreEqual(33, result.fileCount)
             JrUtil.Serving.Validation.compareByteIdentical first second
             Assert.IsFalse(Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
             Assert.IsFalse(Directory.Exists(Path.Combine(first, "extensions")))

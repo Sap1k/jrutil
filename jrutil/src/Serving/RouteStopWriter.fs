@@ -9,7 +9,7 @@ open System.Threading
 /// Package post-pass over the finalized calls of every producer: derive the
 /// ordered `route_stop` slots of each route direction, point
 /// `trip_call.route_stop_id` and travel restrictions at them, and write the
-/// call-scoped `call_zone`.
+/// zones: on the slot when all its calls agree, otherwise on the call.
 module RouteStopWriter =
     [<Struct>]
     type Zone = { code: string; system: string }
@@ -36,7 +36,9 @@ module RouteStopWriter =
         patterns: int
         slots: int
         maximumPatterns: int
+        routeStopZones: int
         callZones: int
+        locationZones: int
         unmatchedCallZones: int
     }
 
@@ -228,8 +230,11 @@ module RouteStopWriter =
         let callByTripKey = Dictionary<struct(string * string), struct(int * int)>()
         let slotIds = HashSet<string>(slots |> Seq.map _.id, StringComparer.Ordinal)
 
-        // 7. Rewrite trip_call and derive call zones.
-        let callZoneRows = ResizeArray<struct(string * int * int * Zone)>()
+        // 7. Rewrite trip_call and resolve each call's zones. A slot keeps
+        // zones only when every call at it has the same non-empty set.
+        let zonedCalls = ResizeArray<struct(string * int * int * string * Zone array)>()
+        let slotZones = Array.zeroCreate<Zone array> slots.Count
+        let slotMixed = Array.zeroCreate<bool> slots.Count
         let matchedExplicit = HashSet<struct(string * int)>()
         let routeStopField = field callSchema "route_stop_id"
         counts.["trip_call"] <-
@@ -263,7 +268,13 @@ module RouteStopWriter =
                                     match zones.places.TryGetValue(places.[row]) with
                                     | true, values -> values
                                     | _ -> [||]
-                        found |> Array.iteri (fun order zone -> callZoneRows.Add(struct(trip, sequence, order, zone)))
+                        let slotIndex = slot |> Option.defaultValue -1
+                        if slotIndex >= 0 then
+                            match slotZones.[slotIndex] with
+                            | null -> slotZones.[slotIndex] <- found
+                            | existing when existing <> found -> slotMixed.[slotIndex] <- true
+                            | _ -> ()
+                        if found.Length > 0 then zonedCalls.Add(struct(trip, sequence, slotIndex, places.[row], found))
                     let copy = Array.copy columns
                     copy.[routeStopField] <- ColumnWriter.Text updated
                     // Re-batch: an input group may be larger than one bounded column batch.
@@ -272,12 +283,44 @@ module RouteStopWriter =
                     progress "route-stops-rewrite-calls" output.RowCount
                 int output.RowCount)
 
-        // 8. call_zone.
+        // 8. Zones: route_stop_zone for unanimous slots, call_zone for the
+        // other zoned calls, and location_zone as the distinct union.
+        let unanimous index = index >= 0 && not slotMixed.[index] && not (isNull slotZones.[index]) && slotZones.[index].Length > 0
+        let zoneSize (text: string) (zone: Zone) =
+            96L + 2L * int64 (text.Length + zone.code.Length + (if isNull zone.system then 0 else zone.system.Length))
+        let locationZones = ResizeArray<struct(string * Zone)>()
+        let seenLocationZones = HashSet<struct(string * string * string)>()
+        let addLocationZone location (zone: Zone) =
+            if seenLocationZones.Add(struct(location, zone.code, zone.system)) then locationZones.Add(struct(location, zone))
+        let routeStopZones = ResizeArray<struct(int * int * Zone)>()
+        for index in 0 .. slots.Count - 1 do
+            if unanimous index then
+                slotZones.[index] |> Array.iteri (fun order zone ->
+                    routeStopZones.Add(struct(index, order, zone))
+                    addLocationZone slots.[index].location zone)
+        let callZoneRows = ResizeArray<struct(string * int * int * Zone)>()
+        for struct(trip, sequence, slot, location, found) in zonedCalls do
+            if not (unanimous slot) then
+                found |> Array.iteri (fun order zone ->
+                    callZoneRows.Add(struct(trip, sequence, order, zone))
+                    addLocationZone location zone)
+        zonedCalls.Clear()
+        counts.["route_stop_zone"] <-
+            replace (Path.Combine(serving, "route_stop_zone.parquet")) (fun target ->
+                RelationWriter.writeRows target (relation "route_stop_zone") (4L * 1024L * 1024L) rowGroupRows token progress
+                    (fun (struct(slot: int, _, zone: Zone)) -> zoneSize slots.[slot].id zone)
+                    (fun rows ->
+                        let column f = Array.map f rows
+                        [| ColumnWriter.Text(column (fun (struct(slot, _, _)) -> slots.[slot].route))
+                           ColumnWriter.Text(column (fun (struct(slot, _, _)) -> slots.[slot].id))
+                           ColumnWriter.Int32(column (fun (struct(_, order, _)) -> order))
+                           ColumnWriter.Text(column (fun (struct(_, _, zone: Zone)) -> zone.code))
+                           ColumnWriter.Text(column (fun (struct(_, _, zone: Zone)) -> zone.system)) |])
+                    routeStopZones)
         counts.["call_zone"] <-
             replace (Path.Combine(serving, "call_zone.parquet")) (fun target ->
                 RelationWriter.writeRows target (relation "call_zone") (4L * 1024L * 1024L) rowGroupRows token progress
-                    (fun (struct(trip: string, _, _, zone: Zone)) ->
-                        96L + 2L * int64 (trip.Length + zone.code.Length + (if isNull zone.system then 0 else zone.system.Length)))
+                    (fun (struct(trip: string, _, _, zone: Zone)) -> zoneSize trip zone)
                     (fun rows ->
                         let column f = Array.map f rows
                         [| ColumnWriter.Text(column (fun (struct(trip, _, _, _)) -> trip))
@@ -286,6 +329,16 @@ module RouteStopWriter =
                            ColumnWriter.Text(column (fun (struct(_, _, _, zone: Zone)) -> zone.code))
                            ColumnWriter.Text(column (fun (struct(_, _, _, zone: Zone)) -> zone.system)) |])
                     callZoneRows)
+        counts.["location_zone"] <-
+            replace (Path.Combine(serving, "location_zone.parquet")) (fun target ->
+                RelationWriter.writeRows target (relation "location_zone") (4L * 1024L * 1024L) rowGroupRows token progress
+                    (fun (struct(location: string, zone: Zone)) -> zoneSize location zone)
+                    (fun rows ->
+                        let column f = Array.map f rows
+                        [| ColumnWriter.Text(column (fun (struct(location, _)) -> location))
+                           ColumnWriter.Text(column (fun (struct(_, zone: Zone)) -> zone.code))
+                           ColumnWriter.Text(column (fun (struct(_, zone: Zone)) -> if isNull zone.system then "" else zone.system)) |])
+                    locationZones)
 
         // 9. Restrictions: a trip-scoped row points at its call; a
         // route-scoped row gets one row per slot its route stop reached
@@ -352,6 +405,7 @@ module RouteStopWriter =
             counts = counts
             summary = {
                 routeDirections = groups.Count; patterns = patternCount; slots = slots.Count
-                maximumPatterns = maximumPatterns; callZones = callZoneRows.Count
+                maximumPatterns = maximumPatterns; routeStopZones = routeStopZones.Count
+                callZones = callZoneRows.Count; locationZones = locationZones.Count
                 unmatchedCallZones = zones.calls.Count - matchedExplicit.Count }
         }

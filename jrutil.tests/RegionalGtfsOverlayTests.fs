@@ -854,9 +854,9 @@ type RegionalGtfsOverlayTests() =
                 "PID native-mode permissions must not make an unmatched JMK trolleybus native")
             let zones = File.ReadAllText(diagnosticPath output1 "projection/czech" "cz_stop_zones.txt")
             Assert.IsTrue(zones.Contains("ids-jmk-gtfs") && zones.Contains("overlay:ids-jmk-gtfs:zone:"), zones)
-            // IDS JMK stop zones become call zones of the trips serving those places.
+            // IDS JMK stop zones reach the places their trips serve.
             let callZoneSystems =
-                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output1, "serving", "call_zone.parquet")) [| "zone_system" |]
+                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output1, "serving", "location_zone.parquet")) [| "zone_system" |]
                 |> Seq.map (fun row -> row.[0]) |> Seq.toArray
             Assert.IsTrue(callZoneSystems |> Array.contains "ids-jmk", String.Join(",", callZoneSystems))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("cross_source_fact_coalesced"))

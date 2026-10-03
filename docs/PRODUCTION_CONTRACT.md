@@ -8,7 +8,7 @@ The package inventory is closed:
 output/
 ├── gtfs.zip
 ├── serving/
-│   └── <28 declared relations>.parquet
+│   └── <30 declared relations>.parquet
 ├── manifest.json
 └── diagnostics.json
 ```
@@ -19,7 +19,7 @@ All serving Parquet relations exist even when empty. Their exact field order, ty
 
 Provenance is kept at trip and route level. `source_trip_map` and `source_entity_map` show which source produced each trip, route and stop. Field-level provenance is not recorded.
 
-Zones are call-scoped only. `call_zone` holds each zone code of a call in source order, with the integrated-transport system (`zone_system`, for example `ids-jmk` or a CZPTT catalog code) where the source names one. JDF route-stop zones are written onto every served call of the route stop. There are no fare systems or zone entities.
+Zones are codes, not entities: there are no fare systems or zone records. Each code carries the integrated-transport system (`zone_system`, for example `ids-jmk` or a CZPTT catalog code) where the source names one. A route stop slot (see below) holds its zones in `route_stop_zone` when every call at it has the same non-empty zone set. Otherwise the slot has none, and each zoned call has its own rows in `call_zone`. A call's zones are therefore its slot's `route_stop_zone` rows if there are any, else its `call_zone` rows. `location_zone` is the distinct union per location, for stop lookups; a missing system is stored there as an empty string because it is part of the key.
 
 `route_stop` is the ordered stop list of each route direction, as printed in a line timetable. It is derived from the final calls of every producer: the distinct call patterns of a route and `trip.direction` (null directions form their own group) are merged by longest-common-subsequence alignment, heaviest pattern first; stops that only some patterns serve are inserted between their aligned neighbours by scheduled time. Every visit of a location is its own slot, so loop lines keep both rows. `route_stop_id` is `<route>/<direction or ->/<location>/<visit>`, and `sequence` is the slot's position. Every `trip_call.route_stop_id` points at its slot. A route-scoped travel restriction gets one row per slot its source route stop reaches; a trip-scoped one points at its call. `diagnostics.json` summarizes the merge under `route_stop_order`.
 

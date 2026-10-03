@@ -216,7 +216,9 @@ typed serving relations documented in `docs/PRODUCTION_CONTRACT.md`:
 
 | Relation | Purpose |
 | --- | --- |
-| `call_zone` | Ordered zone codes of each call, with the IDS system when known |
+| `route_stop_zone` | Ordered zone codes of a route stop slot whose calls all agree |
+| `call_zone` | Ordered zone codes of calls at slots without zones |
+| `location_zone` | Distinct zone codes per location |
 | `route_stop` | Ordered stop slots of each route direction, for line timetables |
 | `transfer` | Standard transfers plus waiting limits |
 
@@ -234,8 +236,8 @@ hierarchy while retaining source semantics: `:post:id:` is an authoritative
 `Oznacniky` ID and bare `:post:<value>` is a textual `Zasspoje` designation.
 
 Raw zone lists are split, trimmed and deduplicated without attempting to infer
-their IDS system, so a JDF `call_zone.zone_system` is null. Each token is
-written, in source order, onto every served call of its route stop.
+their IDS system, so a JDF `zone_system` is null. The tokens, in source order,
+land on the route stop slot, or on its calls where line versions disagree.
 Standard `stop_times.txt` never contains
 the old non-standard `stop_zone_ids` column.
 
