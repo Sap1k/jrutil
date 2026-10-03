@@ -72,7 +72,7 @@ module PackageBindingRelations =
                   trip_id = target; service_id = service; valid_from = date first; valid_to = date last
                   binding_status = "confirmed"; scheduled_start = calls.scheduledStart; scheduled_end = calls.scheduledEnd
                   source_route_id = null; source_direction_id = direction; source_start_location_id = intern calls.firstStopId
-                  source_end_location_id = intern calls.lastStopId; source_block_id = block; source_run_id = null; source_duty_id = null
+                  source_end_location_id = intern calls.lastStopId; source_block_id = block
                   call_pattern_sha256 = intern calls.callPatternSha256; variant_key = variant }
         let compilerBindings =
             if mappings.Length > 0 then
@@ -103,7 +103,7 @@ module PackageBindingRelations =
             | Some package when not (File.Exists(Path.Combine(package, "serving", "source_trip_map.parquet"))) -> [||]
             | Some package ->
                 PackageReader.readTextRows (Path.Combine(package, "serving", "source_trip_map.parquet"))
-                    [| "binding_id"; "source_id"; "trip_namespace"; "source_trip_id"; "trip_id"; "valid_from"; "valid_to"; "binding_status"; "source_route_id"; "source_direction_id"; "source_start_location_id"; "source_end_location_id"; "source_block_id"; "source_run_id"; "source_duty_id"; "variant_key" |]
+                    [| "binding_id"; "source_id"; "trip_namespace"; "source_trip_id"; "trip_id"; "valid_from"; "valid_to"; "binding_status"; "source_route_id"; "source_direction_id"; "source_start_location_id"; "source_end_location_id"; "source_block_id"; "variant_key" |]
                 |> Seq.collect (fun row ->
                     match baseSlices.TryGetValue(row.[4]) with
                     | false, _ -> Seq.empty
@@ -112,13 +112,13 @@ module PackageBindingRelations =
                         let last = min (date row.[6]) (date slice.validTo)
                         if first > last then None else
                         let target = slice.outputTripId
-                        let result = binding row.[1] row.[3] target (first.ToString("yyyyMMdd")) (last.ToString("yyyyMMdd")) row.[15]
+                        let result = binding row.[1] row.[3] target (first.ToString("yyyyMMdd")) (last.ToString("yyyyMMdd")) row.[13]
                         let fields = [ "source_id", row.[1]; "namespace", row.[2]; "source_trip_id", row.[3]; "trip_id", target; "service_id", result.service_id; "valid_from", first.ToString("yyyyMMdd"); "valid_to", last.ToString("yyyyMMdd") ]
                         let result = { result with
                                         trip_namespace = row.[2]; binding_status = row.[7]
                                         source_route_id = row.[8]; source_direction_id = row.[9]
                                         source_start_location_id = row.[10]; source_end_location_id = row.[11]
-                                        source_block_id = row.[12]; source_run_id = row.[13]; source_duty_id = row.[14]
+                                        source_block_id = row.[12]
                                         binding_id = Identity.bindingId "trip" fields }
                         Some (row.[0], result)))
                 |> Seq.toArray
@@ -152,7 +152,7 @@ module PackageBindingRelations =
                                 binding_id = Identity.bindingId "trip" fields; source_id = defaultSource
                                 trip_namespace = namespaceName; source_trip_id = identifier; trip_id = target; service_id = service
                                 valid_from = first; valid_to = last; binding_status = "confirmed"
-                                source_route_id = null; source_run_id = null; source_duty_id = null; variant_key = "czptt-source-identity-v1" }))
+                                source_route_id = null; variant_key = "czptt-source-identity-v1" }))
         let bindings = Seq.append primaryBindings czpttBindings |> Seq.toArray
         let bindingByMapping = lazy (
             bindings |> Seq.map (fun row ->
@@ -264,6 +264,6 @@ module PackageBindingRelations =
                         binding_id = Identity.bindingId "trip" fields; source_id = sourceId
                         trip_namespace = "operational_line_course"; source_trip_id = sourceTrip; trip_id = target; service_id = service
                         valid_from = date (value "valid_from" row); valid_to = date (value "valid_to" row)
-                        binding_status = "confirmed"; source_route_id = null; source_run_id = null; source_duty_id = null
+                        binding_status = "confirmed"; source_route_id = null
                         variant_key = "ids-jmk-api-v1" }) )
         Seq.append bindings operational, calls, baseCoverage

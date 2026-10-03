@@ -1,7 +1,7 @@
 {
-  "serving_schema_version": 3,
+  "serving_schema_version": 4,
   "parquet_metadata": {
-    "obehy.schema_version": "3",
+    "obehy.schema_version": "4",
     "obehy.relation": "<relation name>",
     "jrutil.bundle_format": "jrutil-production"
   },
@@ -60,7 +60,8 @@
       ],
       "primary_key": [
         "agency_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "location",
@@ -158,6 +159,17 @@
       ],
       "primary_key": [
         "location_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "parent_location_id"
+          ],
+          "relation": "location",
+          "target_fields": [
+            "location_id"
+          ]
+        }
       ]
     },
     {
@@ -226,6 +238,17 @@
       ],
       "primary_key": [
         "route_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "agency_id"
+          ],
+          "relation": "agency",
+          "target_fields": [
+            "agency_id"
+          ]
+        }
       ]
     },
     {
@@ -254,7 +277,8 @@
       ],
       "primary_key": [
         "service_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "service_exception",
@@ -278,6 +302,17 @@
       "primary_key": [
         "service_id",
         "service_date"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "service_id"
+          ],
+          "relation": "service_calendar",
+          "target_fields": [
+            "service_id"
+          ]
+        }
       ]
     },
     {
@@ -296,7 +331,8 @@
       ],
       "primary_key": [
         "shape_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "shape_point",
@@ -330,6 +366,17 @@
       "primary_key": [
         "shape_id",
         "sequence"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "shape_id"
+          ],
+          "relation": "shape",
+          "target_fields": [
+            "shape_id"
+          ]
+        }
       ]
     },
     {
@@ -388,6 +435,35 @@
       ],
       "primary_key": [
         "trip_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "route_id"
+          ],
+          "relation": "route",
+          "target_fields": [
+            "route_id"
+          ]
+        },
+        {
+          "fields": [
+            "service_id"
+          ],
+          "relation": "service_calendar",
+          "target_fields": [
+            "service_id"
+          ]
+        },
+        {
+          "fields": [
+            "shape_id"
+          ],
+          "relation": "shape",
+          "target_fields": [
+            "shape_id"
+          ]
+        }
       ]
     },
     {
@@ -467,35 +543,44 @@
       "primary_key": [
         "trip_id",
         "sequence"
-      ]
-    },
-    {
-      "name": "route_segment",
-      "fields": [
-        {
-          "name": "trip_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "from_sequence",
-          "type": "int32",
-          "nullable": false
-        },
-        {
-          "name": "to_sequence",
-          "type": "int32",
-          "nullable": false
-        },
-        {
-          "name": "route_id",
-          "type": "string",
-          "nullable": false
-        }
       ],
-      "primary_key": [
-        "trip_id",
-        "from_sequence"
+      "foreign_keys": [
+        {
+          "fields": [
+            "trip_id"
+          ],
+          "relation": "trip",
+          "target_fields": [
+            "trip_id"
+          ]
+        },
+        {
+          "fields": [
+            "location_id"
+          ],
+          "relation": "location",
+          "target_fields": [
+            "location_id"
+          ]
+        },
+        {
+          "fields": [
+            "boarding_point_id"
+          ],
+          "relation": "location",
+          "target_fields": [
+            "location_id"
+          ]
+        },
+        {
+          "fields": [
+            "route_stop_id"
+          ],
+          "relation": "route_stop",
+          "target_fields": [
+            "route_stop_id"
+          ]
+        }
       ]
     },
     {
@@ -554,82 +639,8 @@
       ],
       "primary_key": [
         "transfer_key"
-      ]
-    },
-    {
-      "name": "fare_system",
-      "fields": [
-        {
-          "name": "fare_system_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "name",
-          "type": "string",
-          "nullable": false
-        }
       ],
-      "primary_key": [
-        "fare_system_id"
-      ]
-    },
-    {
-      "name": "fare_zone",
-      "fields": [
-        {
-          "name": "zone_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "fare_system_id",
-          "type": "string",
-          "nullable": true
-        },
-        {
-          "name": "zone_code",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "name",
-          "type": "string",
-          "nullable": true
-        },
-        {
-          "name": "source_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_scope",
-          "type": "string",
-          "nullable": false
-        }
-      ],
-      "primary_key": [
-        "zone_id"
-      ]
-    },
-    {
-      "name": "location_zone",
-      "fields": [
-        {
-          "name": "location_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "zone_id",
-          "type": "string",
-          "nullable": false
-        }
-      ],
-      "primary_key": [
-        "location_id",
-        "zone_id"
-      ]
+      "foreign_keys": []
     },
     {
       "name": "call_zone",
@@ -645,20 +656,38 @@
           "nullable": false
         },
         {
-          "name": "zone_id",
+          "name": "source_order",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "zone_code",
           "type": "string",
           "nullable": false
         },
         {
-          "name": "source_order",
-          "type": "int32",
-          "nullable": false
+          "name": "zone_system",
+          "type": "string",
+          "nullable": true
         }
       ],
       "primary_key": [
         "trip_id",
         "sequence",
-        "zone_id"
+        "source_order"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "trip_id",
+            "sequence"
+          ],
+          "relation": "trip_call",
+          "target_fields": [
+            "trip_id",
+            "sequence"
+          ]
+        }
       ]
     },
     {
@@ -717,7 +746,8 @@
       ],
       "primary_key": [
         "note_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "service_note_assignment",
@@ -755,6 +785,17 @@
       ],
       "primary_key": [
         "assignment_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "note_id"
+          ],
+          "relation": "service_note",
+          "target_fields": [
+            "note_id"
+          ]
+        }
       ]
     },
     {
@@ -823,7 +864,8 @@
       ],
       "primary_key": [
         "feature_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "location_feature",
@@ -866,6 +908,17 @@
       ],
       "primary_key": [
         "feature_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "location_id"
+          ],
+          "relation": "location",
+          "target_fields": [
+            "location_id"
+          ]
+        }
       ]
     },
     {
@@ -989,7 +1042,8 @@
       ],
       "primary_key": [
         "connection_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "travel_restriction_assignment",
@@ -1057,6 +1111,17 @@
       ],
       "primary_key": [
         "assignment_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "route_stop_id"
+          ],
+          "relation": "route_stop",
+          "target_fields": [
+            "route_stop_id"
+          ]
+        }
       ]
     },
     {
@@ -1121,7 +1186,8 @@
       "primary_key": [
         "source_id",
         "source_location_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "operational_journey",
@@ -1155,7 +1221,8 @@
       "primary_key": [
         "source_id",
         "source_journey_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "operational_call",
@@ -1220,7 +1287,8 @@
         "source_id",
         "source_journey_id",
         "sequence"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "source_entity_map",
@@ -1268,7 +1336,8 @@
       ],
       "primary_key": [
         "entity_binding_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "source_trip_map",
@@ -1354,16 +1423,6 @@
           "nullable": true
         },
         {
-          "name": "source_run_id",
-          "type": "string",
-          "nullable": true
-        },
-        {
-          "name": "source_duty_id",
-          "type": "string",
-          "nullable": true
-        },
-        {
           "name": "call_pattern_sha256",
           "type": "string",
           "nullable": true
@@ -1376,6 +1435,26 @@
       ],
       "primary_key": [
         "binding_id"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "trip_id"
+          ],
+          "relation": "trip",
+          "target_fields": [
+            "trip_id"
+          ]
+        },
+        {
+          "fields": [
+            "service_id"
+          ],
+          "relation": "service_calendar",
+          "target_fields": [
+            "service_id"
+          ]
+        }
       ]
     },
     {
@@ -1422,6 +1501,17 @@
         "call_namespace",
         "source_sequence",
         "call_sequence"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "binding_id"
+          ],
+          "relation": "source_trip_map",
+          "target_fields": [
+            "binding_id"
+          ]
+        }
       ]
     },
     {
@@ -1473,52 +1563,17 @@
         "coverage_id",
         "from_sequence",
         "to_sequence"
-      ]
-    },
-    {
-      "name": "identifier_alias",
-      "fields": [
-        {
-          "name": "source_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "namespace",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "observed_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "valid_from",
-          "type": "date32",
-          "nullable": false
-        },
-        {
-          "name": "valid_to",
-          "type": "date32",
-          "nullable": false
-        },
-        {
-          "name": "canonical_value",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "reason",
-          "type": "string",
-          "nullable": false
-        }
       ],
-      "primary_key": [
-        "source_id",
-        "namespace",
-        "observed_id",
-        "valid_from"
+      "foreign_keys": [
+        {
+          "fields": [
+            "binding_id"
+          ],
+          "relation": "source_trip_map",
+          "target_fields": [
+            "binding_id"
+          ]
+        }
       ]
     },
     {
@@ -1553,7 +1608,8 @@
       "primary_key": [
         "entity_binding_id",
         "cis_line_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "road_trip_key",
@@ -1593,7 +1649,8 @@
         "binding_id",
         "cis_line_id",
         "cis_trip_id"
-      ]
+      ],
+      "foreign_keys": []
     },
     {
       "name": "rail_trip_key",
@@ -1627,100 +1684,8 @@
       "primary_key": [
         "binding_id",
         "train_number"
-      ]
-    },
-    {
-      "name": "object_origin",
-      "fields": [
-        {
-          "name": "object_type",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "object_key",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_snapshot_sha256",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "identifier_namespace",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_object_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "selection_rule",
-          "type": "string",
-          "nullable": false
-        }
       ],
-      "primary_key": [
-        "object_type",
-        "object_key"
-      ]
-    },
-    {
-      "name": "binding_evidence",
-      "fields": [
-        {
-          "name": "binding_kind",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "binding_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "evidence_source_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_snapshot_sha256",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "identifier_namespace",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_object_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "selection_rule",
-          "type": "string",
-          "nullable": false
-        }
-      ],
-      "primary_key": [
-        "binding_kind",
-        "binding_id",
-        "evidence_source_id",
-        "source_snapshot_sha256",
-        "identifier_namespace",
-        "source_object_id",
-        "selection_rule"
-      ]
+      "foreign_keys": []
     },
     {
       "name": "route_stop",
@@ -1736,6 +1701,16 @@
           "nullable": false
         },
         {
+          "name": "direction",
+          "type": "int16",
+          "nullable": true
+        },
+        {
+          "name": "sequence",
+          "type": "int32",
+          "nullable": false
+        },
+        {
           "name": "location_id",
           "type": "string",
           "nullable": false
@@ -1744,36 +1719,26 @@
       "primary_key": [
         "route_id",
         "route_stop_id"
-      ]
-    },
-    {
-      "name": "route_stop_zone",
-      "fields": [
-        {
-          "name": "route_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "route_stop_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "zone_id",
-          "type": "string",
-          "nullable": false
-        },
-        {
-          "name": "source_order",
-          "type": "int32",
-          "nullable": false
-        }
       ],
-      "primary_key": [
-        "route_id",
-        "route_stop_id",
-        "zone_id"
+      "foreign_keys": [
+        {
+          "fields": [
+            "route_id"
+          ],
+          "relation": "route",
+          "target_fields": [
+            "route_id"
+          ]
+        },
+        {
+          "fields": [
+            "location_id"
+          ],
+          "relation": "location",
+          "target_fields": [
+            "location_id"
+          ]
+        }
       ]
     }
   ]

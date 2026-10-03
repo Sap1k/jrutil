@@ -276,7 +276,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
     let nativeSummaryPath = temp + ".call-summaries.bin"
     let nativeSourceCallsPath = nativeSummaryPath + ".calls"
     let nativeTripFactsPath = nativeSummaryPath + ".trips"
-    let nativeRouteStopsPath = temp + ".route_stop.parquet"
     let mutable nativeCallCount = 0L
     let mutable nativeRelations = Map.empty
     let nativeTransferSequences = Dictionary<struct(string * int64), int>()
@@ -471,7 +470,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             use nativeCalls = new JrUtil.Serving.TripCallWriter.Writer(nativeCallPath, Threading.CancellationToken.None, bufferedOutput = bufferedCalls)
             use nativeSummaries = new JrUtil.Serving.TripCallWriter.SummaryWriter(nativeSummaryPath)
             use nativeSourceCalls = new JrUtil.Serving.SourceCallWriter.Spool(nativeSourceCallsPath)
-            use nativeRouteStops = new JrUtil.Serving.RouteStopWriter.Writer(nativeRouteStopsPath, Threading.CancellationToken.None)
             let parents =
                 JdfToGtfs.getGtfsStopsWithPlan preparation.postPlan batch
                 |> Seq.map (fun stop -> stop.id, stop.parentStation)
@@ -485,13 +483,12 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     let parent = parents.[stopTime.stopId]
                     let location = parent |> Option.defaultValue stopTime.stopId
                     let boarding = if parent.IsSome then stopTime.stopId else null
+                    // The version-scoped JDF route-stop key; the package post-pass maps it to the
+                    // line's ordered route_stop slot and its zones.
                     let routeStop = JrUtil.Serving.Identity.routeStopKey row.routeId (string row.sourceRouteVersion) (string row.sourceRouteStopId)
                     nativeCalls.Append(JrUtil.Serving.TripCallWriter.fromGtfs stopTime location boarding routeStop)
                     nativeSummaries.Append(stopTime)
                     nativeSourceCalls.Append(stopTime)
-                    // A route stop is served at one stop place; the post (boarding point) varies by
-                    // trip and direction and is carried by trip_call.boarding_point_id.
-                    nativeRouteStops.Append(row.routeId, routeStop, location)
                     let transferKey = struct (stopTime.tripId, row.sourceRouteStopId)
                     if transferCallQueries.Contains(transferKey) then
                         emittedTransferCalls.Add(transferKey) |> ignore
@@ -508,9 +505,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             nativeCallCount <- nativeCalls.Complete()
             nativeSummaries.Complete()
             nativeSourceCalls.Complete()
-            let routeStopCount = nativeRouteStops.Complete(fun phase count ->
-                reportProgress executionOptions phaseTimer ("route-stops-" + phase) "running" count None "rows" None 1)
-            nativeRelations <- nativeRelations |> Map.add "route_stop" (nativeRouteStopsPath, routeStopCount)
             logPhaseResources "stream-stop-times" phaseTimer
             progressCompleted "stream-stop-times" (int64 stopTimeCount) (Some callFacts.emittedCallCount) "rows"
             Log.Information("Bundle phase: preparing remaining GTFS relations")

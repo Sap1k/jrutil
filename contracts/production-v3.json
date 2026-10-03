@@ -1,7 +1,7 @@
 {
   "bundle_format": "jrutil-production",
-  "bundle_version": 2,
-  "serving_schema_version": 3,
+  "bundle_version": 3,
+  "serving_schema_version": 4,
   "diagnostics_schema_version": 1,
   "identity_contract": "jrutil-identity-v1",
   "required_files": [
@@ -27,6 +27,7 @@
   "compatibility": {
     "regional_overlay_bundle_v1": false,
     "regional_overlay_bundle_v2": false,
-    "obehy_serving_v1": false
+    "obehy_serving_v1": false,
+    "jrutil_production_bundle_v2": false
   }
 }

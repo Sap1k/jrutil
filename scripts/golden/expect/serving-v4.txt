@@ -1,0 +1,27 @@
+# Intended differences for bundle version 3 / serving schema version 4.
+
+# Removed relations: the four zone relations (zones are call-scoped only),
+# route_segment and identifier_alias (never written), and the object_origin and
+# binding_evidence provenance boilerplate (source_trip_map and
+# source_entity_map carry trip and entity provenance).
+file serving/fare_system.parquet
+file serving/fare_zone.parquet
+file serving/location_zone.parquet
+file serving/route_stop_zone.parquet
+file serving/route_segment.parquet
+file serving/identifier_alias.parquet
+file serving/object_origin.parquet
+file serving/binding_evidence.parquet
+
+# Reshaped relations: call_zone carries zone codes, route_stop holds the merged
+# per-direction stop order that trip_call and restrictions point at, and
+# source_trip_map loses the always-null run and duty columns.
+relation call_zone
+relation route_stop
+relation trip_call
+relation travel_restriction_assignment
+relation source_trip_map
+manifest relations
+manifest bundle_version
+manifest serving_schema_version
+diagnostics route_stop_order

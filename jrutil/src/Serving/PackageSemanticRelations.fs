@@ -104,42 +104,11 @@ module PackageSemanticRelations =
                             "valid_from", box binding.valid_from; "valid_to", box binding.valid_to ])
                 | _ -> Seq.empty)
         }
-        let evidence = bindings |> Seq.choose (fun binding ->
-            let sourceId = binding.source_id
-            match snapshots.TryGetValue(sourceId) with
-            | true, digest -> Some (objectRow [
-                "binding_kind", box "trip"; "binding_id", box binding.binding_id
-                "evidence_source_id", box sourceId; "source_snapshot_sha256", box digest
-                "identifier_namespace", box binding.trip_namespace; "source_object_id", box binding.source_trip_id
-                "selection_rule", box (if binding.binding_status = "candidate" then "admissible_static_candidate" else "accepted_static_match") ])
-            | _ -> None)
-        let origins = seq {
-            let rows kind namespaceName table idColumn =
-                CompilerOutput.rows input.gtfs table |> Seq.map (fun row ->
-                    let id = value idColumn row
-                    objectRow [
-                        "object_type", box kind; "object_key", box (Identity.compositeKey [ id ])
-                        "source_id", box defaultSource; "source_snapshot_sha256", box (match snapshots.TryGetValue(defaultSource) with | true, value -> value | _ -> String.replicate 64 "0")
-                        "identifier_namespace", box namespaceName; "source_object_id", box id; "selection_rule", box "source_or_compiler_origin" ])
-            yield! rows "route" "gtfs_route_id" "routes.txt" "route_id"
-            yield! rows "location" "gtfs_stop_id" "stops.txt" "stop_id"
-            yield! rows "trip" "gtfs_trip_id" "trips.txt" "trip_id"
-            yield! rows "shape" "gtfs_shape_id" "shapes.txt" "shape_id" |> Seq.distinctBy (fun row -> row.["object_key"])
-            for transfer in CompilerOutput.rows input.gtfs "transfers.txt" do
-                let selectors = [ "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" ]
-                let key = selectors |> Seq.map (fun name -> value name transfer) |> Identity.compositeKey
-                yield objectRow [
-                    "object_type", box "transfer"; "object_key", box key; "source_id", box defaultSource
-                    "source_snapshot_sha256", box (match snapshots.TryGetValue(defaultSource) with | true, value -> value | _ -> String.replicate 64 "0")
-                    "identifier_namespace", box "gtfs_transfer_selectors"; "source_object_id", box key; "selection_rule", box "source_or_compiler_origin" ]
-        }
         Map [
             "source_entity_map", entities :> seq<_>
             "road_route_key", routeKeys
             "road_trip_key", tripKeys "cis_trip_id" "road"
             "rail_trip_key", tripKeys "train_number" "rail"
-            "binding_evidence", evidence
-            "object_origin", origins
         ]
 
     let internal semanticRelations (nativeCalls: JrUtil.Serving.Model.NativeCallArtifacts option) (input: CompilerOutput.Output) (manifest: JsonElement) =
@@ -153,24 +122,6 @@ module PackageSemanticRelations =
         let callFacts () =
             read "source_call_metadata.parquet"
                 [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
-        let routeStops = seq {
-            let routeByTrip = CompilerOutput.values input.gtfs "trips.txt" [| "trip_id"; "route_id" |] |> Seq.map (fun row -> row.[0], row.[1]) |> dict
-            for row in callFacts () do
-                match routeByTrip.TryGetValue(row.[0]) with
-                | true, route ->
-                    yield objectRow [
-                        "route_id", box route; "route_stop_id", box (Identity.compositeKey [ route; row.[2] ]); "location_id", box row.[3] ]
-                | _ -> ()
-        }
-        let routeStopZonesRaw =
-            readOptional [ "source_route_version" ] "source_route_stop_zone_metadata.parquet" [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order"; "source_route_version" |]
-            |> Seq.toArray
-        let routeStopZones = routeStopZonesRaw |> Seq.map (fun row -> objectRow [
-            "route_id", box row.[0]; "route_stop_id", box (Identity.routeStopKey row.[0] row.[4] row.[1])
-            "zone_id", box row.[2]; "source_order", box (integer row.[3]) ])
-        let semanticZones = routeStopZonesRaw |> Seq.map (fun row -> objectRow [
-            "zone_id", box row.[2]; "fare_system_id", null; "zone_code", box row.[2]; "name", null
-            "source_id", box sourceId; "source_scope", box "route_stop" ])
         let notesRaw () =
             read "source_notice_metadata.parquet"
                 [| "source_notice_id"; "notice_kind"; "gtfs_route_id"; "gtfs_trip_id"; "label"; "text"; "valid_from"; "valid_to"; "service_note_type" |]
@@ -245,9 +196,6 @@ module PackageSemanticRelations =
                     "group_code", box row.[4]; "source_id", box sourceId; "source_snapshot_sha256", box digest
                     "source_object_id", box (Identity.compositeKey [ row.[0]; row.[1]; row.[2]; row.[3]; row.[4] ]) ])
         Map [
-            "route_stop", routeStops
-            "route_stop_zone", routeStopZones
-            "fare_zone", semanticZones
             "service_note", notes
             "service_note_assignment", noteAssignments
             "service_feature_assignment", features

@@ -114,8 +114,8 @@ let internal getGtfsStopsWithPlan (plan: PostEstimationPlan)
                 description = None
                 lat = location |> Option.map (fun value -> value.lat)
                 lon = location |> Option.map (fun value -> value.lon)
-                // GTFS only permits one zone_id. Plural memberships are
-                // represented losslessly in cz_stop_zones.txt.
+                // GTFS only permits one zone_id. Every membership reaches
+                // the serving call_zone through the route-stop zone sidecar.
                 zoneId = zonesByStop |> Map.tryFind jdfStop.id |> Option.flatten
                 url = None
                 locationType = Some GtfsModel.Station

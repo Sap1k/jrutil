@@ -157,6 +157,47 @@ module Validation =
             finally
                 reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
+    /// Hash every non-null key of `fields` in a relation file.
+    let private scanKeys (directory: string) (relation: Schema.Relation) (fields: string array) (consume: uint64 -> string -> unit) =
+        let path = Path.Combine(directory, "serving", relation.name + ".parquet")
+        use stream = File.OpenRead(path)
+        let reader = ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
+        try
+            let dataFields = fields |> Array.map (fun name -> reader.Schema.DataFields |> Array.find (fun field -> field.Name = name))
+            for index in 0 .. reader.RowGroupCount - 1 do
+                use group = reader.OpenRowGroupReader(index)
+                let columns = dataFields |> Array.map (fun field -> keyColumn group field (int group.RowCount))
+                for row in 0 .. int group.RowCount - 1 do
+                    if columns |> Array.forall (fun column -> not (isNull column.[row])) then
+                        let key = columns |> Array.map (fun column -> keyToken column.[row]) |> String.concat "\u001f"
+                        consume (XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(key).AsSpan())) key
+        finally
+            reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
+
+    /// Every declared foreign key must resolve. Null references are allowed;
+    /// target keys are held as 64-bit hashes, one target at a time.
+    let private validateForeignKeys (errors: ResizeArray<string>) (directory: string) =
+        let byName = Schema.relations |> Array.map (fun relation -> relation.name, relation) |> dict
+        let uses =
+            Schema.relations
+            |> Array.collect (fun relation -> relation.foreignKeys |> Array.map (fun key -> relation, key))
+            |> Array.groupBy (fun (_, key) -> key.relation, String.concat "," key.targetFields)
+        for (target, _), references in uses do
+            let targetFields = (snd references.[0]).targetFields
+            let keys = HashSet<uint64>()
+            scanKeys directory byName.[target] targetFields (fun hash _ -> keys.Add(hash) |> ignore)
+            for relation, key in references do
+                let mutable missing = 0L
+                let mutable example = null
+                scanKeys directory relation key.fields (fun hash text ->
+                    if not (keys.Contains(hash)) then
+                        missing <- missing + 1L
+                        if isNull example then example <- text)
+                if missing > 0L then
+                    let fields = String.concat "," key.fields
+                    errors.Add($"serving/{relation.name}.parquet: {missing} rows have ({fields}) missing from {target}, e.g. {example}")
+            reclaimValidationMemory ()
+
     let private validateZip (errors: ResizeArray<string>) (directory: string) =
         let path = Path.Combine(directory, "gtfs.zip")
         if File.Exists(path) then
@@ -243,6 +284,8 @@ module Validation =
                     | true, count -> validateParquet errors root relation count
                     | _ -> errors.Add($"manifest.json: relation is not declared: {relation.name}")
                     reclaimValidationMemory ()
+                // Reference checks need structurally valid relation files.
+                if errors.Count = 0 then validateForeignKeys errors root
             validateZip errors root
             let diagnosticsPath = Path.Combine(root, "diagnostics.json")
             if File.Exists(diagnosticsPath) && FileInfo(diagnosticsPath).Length > 1024L * 1024L then

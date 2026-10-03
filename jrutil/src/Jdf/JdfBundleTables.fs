@@ -372,6 +372,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                     "source_route_version", box routeStop.routeDistinction
                     "source_route_stop_id", box routeStop.routeStopId
                     "zone_id", box (JdfGtfsRules.jdfSourceZoneId routeStop.routeId routeStop.routeDistinction zoneCode)
+                    "zone_code", box zoneCode
                     "zone_order", box index ]))
         |> Seq.distinctBy (fun value ->
             value.["gtfs_route_id"], value.["source_route_version"], value.["source_route_stop_id"], value.["zone_id"])
@@ -691,7 +692,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
         "source_route_stop_zone_metadata.parquet", producer [|
             stringField "gtfs_route_id" false; intField "source_route_version" false
             int64Field "source_route_stop_id" false
-            stringField "zone_id" false; intField "zone_order" false |] routeStopZones
+            stringField "zone_id" false; stringField "zone_code" false; intField "zone_order" false |] routeStopZones
         "source_transfer_metadata.parquet", producer [|
             stringField "source_transfer_id" false; stringField "gtfs_trip_id" false
             int64Field "source_route_stop_id" false; stringField "transfer_type" false

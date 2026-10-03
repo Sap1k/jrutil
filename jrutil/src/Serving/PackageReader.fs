@@ -155,23 +155,13 @@ module PackageReader =
             [| "trip_id"; "cis_line_id"; "cis_trip_id"; "train_number"; "source_trip_ids"; "coverage_sources" |]
             tripKeys
 
-        let routeStopLocations =
-            readTextRows (serving "route_stop") [| "route_id"; "route_stop_id"; "location_id" |]
-            |> Seq.map (fun row -> struct(row.[0], row.[1]), row.[2]) |> dict
-        let zoneFacts =
-            readTextRows (serving "fare_zone") [| "zone_id"; "zone_code"; "fare_system_id"; "source_id" |]
-            |> Seq.map (fun row -> row.[0], row.[1..3]) |> dict
-        let routeStopZones =
-            readTextRows (serving "route_stop_zone") [| "route_id"; "route_stop_id"; "zone_id"; "source_order" |]
-            |> Seq.choose (fun row ->
-                match routeStopLocations.TryGetValue(struct(row.[0], row.[1])), zoneFacts.TryGetValue(row.[2]) with
-                | (true, location), (true, zone) -> Some [| location; row.[2]; zone.[0]; row.[0]; zone.[1]; zone.[2] |]
-                | _ -> None)
+        // Zones are call-scoped only. The overlay appends its regional stop
+        // zones to this (header-only) table and projects base call zones.
         writeCsv (Path.Combine(extensions, "cz_stop_zones.txt"))
             [| "stop_place_id"; "zone_id"; "zone_code"; "route_id"; "ids_system_id"; "source_provenance" |]
-            routeStopZones
+            Seq.empty
         writeCsv (Path.Combine(extensions, "cz_trip_stop_zones.txt"))
             [| "trip_id"; "stop_sequence"; "zone_id"; "zone_code"; "ids_system_id"; "source_provenance" |]
-            (readTextRows (serving "call_zone") [| "trip_id"; "sequence"; "zone_id" |]
-             |> Seq.map (fun row -> [| row.[0]; row.[1]; row.[2]; ""; ""; "serving-v2" |]))
+            (readTextRows (serving "call_zone") [| "trip_id"; "sequence"; "zone_code"; "zone_system" |]
+             |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; row.[2]; row.[3]; "serving-v4" |]))
         gtfs, extensions

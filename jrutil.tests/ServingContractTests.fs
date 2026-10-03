@@ -95,7 +95,7 @@ type ServingContractTests() =
             JrUtil.Serving.Identity.compositeKey [ "jdf:route:000645:1"; "10/west" ])
 
     [<TestMethod>]
-    member _.``Fresh JDF route stop extensions keep public identifier colons readable``() =
+    member _.``Route stops are ordered slots with readable identifiers and call zones``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-readable-route-stop-" + Guid.NewGuid().ToString("N"))
         try
             let stage = staging root
@@ -106,20 +106,42 @@ type ServingContractTests() =
                 replaceRoute relative
             let mapping = Path.Combine(stage, "mappings", "source_to_output_routes.csv")
             write mapping (File.ReadAllText(mapping).Replace(",r,", ",jdf:route:000645:1,"))
-            writeTextParquet (Path.Combine(stage, "source_call_metadata.parquet"))
-                [| "gtfs_trip_id"; "stop_sequence"; "source_route_stop_id"; "gtfs_stop_id" |]
-                [| [| "out"; "1"; "11"; "s1" |]; [| "out"; "2"; "12"; "s2" |] |]
-            writeTextParquet (Path.Combine(stage, "source_route_stop_zone_metadata.parquet"))
-                [| "gtfs_route_id"; "source_route_stop_id"; "zone_id"; "zone_order" |]
-                [| [| "jdf:route:000645:1"; "11"; "zone"; "0" |] |]
+            write (Path.Combine(stage, "extensions", "cz_stop_zones.txt"))
+                "stop_place_id,zone_id,zone_code,route_id,ids_system_id,source_provenance\ns2,z,100,,ids-jmk,ids-jmk-gtfs\n"
+            write (Path.Combine(stage, "extensions", "cz_trip_stop_zones.txt"))
+                "trip_id,stop_sequence,zone_id,zone_code,ids_system_id,source_provenance\nout,1,,P,pid,provider\nout,1,,0,pid,provider\n"
             let output = Path.Combine(root, "output")
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage output
-            let routeStops = parquetStrings (Path.Combine(output, "serving", "route_stop.parquet")) "route_stop_id"
-            CollectionAssert.Contains(routeStops, "jdf:route:000645:1/11")
-            Assert.IsFalse(routeStops |> Array.exists (fun value -> value.Contains("%3A")))
-            let zoneRouteStops = parquetStrings (Path.Combine(output, "serving", "route_stop_zone.parquet")) "route_stop_id"
-            CollectionAssert.Contains(zoneRouteStops, "jdf:route:000645:1/11")
-            Assert.IsFalse(zoneRouteStops |> Array.exists (fun value -> value.Contains("%3A")))
+            let serving name = Path.Combine(output, "serving", name + ".parquet")
+            let routeStops = parquetStrings (serving "route_stop") "route_stop_id"
+            CollectionAssert.AreEqual([| "jdf:route:000645:1/0/s1/1"; "jdf:route:000645:1/0/s2/1" |], routeStops)
+            let schema name = JrUtil.Serving.Schema.relations |> Array.find (fun relation -> relation.name = name)
+            let sequences =
+                JrUtil.Serving.ColumnReader.groups (serving "route_stop") (schema "route_stop")
+                |> Seq.collect (fun columns -> JrUtil.Serving.ColumnReader.int32 columns.[3]) |> Seq.toArray
+            CollectionAssert.AreEqual([| 1; 2 |], sequences)
+            CollectionAssert.AreEqual(routeStops, parquetStrings (serving "trip_call") "route_stop_id")
+            let zones =
+                JrUtil.Serving.ColumnReader.groups (serving "call_zone") (schema "call_zone")
+                |> Seq.collect (fun columns ->
+                    let sequence, order = JrUtil.Serving.ColumnReader.int32 columns.[1], JrUtil.Serving.ColumnReader.int32 columns.[2]
+                    let code, system = JrUtil.Serving.ColumnReader.text columns.[3], JrUtil.Serving.ColumnReader.text columns.[4]
+                    Array.init sequence.Length (fun row -> $"{sequence.[row]}:{order.[row]}:{code.[row]}:{system.[row]}"))
+                |> Seq.toArray
+            CollectionAssert.AreEqual([| "1:0:P:pid"; "1:1:0:pid"; "2:0:100:ids-jmk" |], zones)
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Trips without a direction get their own route stop order``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-null-direction-" + Guid.NewGuid().ToString("N"))
+        try
+            let stage = staging root
+            let trips = Path.Combine(stage, "gtfs-intermediate", "trips.txt")
+            write trips (File.ReadAllText(trips).Replace("out,Two,0,", "out,Two,,"))
+            let output = Path.Combine(root, "output")
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage output
+            let rows = JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output, "serving", "route_stop.parquet")) [| "route_stop_id"; "direction"; "sequence" |] |> Seq.toArray
+            CollectionAssert.AreEqual([| "r/-/s1/1|||1"; "r/-/s2/1|||2" |], rows |> Array.map (fun row -> $"{row.[0]}|||{row.[1]}{row.[2]}"))
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -140,26 +162,6 @@ type ServingContractTests() =
             write first false
             write second true
             CollectionAssert.AreEqual(File.ReadAllBytes(first), File.ReadAllBytes(second))
-        finally Directory.Delete(root, true)
-
-    [<TestMethod>]
-    member _.``Native route stops deduplicate across bounded windows and reject conflicts``() =
-        let root = Path.Combine(Path.GetTempPath(), "jrutil-native-route-stops-" + Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(root) |> ignore
-        try
-            let output = Path.Combine(root, "routes.parquet")
-            do
-                use writer = new JrUtil.Serving.RouteStopWriter.Writer(output, Threading.CancellationToken.None, maximumBufferBytes = 400L)
-                for _ in 1 .. 20 do
-                    for stop in ["3"; "1"; "2"] do writer.Append("r", stop, "location")
-                Assert.AreEqual(3, writer.Complete(fun _ _ -> ()))
-            CollectionAssert.AreEquivalent([| "1"; "2"; "3" |], parquetStrings output "route_stop_id")
-            do
-                use writer = new JrUtil.Serving.RouteStopWriter.Writer(Path.Combine(root, "conflict.parquet"), Threading.CancellationToken.None, maximumBufferBytes = 200L)
-                writer.Append("r", "1", "first")
-                writer.Append("r", "2", "middle")
-                writer.Append("r", "1", "last")
-                Assert.ThrowsExactly<InvalidOperationException>(fun () -> writer.Complete(fun _ _ -> ()) |> ignore) |> ignore
         finally Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -310,6 +312,8 @@ type ServingContractTests() =
             let fields =
                 JrUtil.Serving.Schema.relations |> Array.find (fun relation -> relation.name = "trip_call")
                 |> fun relation -> relation.fields |> Array.map _.name
+            // route_stop_id is assigned by the package post-pass, not the call writer.
+            let fields = fields |> Array.filter ((<>) "route_stop_id")
             let rows path = JrUtil.Serving.PackageReader.readTextRows path fields |> Seq.toArray
             Asserts.assertEqual (rows (Path.Combine(expected, "serving", "trip_call.parquet"))) (rows actual)
             let summary = (JrUtil.Serving.TripCallWriter.readSummaries summaries).["out"]
@@ -386,8 +390,8 @@ type ServingContractTests() =
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage first
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage second
             let result = JrUtil.Serving.Validation.validatePackage first
-            Assert.AreEqual(36, result.relationCount)
-            Assert.AreEqual(39, result.fileCount)
+            Assert.AreEqual(28, result.relationCount)
+            Assert.AreEqual(31, result.fileCount)
             JrUtil.Serving.Validation.compareByteIdentical first second
             Assert.IsFalse(Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
             Assert.IsFalse(Directory.Exists(Path.Combine(first, "extensions")))
@@ -496,9 +500,32 @@ type ServingContractTests() =
     [<TestMethod>]
     member _.``Contract files declare every serving relation``() =
         let root = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, ".."))
-        use document = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "contracts", "serving-v3.json")))
-        let names = document.RootElement.GetProperty("relations").EnumerateArray() |> Seq.map (fun item -> item.GetProperty("name").GetString()) |> Seq.toArray
-        CollectionAssert.AreEqual(JrUtil.Serving.Schema.relationNames, names)
+        use document = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "contracts", "serving-v4.json")))
+        Assert.AreEqual(JrUtil.Serving.Schema.ServingSchemaVersion, document.RootElement.GetProperty("serving_schema_version").GetInt32())
+        let strings (item: JsonElement) = item.EnumerateArray() |> Seq.map (fun value -> value.GetString()) |> Seq.toArray
+        let typeName = function
+            | JrUtil.Serving.Schema.Text -> "string" | JrUtil.Serving.Schema.Int16 -> "int16"
+            | JrUtil.Serving.Schema.Int32 -> "int32" | JrUtil.Serving.Schema.Int64 -> "int64"
+            | JrUtil.Serving.Schema.Float64 -> "double" | JrUtil.Serving.Schema.Boolean -> "bool"
+            | JrUtil.Serving.Schema.Date -> "date32"
+        let declared =
+            document.RootElement.GetProperty("relations").EnumerateArray()
+            |> Seq.map (fun item ->
+                let fields =
+                    item.GetProperty("fields").EnumerateArray()
+                    |> Seq.map (fun field -> $"""{field.GetProperty("name").GetString()}:{field.GetProperty("type").GetString()}:{field.GetProperty("nullable").GetBoolean()}""")
+                let keys =
+                    item.GetProperty("foreign_keys").EnumerateArray()
+                    |> Seq.map (fun key -> $"""{String.Join(",", strings (key.GetProperty("fields")))}->{key.GetProperty("relation").GetString()}({String.Join(",", strings (key.GetProperty("target_fields")))})""")
+                $"""{item.GetProperty("name").GetString()} [{String.Join("; ", fields)}] pk({String.Join(",", strings (item.GetProperty("primary_key")))}) fk[{String.Join("; ", keys)}]""")
+            |> Seq.toArray
+        let expected =
+            JrUtil.Serving.Schema.relations
+            |> Array.map (fun relation ->
+                let fields = relation.fields |> Array.map (fun field -> $"{field.name}:{typeName field.dataType}:{field.nullable}")
+                let keys = relation.foreignKeys |> Array.map (fun key -> $"""{String.Join(",", key.fields)}->{key.relation}({String.Join(",", key.targetFields)})""")
+                $"""{relation.name} [{String.Join("; ", fields)}] pk({String.Join(",", relation.primaryKey)}) fk[{String.Join("; ", keys)}]""")
+        CollectionAssert.AreEqual(expected, declared)
 
     [<TestMethod>]
     member _.``Overlay compiler view is rebuilt from GTFS ZIP and serving identities``() =
@@ -575,7 +602,7 @@ type ServingContractTests() =
             let overlayStage = staging (Path.Combine(root, "overlay-work"))
             for relative in [ "trips.txt"; "stop_times.txt" ] do
                 let path = Path.Combine(overlayStage, "gtfs-intermediate", relative)
-                write path (File.ReadAllText(path).Replace("out", "replacement"))
+                write path (File.ReadAllText(path).Replace(",out,", ",replacement,").Replace("\nout,", "\nreplacement,"))
             let tripExtension = Path.Combine(overlayStage, "extensions", "cz_trips.txt")
             write tripExtension (File.ReadAllText(tripExtension).Replace("out", "replacement"))
             let tripMappings = Path.Combine(overlayStage, "mappings", "source_to_output_trips.csv")
@@ -598,10 +625,7 @@ type ServingContractTests() =
             CollectionAssert.AreEqual([| "replacement" |], relation "travel_restriction_assignment" [| "trip_id" |] |> Array.map (fun row -> row.[0]))
             Assert.AreEqual(2, relation "route_stop" [| "route_stop_id" |] |> Array.length)
             Assert.IsTrue(relation "route_stop" [| "route_stop_id" |] |> Array.forall (fun row -> not (row.[0].Contains("%3A"))))
-            Assert.AreEqual(1, relation "route_stop_zone" [| "zone_id" |] |> Array.length)
             Assert.AreEqual(1, relation "location_feature" [| "location_id" |] |> Array.length)
-            Assert.IsTrue(relation "fare_zone" [| "zone_id"; "zone_code" |] |> Array.exists (fun row -> row = [| "call-zone"; "CZ" |]))
-            Assert.IsTrue(relation "route_stop_zone" [| "zone_id" |] |> Array.exists (fun row -> row.[0] = "zone"))
             Assert.IsFalse(relation "call_zone" [| "trip_id" |] |> Array.exists (fun row -> row.[0] = "out"))
             Assert.IsFalse(relation "transfer" [| "from_trip_id" |] |> Array.exists (fun row -> row.[0] = "out"))
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output, "manifest.json")))

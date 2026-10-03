@@ -51,16 +51,8 @@ module PackageBaseRelations =
                 |> Seq.map (fun (trip, values) ->
                     trip, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
                 |> dict
-            let projectionsByObjectKey =
-                projections
-                |> Seq.map (fun pair -> Identity.compositeKey [ pair.Key ], pair.Value)
-                |> dict
             let projectTrip trip =
                 match projections.TryGetValue(trip) with
-                | true, targets -> targets :> seq<_>
-                | _ -> Seq.empty
-            let projectObjectTrip key =
-                match projectionsByObjectKey.TryGetValue(key) with
                 | true, targets -> targets :> seq<_>
                 | _ -> Seq.empty
             let nullableText name (row: IDictionary<string,obj>) =
@@ -134,10 +126,6 @@ module PackageBaseRelations =
                             "route_stop", unbox<string> row.["source_route_stop_id"]
                             "group", unbox<string> row.["group_code"] ])
                         result))
-            let routeStops = direct "route_stop" |> Seq.filter (fun row ->
-                targetRoutes.Contains(unbox<string> row.["route_id"])
-                && targetLocations.Contains(unbox<string> row.["location_id"]))
-            let routeStopZones = direct "route_stop_zone" |> Seq.filter (fun row -> targetRoutes.Contains(unbox<string> row.["route_id"]))
             let entities = direct "source_entity_map" |> Seq.filter (fun row ->
                 let target = unbox<string> row.["public_id"]
                 match unbox<string> row.["entity_kind"] with
@@ -145,24 +133,7 @@ module PackageBaseRelations =
                 | "stop_place" | "boarding_point" | "location" -> targetLocations.Contains(target)
                 | _ -> true)
             let routeKeys = direct "road_route_key" |> Seq.filter (fun row -> targetRoutes.Contains(unbox<string> row.["route_id"]))
-            let origins = direct "object_origin" |> Seq.collect (fun row ->
-                let kind = unbox<string> row.["object_type"]
-                let key = unbox<string> row.["object_key"]
-                if kind = "trip" then
-                    projectObjectTrip key |> Seq.map (fun struct(target, _) ->
-                        let projected = Identity.compositeKey [ target ]
-                        if projected = key then row else setField "object_key" (box projected) row)
-                elif kind = "call" then
-                    let separator = key.LastIndexOf('/')
-                    if separator < 0 then Seq.empty else
-                    let trip, suffix = key.Substring(0, separator), key.Substring(separator)
-                    projectObjectTrip trip |> Seq.map (fun struct(target, _) ->
-                        let projected = Identity.compositeKey [ target ] + suffix
-                        if projected = key then row else setField "object_key" (box projected) row)
-                else Seq.singleton row)
             Map [
-                "fare_system", direct "fare_system"
-                "fare_zone", direct "fare_zone"
                 "service_note", notes
                 "service_note_assignment", noteAssignments
                 "service_feature_assignment", features
@@ -171,9 +142,6 @@ module PackageBaseRelations =
                 "travel_restriction_assignment", restrictions
                 "source_entity_map", entities
                 "road_route_key", routeKeys
-                "object_origin", origins
-                "route_stop", routeStops
-                "route_stop_zone", routeStopZones
             ]
 
     /// Deduplicate a generic relation by primary key without sorting it.

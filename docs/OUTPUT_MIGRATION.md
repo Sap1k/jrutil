@@ -21,4 +21,12 @@ JDF trip ids are `jdf:trip:<line>:<yymmdd>[:det][:<hash>][:pN]:<trip>`, keyed by
 - The overlay requires a production base package and records `--converter-version` as the manifest `compiler`, like `jdf-to-bundle`.
 - Removed options: `--stop-ids-cis`, `--international-route-overrides`, `--sr70-name20`, `--cache`, `--by-id`, `--audit-date`, `--policy-grid`, `--block-mode`, `--stop-coords-by-id`. Removed commands: `jdf-to-gtfs`, `czptt-to-gtfs`, `regional-gtfs-overlay-all`, `jdf-validate-post-inference`, `jdf-replay-post-inference`.
 
-Oběhy accepts only bundle version 2 with serving schema version 3.
+## Bundle version 3 (serving schema 4)
+
+- Zones are call-scoped only. `fare_system`, `fare_zone`, `location_zone` and `route_stop_zone` are removed. `call_zone` is `(trip_id, sequence, source_order, zone_code, zone_system)`. JDF writes its Zaslinky zone tokens onto every served call; the overlay writes IDS JMK stop zones onto the calls at those places. GTFS `stops.zone_id` is unchanged.
+- `route_stop` is the merged, ordered stop list per route direction (`route_id, route_stop_id, direction, sequence, location_id`), derived from the final calls of every producer. `trip_call.route_stop_id` is filled for JDF, overlay and CZPTT calls. The previous JDF version-scoped keys are replaced. Route-scoped travel restrictions get one row per reached slot.
+- Removed relations: `route_segment` and `identifier_alias` (never written), `object_origin` and `binding_evidence` (provenance is in `source_trip_map` and `source_entity_map`).
+- `source_trip_map` loses `source_run_id` and `source_duty_id`, which no source filled.
+- `validate-package` checks every declared foreign key.
+
+Oběhy accepts only bundle version 3 with serving schema version 4.
