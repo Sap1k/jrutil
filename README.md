@@ -316,6 +316,34 @@ indefinitely. Pass the same `--gvd-year` to `jdf-to-bundle` to record the GVD as
 the package `service_horizon`. `regional-gtfs-overlay` rejects a base package
 whose horizon belongs to a different GVD.
 
+### Stop ID registry
+
+Without a registry, `merge-jdf` numbers stops with a counter in merge order, so
+`jdf:stop:N` changes whenever batches are added, removed or renamed.
+`--stop-registry=DIR` reads the reviewed, append-only registry kept in
+jrunify-ext-geodata (`registry/`):
+
+- **`merge-jdf`** loads every `stops.csv` row into the stop reconciler before
+  the first batch. A stop that matches a registered identity takes its number
+  whatever the batch order. Reference coordinates get the usual 75 m check
+  against precise incoming locations, which is how registered stops with the
+  same name are told apart; without a precise location such a stop is
+  quarantined. Any other stop gets
+  a provisional number of at least `1000000000`, hashed from its normalized
+  name, okres and country, so it is stable before review too.
+- **`jdf-to-bundle`** matches inferred post locations to the `est:<k>` rows of
+  `posts.csv` within 25 m, closest pairs first, and keeps their ordinals. New
+  locations take the next ordinal above every registered one.
+- **`regional-gtfs-overlay`** uses `overlay_places.csv` IDs for source-native
+  stop places instead of the hash of the source group.
+
+`--stop-registry-candidates=FILE` writes what the registry is missing for
+review: unregistered stops and new spellings of registered ones, new post
+ordinals, or unpinned overlay places. `registry.py promote` in
+jrunify-ext-geodata adds reviewed rows. `source_stop_metadata.parquet` records
+`okres` and `stop_id_provisional`; the flag means something only for a merge
+that used the registry.
+
 ## Parallelism and memory budgets
 
 The multitool accepts `--jobs=<count|auto>` and

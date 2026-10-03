@@ -78,7 +78,9 @@ let overlay (ctx: CommandContext) =
             outputBundle = argValue args "<overlay-bundle-out>"
             converterVersion = argValue args "--converter-version"
             diagnosticsOutput = optArgValue args "--diagnostics-out"
-            diagnosticTraces = argFlagSet args "--diagnostic-traces" }
+            diagnosticTraces = argFlagSet args "--diagnostic-traces"
+            stopRegistry = optArgValue args "--stop-registry" |> Option.map StopRegistry.load
+            stopRegistryCandidatesPath = optArgValue args "--stop-registry-candidates" }
     Log.Information(
         "Regional overlay complete: sources={Sources}; matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}",
         String.concat "," result.sources, result.aggregate.matchedTrips,

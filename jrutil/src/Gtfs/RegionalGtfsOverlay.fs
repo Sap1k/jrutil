@@ -12,8 +12,8 @@ let resolveFullHeadsign raw destinations = Support.resolveFullHeadsign raw desti
 
 // A method boundary ends the lifetime of matching-only indexes before projection.
 [<System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)>]
-let private analyzeSource prepared =
-    let source, indexes = SourceAnalysis.analyze { prepared = prepared }
+let private analyzeSource prepared pinnedStopPlaces =
+    let source, indexes = SourceAnalysis.analyze { prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }
     let matches = TripMatching.matchTrips { prepared = prepared; source = source; indexes = indexes }
     source, matches
 
@@ -35,7 +35,19 @@ let compile (options: CompilationOptions) =
         baseBundle = options.baseBundle
         outputBundle = options.outputBundle
     }
-    let source, matches = analyzeSource prepared
+    let pinnedStopPlaces =
+        let pinned = System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
+        options.stopRegistry
+        |> Option.iter (fun registry ->
+            for place in registry.overlayPlaces do
+                pinned.[SourceAnalysis.pinnedPlaceKey place.sourceId place.groupKey] <- place.placeId)
+        pinned :> System.Collections.Generic.IReadOnlyDictionary<string, string>
+    let source, matches = analyzeSource prepared pinnedStopPlaces
+    options.stopRegistryCandidatesPath
+    |> Option.iter (fun path ->
+        let rows = SourceAnalysis.stopPlaceRegistryCandidates prepared source pinnedStopPlaces
+        JrUtil.StopRegistry.writeCsv path JrUtil.StopRegistry.overlayPlaceCandidatesHeader rows
+        Serilog.Log.Information("Wrote {Count} overlay stop-place registry candidates to {Path}", rows.Length, path))
     Runtime.releaseAnalysisMemory ()
     let projection = Projection.resolve { prepared = prepared; source = source; matches = matches }
     let result = BundleWriter.write {

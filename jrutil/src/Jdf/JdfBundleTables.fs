@@ -319,6 +319,8 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                 "district", nullableObj stop.district
                 "nearby_place", nullableObj stop.nearbyPlace
                 "country", nullableObj stop.country
+                "okres", nullableObj stop.regionId
+                "stop_id_provisional", box (stop.id >= StopRegistry.provisionalBase)
                 "coordinates_missing", box coordinatesMissing
                 "coordinate_precision", box coordinatePrecision
                 "coordinate_source", nullableObj (stopLocationSources |> Map.tryFind stop.id) ])
@@ -680,7 +682,8 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
         "source_stop_metadata.parquet", producer [|
             stringField "gtfs_stop_id" false; stringField "town" false
             stringField "district" true; stringField "nearby_place" true
-            stringField "country" true; boolField "coordinates_missing" false
+            stringField "country" true; stringField "okres" true
+            boolField "stop_id_provisional" false; boolField "coordinates_missing" false
             stringField "coordinate_precision" false; stringField "coordinate_source" true |] stopPlaces
         "source_location_feature_metadata.parquet", producer [|
             stringField "gtfs_stop_id" false; stringField "source_code" false

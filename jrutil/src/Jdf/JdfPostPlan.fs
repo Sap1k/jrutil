@@ -228,3 +228,38 @@ let internal callIsUsable (call: JdfModel.TripStop) =
     | Some JdfModel.Passing, _ | Some JdfModel.NotPassing, _ -> false
     | None, None -> false
     | _ -> true
+
+/// Replace location-order ordinals with registry-pinned ones. Registered
+/// inferred posts are matched by reference coordinate, so an `est:<k>` ID
+/// survives changes in the evidence that produced the location. Returns the
+/// plan and review rows (`StopRegistry.postCandidatesHeader`) for locations
+/// that took a new ordinal.
+let applyStopRegistry (registry: StopRegistry.StopRegistry) (plan: PostEstimationPlan) =
+    let registeredByStop = registry.posts |> Array.groupBy _.stopId |> dict
+    let assignments =
+        plan.inferredLocations
+        |> Array.groupBy _.stopId
+        |> Array.sortBy fst
+        |> Array.map (fun (stopId, selections) ->
+            let registered =
+                match registeredByStop.TryGetValue(stopId) with
+                | true, posts -> posts
+                | false, _ -> [||]
+            let locations =
+                selections
+                |> Array.distinctBy _.locationId
+                |> Array.map (fun selection -> selection.locationId, float selection.lat, float selection.lon)
+            stopId, StopRegistry.assignInferredPostOrdinals registered locations)
+    let ordinals =
+        assignments
+        |> Seq.collect (fun (stopId, (ordinals, _)) ->
+            ordinals |> Map.toSeq |> Seq.map (fun (locationId, ordinal) -> (stopId, locationId), ordinal))
+        |> Map.ofSeq
+    let candidates =
+        assignments
+        |> Array.collect (fun (stopId, (_, fresh)) ->
+            fresh
+            |> Array.map (fun (_, ordinal, lat, lon) ->
+                [| string stopId; $"est:{ordinal}"
+                   StopRegistry.formatCoordinate lat; StopRegistry.formatCoordinate lon; "new" |]))
+    { plan with inferredLocationOrdinals = ordinals }, candidates

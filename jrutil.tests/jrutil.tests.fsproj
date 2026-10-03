@@ -15,6 +15,7 @@
     <Compile Include="HolidayTests.fs" />
     <Compile Include="StopMatcherTests.fs" />
     <Compile Include="JdfFixupsTests.fs" />
+    <Compile Include="StopRegistryTests.fs" />
     <Compile Include="JdfMergerTests.fs" />
     <Compile Include="ExternalCsvTests.fs" />
     <Compile Include="JdfToGtfsTests.fs" />

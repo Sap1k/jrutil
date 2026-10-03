@@ -122,7 +122,7 @@ let private compatibleOptional left right =
     | Some left, Some right -> StringComparer.OrdinalIgnoreCase.Equals(left, right)
     | _ -> true
 
-let private compatibleLocality (left: Stop) (right: Stop) =
+let compatibleLocality (left: Stop) (right: Stop) =
     compatibleOptional left.country right.country
     && compatibleOptional left.regionId right.regionId
 
@@ -159,6 +159,15 @@ let private levenshteinSimilarity (left: string) (right: string) =
                         substitution
             Array.Copy(current, previous, current.Length)
         1.0 - float previous.[right.Length] / float (max left.Length right.Length)
+
+/// Order-independent identity of a stop name: normalized components joined
+/// with a unit separator, as used by exact reconciliation.
+let stopIdentityKey (stop: Stop) =
+    componentKey (normalizeStopName stop).components
+
+/// Levenshtein similarity of the flattened normalized names.
+let stopNameSimilarity (left: Stop) (right: Stop) =
+    levenshteinSimilarity (normalizeStopName left).flattened (normalizeStopName right).flattened
 
 let private preciseProjected (location: StopLocation option) =
     location
