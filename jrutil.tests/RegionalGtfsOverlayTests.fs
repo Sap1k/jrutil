@@ -88,13 +88,13 @@ type RegionalGtfsOverlayTests() =
         (RegionalGtfsOverlay.compile {
             auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
             bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
-            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }).aggregate
+            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None }).aggregate
 
     let executeAll policy gvdYear bindings basePath output =
         RegionalGtfsOverlay.compile {
             auditDate = None; policyPath = policy; gvdYear = gvdYear
             bindings = bindings; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
-            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true }
+            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None }
 
     let policyJson = """{
       "schema_version": 4,
@@ -520,6 +520,31 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(czRoutes.Contains(outputRouteId) && czRoutes.Contains(cis))
             let stopMappings = File.ReadAllText(diagnosticPath output "traces" "source_to_output_stops.csv")
             Assert.IsTrue(stopMappings.Split('\n') |> Array.exists (fun line -> line.Contains("\"sf\"") && line.Contains("source_native")))
+            // A reviewed stop-place ID replaces the hashed one, and only
+            // unpinned places are listed for review.
+            let overlayAll = Path.Combine(Path.GetDirectoryName(policy), "overlay-all-registry.json")
+            write overlayAll ($"{{\"schema_version\":1,\"sources\":[{{\"source_id\":\"{binding.sourceId}\",\"policy\":\"{Path.GetFileName(policy)}\",\"adapter\":\"pid-v1\"}}]}}")
+            let compileWithRegistry registry candidates output =
+                RegionalGtfsOverlay.compile {
+                    auditDate = Some (NodaTime.LocalDate(2025, 12, 15)); policyPath = overlayAll; gvdYear = 2026
+                    bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output
+                    converterVersion = "test-commit"; diagnosticsOutput = None; diagnosticTraces = false
+                    stopRegistry = Some registry; stopRegistryCandidatesPath = Some candidates } |> ignore
+            let emptyRegistry: StopRegistry.StopRegistry = { stops = [||]; posts = [||]; overlayPlaces = [||]; sha256 = "test" }
+            let candidates = Path.Combine(root, "candidates.csv")
+            compileWithRegistry emptyRegistry candidates (Path.Combine(root, "output-unpinned"))
+            let candidateRows = File.ReadAllLines(candidates)
+            Assert.AreEqual(String.Join(",", StopRegistry.overlayPlaceCandidatesHeader), candidateRows.[0])
+            Assert.IsTrue(candidateRows.Length >= 2)
+            let fields = (FSharp.Data.CsvFile.Parse(File.ReadAllText(candidates)).Rows |> Seq.head).Columns
+            Assert.IsTrue(fields.[2].StartsWith("overlay:pid-gtfs:stop-place:", StringComparison.Ordinal))
+            let pinned = {
+                emptyRegistry with
+                    overlayPlaces = [| { sourceId = fields.[0]; groupKey = fields.[1]; placeId = "overlay:pid-gtfs:stop-place:pinned" } |] }
+            let pinnedOutput = Path.Combine(root, "output-pinned")
+            compileWithRegistry pinned candidates pinnedOutput
+            Assert.IsTrue((readGtfs pinnedOutput "stops.txt").Contains("overlay:pid-gtfs:stop-place:pinned"))
+            Assert.AreEqual(candidateRows.Length - 1, File.ReadAllLines(candidates).Length)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 

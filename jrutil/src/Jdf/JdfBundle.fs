@@ -194,6 +194,21 @@ let private capturePostInferenceEvidenceOnly snapshotDescriptorPath converterVer
               peakSpillBytes=captured.PeakSpillBytes
               maximumWorkers=executionOptions.maximumWorkers }))
 
+/// Pin inferred post ordinals to the stop registry when one is configured,
+/// and write the newly numbered posts for review.
+let private applyPostRegistry (options: BundleOptions) (plan: JdfPostPlan.PostEstimationPlan) =
+    match options.stopRegistry with
+    | None -> plan
+    | Some registry ->
+        let pinned, candidates = JdfPostPlan.applyStopRegistry registry plan
+        Log.Information(
+            "Stop registry {Sha256}: {Inferred} inferred post locations, {New} new ordinals",
+            registry.sha256, plan.inferredLocations.Length, candidates.Length)
+        options.stopRegistryCandidatesPath
+        |> Option.iter (fun path ->
+            StopRegistry.writeCsv path StopRegistry.postCandidatesHeader candidates)
+        pinned
+
 let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPath =
     let snapshotDescriptorPath = executionOptions.snapshotDescriptorPath
     let converterVersion = executionOptions.converterVersion
@@ -403,6 +418,7 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                         let policy,scorer = livePolicy.Value
                         JdfPostInferenceEvaluator.evaluateWithScorer false evidenceStore policy scorer
                         |> JdfPostPlan.postEstimationPlanFromInferenceResult
+                        |> applyPostRegistry executionOptions
                     progressCompleted "evaluate-post-inference" manifest.routePointEvidenceCount
                                       (Some manifest.routePointEvidenceCount) "rows"
                     JdfToGtfs.prepareGtfsFeedForStreamingBundleWithCalendarAndPostPlan

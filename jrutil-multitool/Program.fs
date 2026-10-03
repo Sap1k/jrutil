@@ -61,6 +61,8 @@ Options:
     --osm-pbf=FILE              Shared regional OSM PBF for CZPTT coordinate gaps
     --osm-aliases=FILE          Reviewed CZPTT identity-to-OSM-object aliases
     --progress-events           Emit versioned JRUTIL_PROGRESS JSON lines
+    --stop-registry=DIR         Reviewed stop ID registry (stops.csv, posts.csv, overlay_places.csv)
+    --stop-registry-candidates=FILE  Write unregistered stops, posts or places for registry review
 """
 
 /// Command name, the error logged when it throws (None lets the exception

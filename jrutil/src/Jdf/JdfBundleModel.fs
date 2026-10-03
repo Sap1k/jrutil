@@ -140,6 +140,10 @@ type BundleOptions = {
     progress: BundleProgressEvent -> unit
     /// GVD the merged JDF was bounded to (merge-jdf --gvd-year); recorded in the manifest
     gvdYear: int option
+    /// Pins inferred post ordinals (`posts.csv`) when set.
+    stopRegistry: StopRegistry.StopRegistry option
+    /// Review CSV for inferred posts that took a new ordinal.
+    stopRegistryCandidatesPath: string option
 }
 
 /// Callers must set snapshotDescriptorPath and converterVersion.
@@ -163,4 +167,6 @@ let defaultBundleOptions = {
     diagnosticTraces = false
     progress = ignore
     gvdYear = None
+    stopRegistry = None
+    stopRegistryCandidatesPath = None
 }

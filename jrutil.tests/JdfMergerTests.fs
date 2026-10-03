@@ -237,6 +237,112 @@ type JdfMergerTests() =
             (stopDisplayName forward.batch.stops.[0])
             (stopDisplayName reverse.batch.stops.[0])
 
+    member _.registryStop id town district nearby reference : StopRegistry.RegistryStop = {
+        id = id
+        town = town
+        district = district
+        nearbyPlace = nearby
+        regionId = Some "UL"
+        country = Some "CZ"
+        reference = reference
+        retired = false
+        mergedInto = None
+    }
+
+    member _.registry stops : StopRegistry.StopRegistry =
+        { stops = stops; posts = [||]; overlayPlaces = [||]; sha256 = "test" }
+
+    member _.mergeWithRegistry(registry, batches) =
+        let merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsByName, stopRegistry = registry)
+        batches |> Seq.iter merger.add
+        merger
+
+    member this.registryIdsByName(registry, batches) =
+        let merger = this.mergeWithRegistry(registry, batches)
+        merger.batch.stops
+        |> Array.map (fun value -> stopDisplayName value, value.id)
+        |> Array.sort
+
+    [<TestMethod>]
+    member this.``Registered stops keep their numbers whatever the batch order``() =
+        let registry =
+            this.registry [|
+                this.registryStop 7L "Most" (Some "nádraží") None None
+                this.registryStop 3L "Litvínov" (Some "Citadela") None None
+            |]
+        let first = emptyBatch [| stop 1L "Litvínov" (Some "Citadela") None [||]; stop 2L "Žatec" None (Some "náměstí") [||] |] [||] [||]
+        let second = emptyBatch [| stop 1L "Most" (Some "nádraží") None [||]; stop 2L "Louny" None (Some "nádraží") [||] |] [||] [||]
+        let third = emptyBatch [| stop 5L "Most" (Some "nádraží") None [||] |] [||] [||]
+        let forward = this.registryIdsByName(registry, [ first; second; third ])
+        let backward = this.registryIdsByName(registry, [ third; second; first ])
+        assertEqual forward backward
+        let ids = Map.ofArray forward
+        assertEqual 7L ids.["Most,nádraží"]
+        assertEqual 3L ids.["Litvínov,Citadela"]
+        Assert.IsTrue(ids.["Žatec,náměstí"] >= StopRegistry.provisionalBase)
+        Assert.IsTrue(ids.["Louny,nádraží"] >= StopRegistry.provisionalBase)
+
+    [<TestMethod>]
+    member this.``Unregistered stops are listed with deterministic provisional numbers``() =
+        let registry = this.registry [| this.registryStop 1L "Most" (Some "nádraží") None None |]
+        let batch = emptyBatch [| stop 4L "Bílina" (Some "lázně") None [||] |] [| precise 4L 50.5480M 13.7752M |] [||]
+        let merger = this.mergeWithRegistry(registry, [ batch ])
+        let provisional = merger.batch.stops.[0].id
+        assertEqual provisional (this.mergeWithRegistry(registry, [ batch ])).batch.stops.[0].id
+        let candidates = merger.stopRegistryCandidates
+        assertEqual 1 candidates.Length
+        assertEqual
+            [| string provisional; "Bílina"; "lázně"; ""; "UL"; "CZ"; "50.548000"; "13.775200"; "new"; "" |]
+            candidates.[0]
+
+    [<TestMethod>]
+    member this.``Same-named registered stops are split by reference coordinates``() =
+        let registry =
+            this.registry [|
+                this.registryStop 1L "Babice" None (Some "hřbitov") (Some (49.12776, 17.474625))
+                this.registryStop 2L "Babice" None (Some "hřbitov") (Some (49.14000, 17.474625))
+            |]
+        let near second = emptyBatch [| stop 9L "Babice" None (Some "hřbitov") [||] |] [| precise 9L (if second then 49.1399M else 49.1278M) 17.4746M |] [||]
+        assertEqual 2L (this.mergeWithRegistry(registry, [ near true ])).batch.stops.[0].id
+        assertEqual 1L (this.mergeWithRegistry(registry, [ near false ])).batch.stops.[0].id
+        let elsewhere = emptyBatch [| stop 9L "Babice" None (Some "hřbitov") [||] |] [| precise 9L 49.2M 17.4746M |] [||]
+        Assert.IsTrue((this.mergeWithRegistry(registry, [ elsewhere ])).batch.stops.[0].id >= StopRegistry.provisionalBase)
+        let unlocated = emptyBatch [| stop 9L "Babice" None (Some "hřbitov") [||] |] [||] [||]
+        let quarantined = this.mergeWithRegistry(registry, [ unlocated ])
+        Assert.IsTrue(quarantined.batch.stops.[0].id >= StopRegistry.provisionalBase)
+        assertEqual "ambiguous" quarantined.stopRegistryCandidates.[0].[8]
+
+    [<TestMethod>]
+    member this.``A new spelling of a registered stop is offered as an alias``() =
+        let registry =
+            this.registry [| this.registryStop 4L "Horní Jiřetín" (Some "Dolní Jiřetín") (Some "rozcestí") None |]
+        let short = emptyBatch [| stop 1L "Dolní Jiřetín" (Some "rozcestí") None [||] |] [||] [||]
+        let merger = this.mergeWithRegistry(registry, [ short ])
+        assertEqual 4L merger.batch.stops.[0].id
+        let candidates = merger.stopRegistryCandidates
+        assertEqual 1 candidates.Length
+        assertEqual "alias" candidates.[0].[8]
+        assertEqual "4" candidates.[0].[9]
+
+    [<TestMethod>]
+    member this.``Merged registry numbers resolve to the surviving number``() =
+        let registry =
+            this.registry [|
+                this.registryStop 1L "Most" (Some "nádraží") None None
+                { this.registryStop 2L "Most" (Some "hlavní nádraží") None None with mergedInto = Some 1L }
+            |]
+        let batch = emptyBatch [| stop 3L "Most" (Some "hlavní nádraží") None [||] |] [||] [||]
+        let merger = this.mergeWithRegistry(registry, [ batch ])
+        assertEqual 1L merger.batch.stops.[0].id
+        assertEqual 0 merger.stopRegistryCandidates.Length
+
+    [<TestMethod>]
+    member _.``Provisional numbers probe past collisions``() =
+        let first = StopRegistry.provisionalStopId "a" (fun _ -> false)
+        let second = StopRegistry.provisionalStopId "a" (fun value -> value = first)
+        Assert.IsTrue(first >= StopRegistry.provisionalBase && first < 2L * StopRegistry.provisionalBase)
+        assertEqual (if first = 2L * StopRegistry.provisionalBase - 1L then StopRegistry.provisionalBase else first + 1L) second
+
     [<TestMethod>]
     member _.``By-ID strategy does not reconcile distinct IDs``() =
         let first = stop 100L "Ústí n.L." (Some "hl.nádr.") None [||]
