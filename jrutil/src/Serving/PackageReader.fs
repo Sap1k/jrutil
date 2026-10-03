@@ -160,8 +160,24 @@ module PackageReader =
         writeCsv (Path.Combine(extensions, "cz_stop_zones.txt"))
             [| "stop_place_id"; "zone_id"; "zone_code"; "route_id"; "ids_system_id"; "source_provenance" |]
             Seq.empty
+        // Per-call zones for the compiler: slot zones expanded onto every call
+        // at the slot, then the call-scoped exceptions.
+        let slotZones =
+            readTextRows (serving "route_stop_zone") [| "route_stop_id"; "source_order"; "zone_code"; "zone_system" |]
+            |> Seq.groupBy (fun row -> row.[0])
+            |> Seq.map (fun (slot, rows) ->
+                slot, rows |> Seq.sortBy (fun row -> int row.[1]) |> Seq.map (fun row -> row.[2], row.[3]) |> Seq.toArray)
+            |> dict
+        let expanded = seq {
+            if slotZones.Count > 0 then
+                for row in readTextRows (serving "trip_call") [| "trip_id"; "sequence"; "route_stop_id" |] do
+                    match slotZones.TryGetValue(row.[2]) with
+                    | true, zones -> for code, system in zones do yield [| row.[0]; row.[1]; ""; code; system; "serving-v4" |]
+                    | _ -> ()
+            for row in readTextRows (serving "call_zone") [| "trip_id"; "sequence"; "zone_code"; "zone_system" |] do
+                yield [| row.[0]; row.[1]; ""; row.[2]; row.[3]; "serving-v4" |]
+        }
         writeCsv (Path.Combine(extensions, "cz_trip_stop_zones.txt"))
             [| "trip_id"; "stop_sequence"; "zone_id"; "zone_code"; "ids_system_id"; "source_provenance" |]
-            (readTextRows (serving "call_zone") [| "trip_id"; "sequence"; "zone_code"; "zone_system" |]
-             |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; row.[2]; row.[3]; "serving-v4" |]))
+            expanded
         gtfs, extensions

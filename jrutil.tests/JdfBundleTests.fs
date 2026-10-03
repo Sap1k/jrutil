@@ -250,7 +250,7 @@ type JdfBundleTests() =
             JrUtil.Serving.Validation.compareByteIdentical first second
 
             let files = Directory.GetFiles(first, "*", SearchOption.AllDirectories)
-            assertEqual 31 files.Length
+            assertEqual 33 files.Length
             assertEqual false (Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
             assertEqual false (File.Exists(Path.Combine(first, "source_call_metadata.parquet")))
 
@@ -258,18 +258,22 @@ type JdfBundleTests() =
             assertEqual "jrutil-production" (manifest.RootElement.GetProperty("bundle_format").GetString())
             assertEqual 3 (manifest.RootElement.GetProperty("bundle_version").GetInt32())
             assertEqual 4 (manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
-            assertEqual 28 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
+            assertEqual 30 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
 
             let relation name columns =
                 JrUtil.Serving.PackageReader.readTextRows
                     (Path.Combine(first, "serving", name + ".parquet")) columns
                 |> Seq.toArray
             assertEqual true ((relation "source_call_map" [|"binding_id"; "source_sequence"; "call_sequence"|]).Length > 0)
-            // Zaslinky zone tokens land on every served call of their route stop, in source order.
-            let callZones = relation "call_zone" [|"trip_id"; "sequence"; "source_order"; "zone_code"|]
+            // Zaslinky zone tokens stay on their route stop (slot) when all its calls agree.
+            let slotZones = relation "route_stop_zone" [|"route_stop_id"; "source_order"; "zone_code"|]
             assertEqual
-                [ "jdf:trip:586001:260101:1/0/0/6"; "jdf:trip:586001:260101:1/0/1/193"; "jdf:trip:586001:260101:1/1/0/193" ]
-                (callZones |> Seq.map (String.concat "/") |> Seq.sort |> Seq.toList)
+                [ "jdf:route:586001/1/jdf:stop:100/1|0|6"; "jdf:route:586001/1/jdf:stop:100/1|1|193"; "jdf:route:586001/1/jdf:stop:200/1|0|193" ]
+                (slotZones |> Seq.map (String.concat "|") |> Seq.sort |> Seq.toList)
+            assertEqual 0 (relation "call_zone" [|"trip_id"|]).Length
+            assertEqual
+                [ "jdf:stop:100|193"; "jdf:stop:100|6"; "jdf:stop:200|193" ]
+                (relation "location_zone" [|"location_id"; "zone_code"|] |> Seq.map (String.concat "|") |> Seq.sort |> Seq.toList)
             // Each served call points at an ordered slot of its line direction.
             let routeStops = relation "route_stop" [|"route_id"; "route_stop_id"; "direction"; "sequence"; "location_id"|]
             let slotIds = routeStops |> Seq.map (fun row -> row.[1]) |> set

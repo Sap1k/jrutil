@@ -691,6 +691,42 @@
       ]
     },
     {
+      "name": "location_zone",
+      "fields": [
+        {
+          "name": "location_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "zone_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "zone_system",
+          "type": "string",
+          "nullable": false
+        }
+      ],
+      "primary_key": [
+        "location_id",
+        "zone_code",
+        "zone_system"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "location_id"
+          ],
+          "relation": "location",
+          "target_fields": [
+            "location_id"
+          ]
+        }
+      ]
+    },
+    {
       "name": "service_note",
       "fields": [
         {
@@ -1737,6 +1773,54 @@
           "relation": "location",
           "target_fields": [
             "location_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "route_stop_zone",
+      "fields": [
+        {
+          "name": "route_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "route_stop_id",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "source_order",
+          "type": "int32",
+          "nullable": false
+        },
+        {
+          "name": "zone_code",
+          "type": "string",
+          "nullable": false
+        },
+        {
+          "name": "zone_system",
+          "type": "string",
+          "nullable": true
+        }
+      ],
+      "primary_key": [
+        "route_id",
+        "route_stop_id",
+        "source_order"
+      ],
+      "foreign_keys": [
+        {
+          "fields": [
+            "route_id",
+            "route_stop_id"
+          ],
+          "relation": "route_stop",
+          "target_fields": [
+            "route_id",
+            "route_stop_id"
           ]
         }
       ]

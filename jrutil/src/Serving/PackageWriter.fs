@@ -145,7 +145,8 @@ module PackageWriter =
             "route_stop_order", box (dict [
                 "route_directions", box routeStops.routeDirections; "patterns", box routeStops.patterns
                 "slots", box routeStops.slots; "maximum_patterns_per_route_direction", box routeStops.maximumPatterns
-                "call_zones", box routeStops.callZones; "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ]
+                "route_stop_zones", box routeStops.routeStopZones; "call_zones", box routeStops.callZones
+                "location_zones", box routeStops.locationZones; "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ]
         File.WriteAllText(Path.Combine(output, "diagnostics.json"), JsonSerializer.Serialize(diagnostics, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
     let private writeManifest (input: CompilerOutput.Output) output (relationCounts: IDictionary<string,int>) =
@@ -373,8 +374,8 @@ module PackageWriter =
                 ref bindings, ref supplied
             for relation in Schema.relations do
                 let target = Path.Combine(serving, relation.name + ".parquet")
-                // route_stop and call_zone are derived from the finished calls below.
-                if counts.ContainsKey(relation.name) || relation.name = "route_stop" || relation.name = "call_zone" then () else
+                // route_stop and the zone relations are derived from the finished calls below.
+                if counts.ContainsKey(relation.name) || relation.name = "route_stop" || relation.name.EndsWith("_zone") then () else
                 match compiled |> Map.tryFind relation.name with
                 | Some (path, count) ->
                     phase ("finalize-" + relation.name)
