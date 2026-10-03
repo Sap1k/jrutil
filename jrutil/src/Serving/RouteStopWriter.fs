@@ -45,7 +45,7 @@ module RouteStopWriter =
     type Result = { counts: IDictionary<string, int>; summary: Summary }
 
     [<Struct>]
-    type private Call = { sequence: int; location: int; time: int }
+    type private Call = { sequence: int; location: int; time: int; zones: int }
 
     type private PatternEntry(group: int, key: string, sequence: int array, first: string) =
         member _.group = group
@@ -101,6 +101,19 @@ module RouteStopWriter =
                 locationIndex.Add(location, locations.Count)
                 locations.Add(location)
                 locations.Count - 1
+        // Zone sets are interned; index 0 is "no zones".
+        let zoneSets = ResizeArray<Zone array>([ [||] ])
+        let zoneSetIndex = Dictionary<string, int>(StringComparer.Ordinal)
+        let internZones (values: Zone array) =
+            if values.Length = 0 then 0 else
+            let key = values |> Array.map (fun zone -> zone.code + "\u001f" + (if isNull zone.system then "" else zone.system)) |> String.concat "\u001e"
+            match zoneSetIndex.TryGetValue(key) with
+            | true, index -> index
+            | _ ->
+                zoneSetIndex.Add(key, zoneSets.Count)
+                zoneSets.Add(values)
+                zoneSets.Count - 1
+        let matchedExplicit = HashSet<struct(string * int)>()
         let callsByTrip = Dictionary<string, ResizeArray<Call>>(StringComparer.Ordinal)
         let mutable read = 0L
         for columns in ColumnReader.groups callPath callSchema do
@@ -109,7 +122,23 @@ module RouteStopWriter =
             let places = ColumnReader.text columns.[field callSchema "location_id"]
             let arrivals = ColumnReader.optionalInt32 columns.[field callSchema "scheduled_arrival"]
             let departures = ColumnReader.optionalInt32 columns.[field callSchema "scheduled_departure"]
+            let previous = ColumnReader.text columns.[field callSchema "route_stop_id"]
             for row in 0 .. trips.Length - 1 do
+                // An explicit call zone wins, then the call's source route
+                // stop, then its stop place.
+                let found =
+                    match zones.calls.TryGetValue(struct(trips.[row], sequences.[row])) with
+                    | true, values ->
+                        matchedExplicit.Add(struct(trips.[row], sequences.[row])) |> ignore
+                        values
+                    | _ ->
+                        let old = previous.[row]
+                        match (if isNull old then (false, null) else zones.routeStops.TryGetValue(old)) with
+                        | true, values -> values
+                        | _ ->
+                            match zones.places.TryGetValue(places.[row]) with
+                            | true, values -> values
+                            | _ -> [||]
                 let calls =
                     match callsByTrip.TryGetValue(trips.[row]) with
                     | true, calls -> calls
@@ -121,7 +150,7 @@ module RouteStopWriter =
                     if departures.[row].HasValue then departures.[row].Value
                     elif arrivals.[row].HasValue then arrivals.[row].Value
                     else Int32.MinValue
-                calls.Add({ sequence = sequences.[row]; location = intern places.[row]; time = time })
+                calls.Add({ sequence = sequences.[row]; location = intern places.[row]; time = time; zones = internZones found })
             read <- read + int64 trips.Length
             progress "route-stops-read-calls" read
 
@@ -194,6 +223,38 @@ module RouteStopWriter =
                     id = Identity.compositeKey [ route; directionText; locations.[location]; string occurrence ] }))
             entries |> Array.iteri (fun index entry ->
                 slotsByPattern.[patternIndex.[group].[entry.key]] <- assigned.[index] |> Array.map (fun slot -> firstSlot + slot))
+        // A slot keeps zones only when every call at it has the same
+        // non-empty set; other zoned calls keep their own rows.
+        let slotZones = Array.create slots.Count -1
+        let slotMixed = Array.zeroCreate<bool> slots.Count
+        for KeyValue(trip, calls) in callsByTrip do
+            let struct(pattern, _) = tripPattern.[trip]
+            let assigned = slotsByPattern.[pattern]
+            for position in 0 .. calls.Count - 1 do
+                let slot, set = assigned.[position], calls.[position].zones
+                if slotZones.[slot] = -1 then slotZones.[slot] <- set
+                elif slotZones.[slot] <> set then slotMixed.[slot] <- true
+        let unanimous slot = not slotMixed.[slot] && slotZones.[slot] > 0
+        let locationZones = ResizeArray<struct(string * Zone)>()
+        let seenLocationZones = HashSet<struct(string * string * string)>()
+        let addLocationZone location (zone: Zone) =
+            if seenLocationZones.Add(struct(location, zone.code, zone.system)) then locationZones.Add(struct(location, zone))
+        let routeStopZones = ResizeArray<struct(int * int * Zone)>()
+        for slot in 0 .. slots.Count - 1 do
+            if unanimous slot then
+                zoneSets.[slotZones.[slot]] |> Array.iteri (fun order zone ->
+                    routeStopZones.Add(struct(slot, order, zone))
+                    addLocationZone slots.[slot].location zone)
+        let callZoneRows = ResizeArray<struct(string * int * int * Zone)>()
+        for KeyValue(trip, calls) in callsByTrip do
+            let struct(pattern, _) = tripPattern.[trip]
+            let assigned = slotsByPattern.[pattern]
+            for position in 0 .. calls.Count - 1 do
+                let call = calls.[position]
+                if call.zones > 0 && not (unanimous assigned.[position]) then
+                    zoneSets.[call.zones] |> Array.iteri (fun order zone ->
+                        callZoneRows.Add(struct(trip, call.sequence, order, zone))
+                        addLocationZone locations.[call.location] zone)
         callsByTrip.Clear()
 
         let slotOf trip sequence =
@@ -230,12 +291,7 @@ module RouteStopWriter =
         let callByTripKey = Dictionary<struct(string * string), struct(int * int)>()
         let slotIds = HashSet<string>(slots |> Seq.map _.id, StringComparer.Ordinal)
 
-        // 7. Rewrite trip_call and resolve each call's zones. A slot keeps
-        // zones only when every call at it has the same non-empty set.
-        let zonedCalls = ResizeArray<struct(string * int * int * string * Zone array)>()
-        let slotZones = Array.zeroCreate<Zone array> slots.Count
-        let slotMixed = Array.zeroCreate<bool> slots.Count
-        let matchedExplicit = HashSet<struct(string * int)>()
+        // 7. Rewrite trip_call with slot ids.
         let routeStopField = field callSchema "route_stop_id"
         counts.["trip_call"] <-
             replace callPath (fun target ->
@@ -243,7 +299,6 @@ module RouteStopWriter =
                 for columns in ColumnReader.groups callPath callSchema do
                     let trips = ColumnReader.text columns.[field callSchema "trip_id"]
                     let sequences = ColumnReader.int32 columns.[field callSchema "sequence"]
-                    let places = ColumnReader.text columns.[field callSchema "location_id"]
                     let previous = ColumnReader.text columns.[routeStopField]
                     let updated = Array.zeroCreate<string> trips.Length
                     for row in 0 .. trips.Length - 1 do
@@ -256,25 +311,6 @@ module RouteStopWriter =
                             | true, set -> set.Add(slot.Value) |> ignore
                             | _ -> slotsByKey.Add(old, SortedSet<int>([ slot.Value ]))
                             callByTripKey.TryAdd(struct(trip, old), struct(slot.Value, sequence)) |> ignore
-                        let found =
-                            match zones.calls.TryGetValue(struct(trip, sequence)) with
-                            | true, values ->
-                                matchedExplicit.Add(struct(trip, sequence)) |> ignore
-                                values
-                            | _ ->
-                                match (if isNull old then (false, null) else zones.routeStops.TryGetValue(old)) with
-                                | true, values -> values
-                                | _ ->
-                                    match zones.places.TryGetValue(places.[row]) with
-                                    | true, values -> values
-                                    | _ -> [||]
-                        let slotIndex = slot |> Option.defaultValue -1
-                        if slotIndex >= 0 then
-                            match slotZones.[slotIndex] with
-                            | null -> slotZones.[slotIndex] <- found
-                            | existing when existing <> found -> slotMixed.[slotIndex] <- true
-                            | _ -> ()
-                        if found.Length > 0 then zonedCalls.Add(struct(trip, sequence, slotIndex, places.[row], found))
                     let copy = Array.copy columns
                     copy.[routeStopField] <- ColumnWriter.Text updated
                     // Re-batch: an input group may be larger than one bounded column batch.
@@ -283,28 +319,9 @@ module RouteStopWriter =
                     progress "route-stops-rewrite-calls" output.RowCount
                 int output.RowCount)
 
-        // 8. Zones: route_stop_zone for unanimous slots, call_zone for the
-        // other zoned calls, and location_zone as the distinct union.
-        let unanimous index = index >= 0 && not slotMixed.[index] && not (isNull slotZones.[index]) && slotZones.[index].Length > 0
+        // 8. Zones.
         let zoneSize (text: string) (zone: Zone) =
             96L + 2L * int64 (text.Length + zone.code.Length + (if isNull zone.system then 0 else zone.system.Length))
-        let locationZones = ResizeArray<struct(string * Zone)>()
-        let seenLocationZones = HashSet<struct(string * string * string)>()
-        let addLocationZone location (zone: Zone) =
-            if seenLocationZones.Add(struct(location, zone.code, zone.system)) then locationZones.Add(struct(location, zone))
-        let routeStopZones = ResizeArray<struct(int * int * Zone)>()
-        for index in 0 .. slots.Count - 1 do
-            if unanimous index then
-                slotZones.[index] |> Array.iteri (fun order zone ->
-                    routeStopZones.Add(struct(index, order, zone))
-                    addLocationZone slots.[index].location zone)
-        let callZoneRows = ResizeArray<struct(string * int * int * Zone)>()
-        for struct(trip, sequence, slot, location, found) in zonedCalls do
-            if not (unanimous slot) then
-                found |> Array.iteri (fun order zone ->
-                    callZoneRows.Add(struct(trip, sequence, order, zone))
-                    addLocationZone location zone)
-        zonedCalls.Clear()
         counts.["route_stop_zone"] <-
             replace (Path.Combine(serving, "route_stop_zone.parquet")) (fun target ->
                 RelationWriter.writeRows target (relation "route_stop_zone") (4L * 1024L * 1024L) rowGroupRows token progress
