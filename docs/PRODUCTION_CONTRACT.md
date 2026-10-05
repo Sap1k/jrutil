@@ -40,3 +40,47 @@ Ownership is divided as follows:
 - **Diagnostic tooling** explains compiler decisions outside the production package.
 
 Consumers are responsible for operating-date inference, delay calculation, vehicle fusion and claim arbitration.
+
+## Serving schema 5.0 (draft)
+
+[serving-v5.json](../contracts/serving-v5.json) is a reviewed draft and not yet produced. It replaces the 30 v4 relations with 19 that are easier to query and keep every fact Oběhy, riders and the NeTEx export need. It was checked by running the realtime, departure-board, vehicle-detail and NeTEx-mapping queries against a v5 prototype derived from the 2026-10-03 release.
+
+**Versioning.** The version is `major.minor` (`"5.0"`) in the manifest and the Parquet metadata. A minor version only adds: relations, nullable fields at the end of a relation, enumeration values, or namespaces. Consumers accept every minor of their major, ignore unknown relations and fields, and treat unknown enumeration values as unknown. Anything else (removing, renaming or retyping a field, changing a key or the meaning of a value) is a new major.
+
+**Identifiers.** Every primary-key identifier starts with its feed prefix (`jdf:` or `czptt:`), so both packages share tables without collisions. This includes services, transfers, notes and assignments, which v4 left unprefixed or under a shared `gtfs:` prefix.
+
+**Times.** Times are signed seconds after noon minus 12 hours, local time (Europe/Prague), of the service date, as in GTFS `stop_times`. This equals the wall-clock reading except on DST change days. Values from 86,400 up continue into the next day.
+
+**Enumerations.** Every coded field names a closed list in `enumerations`. `weekday_mask` uses bit 0 for Monday through bit 6 for Sunday. The typed feature kinds of `JDF_SEMANTICS.md` replace v4's generic `jdf_trip_attribute` and `jdf_stop_attribute` rows. JDF calendar codes (`X`, `+`, `1`–`7`) become `calendar_designation` assignments.
+
+**Calls and trip parts.** `trip_call` is the only call relation. Its passenger calls are exactly GTFS `stop_times`, with `stop_sequence = sequence`. JDF pass-through stops are not published, because the source gives them no time. A CZPTT path (PA) is split into trip parts, ordered by `trip.run_key`/`run_part` and keeping the PA's sequence numbers:
+
+- Consecutive parts share exactly one boundary call. It is the last call of one part and the first of the next, with identical times.
+- A rail part also carries every non-passenger railway point between its first and last call.
+- The first rail part carries the points before the path's first passenger call; the last rail part carries the points after its last passenger call.
+- A rail-replacement (NAD) bus part carries only its passenger calls. Railway points inside a bus part are not published (106,561 in the 2026-10-03 release), because the bus does not pass them.
+- A non-passenger call has pickup and drop-off `1`, no boarding point and no route stop. For a pass, arrival equals departure; times are null when the source gives none.
+
+The CZPTT subsidiary location and active line code are `trip_call` columns. `operational_location`, `operational_journey`, `operational_call` and `scheduled_passage` are removed; operational points are `location` rows of kind `operational_point`.
+
+**Calendars.** `service_calendar` and `service_exception` stay as in v4. GTFS keeps proper calendars: `calendar.txt` holds the weekday pattern and `calendar_dates.txt` the exceptions.
+
+**Keys.** `source_key(namespace, identifier) → public_id` replaces `source_trip_map`, `source_entity_map`, `road_route_key`, `road_trip_key` and `rail_trip_key`.
+
+- It records validity and a `binding_method`.
+- Namespaces name their source system (`cis:line_trip`, `czptt:tr`, `pid:gtfs_trip_id`, `ids-jmk:line_course`, …). The contract fixes each namespace's identifier encoding, for example `582492:143` for CIS line + trip.
+- A public ID resolves to itself without a row. A trip key applies on its trip's service dates.
+- `call_key` lists source call sequences only where they differ from `trip_call.sequence` (2,035 rows in the 2026-10-03 release instead of 16.6M).
+- Binding hashes, call-pattern hashes and `source_trip_coverage` are removed.
+
+**Locations.** `location` carries `domain` (`surface`/`heavy_rail`), `coordinate_precision` (`exact`/`estimated`/`missing`) and `coordinate_source`. A boarding point's `public_code` is its platform or post designation (GTFS `platform_code`); v4 leaves it null everywhere.
+
+**Zones.** Zones stay on route stop slots (`route_stop_zone`, keyed by the now globally unique `route_stop_id`), with `call_zone` exceptions. `location_zone` is dropped because it can be derived.
+
+**Typed semantics stay lossless.** The relations are `service_note`, `connection_claim`, `travel_restriction`, and one `assignment` relation for note links, features and calendar designations.
+
+- `assignment` scope is route, trip, call, call range, service or location. CZPTT notes that apply between two locations become `call_range` assignments, not whole-trip ones.
+- `service_note.label` is the display text, and `text` keeps the verbatim source.
+- Rows keep `source_object_id`. Source ids and snapshot digests move to the manifest, which must record the CZPTT input digest (v4 writes zeros).
+
+GTFS is a pure projection of these relations.
