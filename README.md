@@ -341,7 +341,9 @@ review: unregistered stops and new spellings of registered ones, new post
 ordinals, or unpinned overlay places. `registry.py promote` in
 jrunify-ext-geodata adds reviewed rows. `source_stop_metadata.parquet` records
 `okres` and `stop_id_provisional`; the flag means something only for a merge
-that used the registry.
+that used the registry. The serving `location` relation publishes the stop
+metadata (`okres` as `district_code`), and a regional overlay inherits it from
+its base package for every location it keeps.
 
 ## Parallelism and memory budgets
 

@@ -36,11 +36,24 @@ module PackageGtfsRelations =
             "url", nullableString (value "agency_url" row); "timezone", box (value "agency_timezone" row)
             "language", nullableString (value "agency_lang" row); "phone", nullableString (value "agency_phone" row)
             "fare_url", nullableString (value "agency_fare_url" row); "email", nullableString (value "agency_email" row) ])
+        // Location metadata in `location` column order: municipality, district name, district
+        // code (okres), nearby place, country, coordinate precision.
+        let locationMetadataColumns =
+            [| "municipality_name"; "district_name"; "district_code"; "nearby_place"; "country_code"; "coordinate_precision" |]
         let stopMetadata =
             if CompilerOutput.has input.sidecars "source_stop_metadata" then
-                CompilerOutput.values input.sidecars "source_stop_metadata" [| "gtfs_stop_id"; "town"; "district"; "nearby_place"; "country"; "coordinate_precision" |]
-                |> Seq.map (fun row -> row.[0], row) |> dict
-            else dict []
+                CompilerOutput.values input.sidecars "source_stop_metadata" [| "gtfs_stop_id"; "town"; "district"; "okres"; "nearby_place"; "country"; "coordinate_precision" |]
+                |> Seq.map (fun row -> row.[0], row.[1..]) |> dict
+            else
+                // A regional overlay keeps base location ids, so inherit the base package's metadata.
+                match input.basePackage with
+                | Some package when File.Exists(Path.Combine(package, "serving", "location.parquet")) ->
+                    PackageReader.readTextRowsWithOptional (List.ofArray locationMetadataColumns)
+                        (Path.Combine(package, "serving", "location.parquet"))
+                        (Array.append [| "location_id" |] locationMetadataColumns)
+                    |> Seq.filter (fun row -> row.[1..] |> Array.exists (fun value -> value <> ""))
+                    |> Seq.map (fun row -> row.[0], row.[1..]) |> dict
+                | _ -> dict []
         let locations = CompilerOutput.rows input.gtfs "stops.txt" |> Seq.map (fun row ->
             let locationType = value "location_type" row
             let parent = value "parent_station" row
@@ -50,8 +63,9 @@ module PackageGtfsRelations =
                 "location_id", box (value "stop_id" row); "kind", box kind; "domain", box "scheduled"
                 "parent_location_id", nullableString parent; "name", box (value "stop_name" row)
                 "public_code", nullableString (value "stop_code" row); "description", nullableString (value "stop_desc" row)
-                "municipality_name", metadata |> Option.map (fun value -> nullableString value.[1]) |> Option.defaultValue null
-                "district_name", metadata |> Option.map (fun value -> nullableString value.[2]) |> Option.defaultValue null; "district_code", null
+                "municipality_name", metadata |> Option.map (fun value -> nullableString value.[0]) |> Option.defaultValue null
+                "district_name", metadata |> Option.map (fun value -> nullableString value.[1]) |> Option.defaultValue null
+                "district_code", metadata |> Option.map (fun value -> nullableString value.[2]) |> Option.defaultValue null
                 "nearby_place", metadata |> Option.map (fun value -> nullableString value.[3]) |> Option.defaultValue null
                 "country_code", metadata |> Option.map (fun value -> nullableString value.[4]) |> Option.defaultValue null
                 "coordinate_precision", metadata |> Option.map (fun value -> nullableString value.[5]) |> Option.defaultValue null

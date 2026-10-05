@@ -76,6 +76,18 @@ type RegionalGtfsOverlayTests() =
                     primaryKey = [| "gtfs_route_id" |]; foreignKeys = [||] }
                 use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_route_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
                 writer.Append([| JrUtil.Serving.ColumnWriter.Text(rows |> Array.map fst); JrUtil.Serving.ColumnWriter.Text(rows |> Array.map snd) |])
+            // JDF records stop name parts, okres and coordinate precision as stop metadata.
+            let stopMetadata = Path.Combine(basePath, "stop-metadata.csv")
+            if File.Exists(stopMetadata) then
+                let lines = File.ReadAllLines(stopMetadata) |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                let header = lines.[0].Split(',')
+                let rows = lines.[1..] |> Array.map (fun line -> line.Split(','))
+                let relation: JrUtil.Serving.Schema.Relation = {
+                    name = "source_stop_metadata"
+                    fields = [| for name in header -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false } |]
+                    primaryKey = [| "gtfs_stop_id" |]; foreignKeys = [||] }
+                use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_stop_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
+                writer.Append(header |> Array.mapi (fun index _ -> JrUtil.Serving.ColumnWriter.Text(rows |> Array.map (fun row -> row.[index]))))
             let package = basePath + ".package-" + unique
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage package
             package
@@ -231,6 +243,30 @@ type RegionalGtfsOverlayTests() =
                 routes.Contains("overlay:pid-gtfs:route:"),
                 "A line with one regular and one detour route must not get a source-native route:
 " + routes)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Stop metadata and district codes reach the base and survive the overlay``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-location-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            write (Path.Combine(basePath, "stop-metadata.csv")) "gtfs_stop_id,town,district,nearby_place,country,okres,coordinate_precision\nbp1,City,Alpha,,CZ,BM,stop\nbp2,Beta,,,CZ,KV,estimated\n"
+            let metadata package =
+                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(package, "serving", "location.parquet"))
+                    [| "location_id"; "municipality_name"; "district_name"; "district_code"; "nearby_place"; "country_code"; "coordinate_precision" |]
+                |> Seq.map (fun row -> row.[0], String.Join("|", row.[1..]))
+                |> dict
+            let basePackage = productionBase basePath
+            let baseLocations = metadata basePackage
+            Assert.AreEqual("City|Alpha|BM||CZ|stop", baseLocations.["bp1"])
+            Assert.AreEqual("Beta||KV||CZ|estimated", baseLocations.["bp2"])
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            let output = Path.Combine(root, "output")
+            execute None policy 2026 binding basePath output |> ignore
+            let outputLocations = metadata output
+            Assert.AreEqual("City|Alpha|BM||CZ|stop", outputLocations.["bp1"], "The overlay keeps base location metadata")
+            Assert.AreEqual("Beta||KV||CZ|estimated", outputLocations.["bp2"])
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
