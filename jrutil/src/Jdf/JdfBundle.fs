@@ -273,9 +273,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
     let mutable completed = false
     let mutable liveEvidenceTemporaryDirectory:string option=None
     let nativeCallPath = temp + ".trip_call.parquet"
-    let nativeSummaryPath = temp + ".call-summaries.bin"
-    let nativeSourceCallsPath = nativeSummaryPath + ".calls"
-    let nativeTripFactsPath = nativeSummaryPath + ".trips"
     let mutable nativeCallCount = 0L
     let mutable nativeRelations = Map.empty
     let nativeTransferSequences = Dictionary<struct(string * int64), int>()
@@ -468,8 +465,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             let emittedTransferCalls = HashSet<struct (string * int64)>()
             let bufferedCalls = executionOptions.maximumWorkers > 1 && executionOptions.memoryBudgetBytes >= 512L * 1024L * 1024L
             use nativeCalls = new JrUtil.Serving.TripCallWriter.Writer(nativeCallPath, Threading.CancellationToken.None, bufferedOutput = bufferedCalls)
-            use nativeSummaries = new JrUtil.Serving.TripCallWriter.SummaryWriter(nativeSummaryPath)
-            use nativeSourceCalls = new JrUtil.Serving.SourceCallWriter.Spool(nativeSourceCallsPath)
             let parents =
                 JdfToGtfs.getGtfsStopsWithPlan preparation.postPlan batch
                 |> Seq.map (fun stop -> stop.id, stop.parentStation)
@@ -487,8 +482,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     // line's ordered route_stop slot and its zones.
                     let routeStop = JrUtil.Serving.Identity.routeStopKey row.routeId (string row.sourceRouteVersion) (string row.sourceRouteStopId)
                     nativeCalls.Append(JrUtil.Serving.TripCallWriter.fromGtfs stopTime location boarding routeStop)
-                    nativeSummaries.Append(stopTime)
-                    nativeSourceCalls.Append(stopTime)
                     let transferKey = struct (stopTime.tripId, row.sourceRouteStopId)
                     if transferCallQueries.Contains(transferKey) then
                         emittedTransferCalls.Add(transferKey) |> ignore
@@ -500,11 +493,9 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                     stopTime)
             Log.Information("Bundle phase: streaming GTFS stop times")
             started "stream-stop-times" (Some callFacts.emittedCallCount) "calls"
-            // stop_times is spooled once as canonical CSV and copied into gtfs.zip.
-            Gtfs.gtfsStopTimesToFolder () temp stopTimes
+            // Calls stream once into the native trip_call; gtfs.zip projects it.
+            stopTimes |> Seq.iter ignore
             nativeCallCount <- nativeCalls.Complete()
-            nativeSummaries.Complete()
-            nativeSourceCalls.Complete()
             logPhaseResources "stream-stop-times" phaseTimer
             progressCompleted "stream-stop-times" (int64 stopTimeCount) (Some callFacts.emittedCallCount) "rows"
             Log.Information("Bundle phase: preparing remaining GTFS relations")
@@ -515,7 +506,6 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             logPhaseResources "prepare-remaining-gtfs" phaseTimer
             progressCompleted "prepare-remaining-gtfs" 1L (Some 1L) "feeds"
             validateStopCoordinates feed
-            JrUtil.Serving.BindingWriter.writeNativeFacts nativeTripFactsPath descriptor.sourceId feed
             let nativeTripPath = temp + ".trip.parquet"
             let nativeTripCount =
                 JrUtil.Serving.TripWriter.write nativeTripPath Threading.CancellationToken.None
@@ -530,17 +520,19 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                         reportProgress executionOptions phaseTimer phase "running"
                                        count total "rows" None 1)
                     emittedTransferCalls
-            let noteRelations =
-                JrUtil.Serving.NoteWriter.write temp descriptor.sourceId descriptor.payloadSha256 Threading.CancellationToken.None
+            let notePath = temp + ".service_note.parquet"
+            let noteCount =
+                JrUtil.Serving.NoteWriter.write notePath Threading.CancellationToken.None
                     (fun phase count -> reportProgress executionOptions phaseTimer phase "running" count None "rows" None 1)
-                    nativeNotes
-            nativeRelations <- noteRelations |> Map.fold (fun state name value -> Map.add name value state) nativeRelations
-            let featurePath = temp + ".service_feature_assignment.parquet"
-            let featureCount =
-                JrUtil.Serving.FeatureWriter.write featurePath descriptor.sourceId descriptor.payloadSha256 Threading.CancellationToken.None
-                    (fun phase count -> reportProgress executionOptions phaseTimer ("service-features-" + phase) "running" count None "rows" None 1)
-                    (nativeFeatures ())
-            nativeRelations <- nativeRelations |> Map.add "service_feature_assignment" (featurePath, featureCount)
+                    (nativeNotes ())
+            nativeRelations <- nativeRelations |> Map.add "service_note" (notePath, noteCount)
+            // Note links and trip features share `assignment`.
+            let assignmentPath = temp + ".assignment.parquet"
+            let servingAssignmentCount =
+                JrUtil.Serving.AssignmentWriter.write assignmentPath Threading.CancellationToken.None
+                    (fun phase count -> reportProgress executionOptions phaseTimer ("assignments-" + phase) "running" count None "rows" None 1)
+                    (Seq.append (nativeNotes () |> Seq.map (JrUtil.Serving.NoteWriter.assignment "jdf")) (nativeFeatures ()))
+            nativeRelations <- nativeRelations |> Map.add "assignment" (assignmentPath, servingAssignmentCount)
             // Source metadata tables feed the package writer; post-inference
             // tables are diagnostics and are only produced for the artifact.
             let tables =
@@ -630,10 +622,9 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                 for path in Directory.EnumerateFiles(diagnosticScratch) do
                     diagnosticFiles.["post-inference/" + Path.GetFileName(path)] <- path
             packageInput <- Some {
+                feed = "jdf"
                 gtfs =
-                    Seq.append
-                        (standard |> Seq.filter (fun (name, _, _) -> name <> "stop_times.txt") |> memoryTables)
-                        [ "stop_times.txt", Serving.CompilerOutput.csvFileTable (Path.Combine(temp, "stop_times.txt")) ]
+                    standard |> Seq.filter (fun (name, _, _) -> name <> "stop_times.txt") |> memoryTables
                     |> Serving.CompilerOutput.tables
                 czech = czech |> memoryTables |> Serving.CompilerOutput.tables
                 mappings = Serving.CompilerOutput.noTables
@@ -651,14 +642,9 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
         let productionTemp = temp + ".production"
         let input = packageInput.Value
         JrUtil.Serving.PackageWriter.writePackage (nativeRelations |> Map.add "trip_call" (nativeCallPath, int nativeCallCount))
-            (Some { summaries = nativeSummaryPath; sourceCalls = nativeSourceCallsPath
-                    tripFacts = nativeTripFactsPath; transferSequences = nativeTransferSequences })
+            (Some { transferSequences = nativeTransferSequences })
             (fun phase count -> reportProgress executionOptions phaseTimer phase "running" count None "items" None 1)
             input productionTemp
-        File.Delete(nativeSummaryPath)
-        File.Delete(nativeSourceCallsPath)
-        File.Delete(nativeSourceCallsPath + ".index")
-        File.Delete(nativeTripFactsPath)
         executionOptions.diagnosticsOutput
         |> Option.iter (fun output ->
             JrUtil.Serving.PackageWriter.writeDiagnosticArtifact input output executionOptions.diagnosticTraces)

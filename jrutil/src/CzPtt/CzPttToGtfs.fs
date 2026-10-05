@@ -275,6 +275,8 @@ let convert catalog options pointNames
                   code = Some note.code; label = catalogNoteLabel note.code
                   rawValue = note.rawValue; validFrom = validFrom; validTo = validTo
                   tripIds = intersectingTrips message note.firstIndex note.lastIndex generatedJourneys
+                  firstSequence = (if resolved then note.firstIndex |> Option.map ((+) 1) else None)
+                  lastSequence = (if resolved then note.lastIndex |> Option.map ((+) 1) else None)
                   resolved = resolved }))
         |> Seq.toArray
     let nonCentralNotes =
@@ -308,10 +310,12 @@ let convert catalog options pointNames
                         $"{paId message}: unresolved CZNonCentralPTTNote calendar {raw}")
                 let validFrom, validTo = noteBounds message calendarId
                 { id = noteId (paId message) "noncentral" index
-                  paId = paId message; kind = "czptt_noncentral_note"; code = None
+                  paId = paId message; kind = "czptt_local_note"; code = None
                   label = fields |> Array.tryItem 4 |> Option.filter (String.IsNullOrWhiteSpace >> not)
                   rawValue = raw; validFrom = validFrom; validTo = validTo
                   tripIds = intersectingTrips message firstIndex lastIndex generatedJourneys
+                  firstSequence = (if resolved then firstIndex |> Option.map ((+) 1) else None)
+                  lastSequence = (if resolved then lastIndex |> Option.map ((+) 1) else None)
                   resolved = resolved }))
         |> Seq.toArray
     let calendarNotes =
@@ -327,9 +331,10 @@ let convert catalog options pointNames
                     idsDiagnostics.Add(
                         $"{paId message}: malformed CZCalendarPTTNote {raw}")
                 { id = noteId (paId message) "calendar" index
-                  paId = paId message; kind = "czptt_note_calendar"
+                  paId = paId message; kind = "czptt_calendar_note"
                   code = fields |> Array.tryItem 0; label = None; rawValue = raw
                   validFrom = validFrom; validTo = validTo; tripIds = [||]
+                  firstSequence = None; lastSequence = None
                   resolved = resolved }))
         |> Seq.toArray
     let allNotes = Array.concat [| centralNotes; nonCentralNotes; calendarNotes |]

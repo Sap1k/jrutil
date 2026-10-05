@@ -601,7 +601,7 @@ path; the tree digest appends each path, a NUL byte and that file's SHA-256.
 `payload_bytes` is the sum of file sizes. ZIP input must contain exactly one
 JDF batch root and is rejected if paths are unsafe or collide by case.
 
-Production Parquet relations use serving schema v3, Snappy compression and
+Production Parquet relations use serving schema 5.0 ([contract](docs/PRODUCTION_CONTRACT.md)), Snappy compression and
 row groups of at most 65,536 rows. Rows are in deterministic generation order;
 relations are not sorted, and primary keys are validated for uniqueness. The manifest records schemas, keys,
 source snapshots, row counts, byte sizes and SHA-256 for every payload.

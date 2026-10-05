@@ -133,7 +133,8 @@ let fillStandardRequiredFields (feed: GtfsFeed) =
                 })
     }
 
-let deduplicateCalendar (feed: GtfsFeed) =
+/// Merge identical calendars under new `<prefix>:<bitmap>:<n>` service ids.
+let deduplicateCalendarWithPrefix (prefix: string) (feed: GtfsFeed) =
     let allCalEntries = feed.calendar |> Option.defaultValue [||]
     let allCalExcs = feed.calendarExceptions |> Option.defaultValue [||]
     let serviceIds =
@@ -186,7 +187,7 @@ let deduplicateCalendar (feed: GtfsFeed) =
                     |> Array.map (fun b -> if b then '1' else '0')
                     |> System.String)
                 |> Option.defaultValue "exc"
-            let newId = $"gtfs:service:{bitmapStr}:{i}"
+            let newId = $"{prefix}:{bitmapStr}:{i}"
 
             oldIds,
             newId,
@@ -208,3 +209,5 @@ let deduplicateCalendar (feed: GtfsFeed) =
         calendarExceptions =
             Some <| (deduplicated |> Array.collect (fun (_, _, _, ces) -> ces))
     }
+
+let deduplicateCalendar (feed: GtfsFeed) = deduplicateCalendarWithPrefix "gtfs:service" feed

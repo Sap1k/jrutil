@@ -47,6 +47,8 @@ module TripWriter =
             let optional project = ColumnWriter.Text(column (fun row -> let value = project row in if value = "" then null else value))
             [| ColumnWriter.Text(column _.id); ColumnWriter.Text(column _.route); ColumnWriter.Text(column _.service)
                ColumnWriter.OptionalInt16(column _.direction); optional _.headsign; optional _.shortName; optional _.block
+               // JDF trips are not parts of a longer run.
+               ColumnWriter.Text(Array.zeroCreate rows.Length); ColumnWriter.OptionalInt16(Array.zeroCreate rows.Length)
                ColumnWriter.OptionalInt16(column _.wheelchair); ColumnWriter.OptionalInt16(column _.bikes); optional _.shape |]
         let schema = Schema.relations |> Array.find (fun relation -> relation.name = "trip")
         RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token progress

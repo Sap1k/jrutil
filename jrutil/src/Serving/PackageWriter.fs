@@ -26,7 +26,7 @@ open JrUtil.RegionalOverlay.Model
 open JrUtil.Serving.PackageRows
 open JrUtil.Serving.PackageBaseRelations
 open JrUtil.Serving.PackageGtfsRelations
-open JrUtil.Serving.PackageBindingRelations
+open JrUtil.Serving.PackageKeyRelations
 open JrUtil.Serving.PackageSemanticRelations
 
 module PackageWriter =
@@ -64,43 +64,6 @@ module PackageWriter =
         { calls = collect calls HashIdentity.Structural
           routeStops = collect routeStops StringComparer.Ordinal
           places = collect places StringComparer.Ordinal }
-
-    let private writeCsv (path: string) (columns: string array) (rows: seq<string array>) =
-        Directory.CreateDirectory(Path.GetDirectoryName(path)) |> ignore
-        use writer = new StreamWriter(path, false, new UTF8Encoding(false))
-        writer.NewLine <- "\n"
-        writeCsvRow writer columns
-        for row: string array in rows do writeCsvRow writer row
-
-    let private writeGtfsZip (input: CompilerOutput.Output) output =
-        let zipPath = Path.Combine(output, "gtfs.zip")
-        use stream = File.Open(zipPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)
-        use archive = new ZipArchive(stream, ZipArchiveMode.Create, false, Encoding.UTF8)
-        let standardTransferColumns = [| "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id"; "transfer_type"; "min_transfer_time" |]
-        for name in input.gtfs.Keys |> Seq.sortWith (fun left right -> String.CompareOrdinal(left, right)) do
-            let table = input.gtfs.[name]
-            // Fastest compression materially reduces package wall/CPU time;
-            // contents and deterministic entry metadata are unaffected.
-            let entry = archive.CreateEntry(name, CompressionLevel.Fastest)
-            entry.LastWriteTime <- DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero)
-            use target = entry.Open()
-            match name, table.file with
-            | "transfers.txt", _ ->
-                // Waiting-time constraints are serving-only; GTFS keeps standard columns.
-                use writer = new StreamWriter(target, UTF8Encoding(false))
-                writer.NewLine <- "\n"
-                CompilerOutput.writeCsv writer {
-                    table with
-                        columns = standardTransferColumns
-                        rows = fun () -> CompilerOutput.values input.gtfs name standardTransferColumns }
-            | _, Some path ->
-                // Canonical text a compiler already spooled is copied verbatim.
-                use source = File.OpenRead(path)
-                source.CopyTo(target)
-            | _ ->
-                use writer = new StreamWriter(target, UTF8Encoding(false))
-                writer.NewLine <- "\n"
-                CompilerOutput.writeCsv writer table
 
     let private writeDiagnosticsSummary (input: CompilerOutput.Output) output (routeStops: RouteStopWriter.Summary) =
         let events = ResizeArray<string * string * string * string>()
@@ -146,7 +109,7 @@ module PackageWriter =
                 "route_directions", box routeStops.routeDirections; "patterns", box routeStops.patterns
                 "slots", box routeStops.slots; "maximum_patterns_per_route_direction", box routeStops.maximumPatterns
                 "route_stop_zones", box routeStops.routeStopZones; "call_zones", box routeStops.callZones
-                "location_zones", box routeStops.locationZones; "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ]
+                "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ]
         File.WriteAllText(Path.Combine(output, "diagnostics.json"), JsonSerializer.Serialize(diagnostics, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
     let private writeManifest (input: CompilerOutput.Output) output (relationCounts: IDictionary<string,int>) =
@@ -167,7 +130,13 @@ module PackageWriter =
         let relations = Schema.relations |> Array.map (fun relation ->
             dict [
                 "name", box relation.name; "path", box ("serving/" + relation.name + ".parquet")
-                "schema", box (relation.fields |> Array.map (fun field -> dict [ "name", box field.name; "type", box (fieldType field.dataType); "nullable", box field.nullable ]))
+                "schema", box (relation.fields |> Array.map (fun field ->
+                    let entry = Dictionary<string, obj>()
+                    entry.["name"] <- box field.name
+                    entry.["type"] <- box (fieldType field.dataType)
+                    entry.["nullable"] <- box field.nullable
+                    if not (isNull field.enumeration) then entry.["enum"] <- box field.enumeration
+                    entry))
                 "primary_key", box relation.primaryKey
                 "foreign_keys", box (relation.foreignKeys |> Array.map (fun key -> dict [ "fields", box key.fields; "relation", box key.relation; "target_fields", box key.targetFields ]))
                 "row_count", box relationCounts.[relation.name]
@@ -214,27 +183,17 @@ module PackageWriter =
         | None -> ()
         addSources source
         if combinedSources.Count > 0 then manifest.["sources"] <- box (combinedSources.ToArray())
-        manifest.["namespaces"] <- box [|
-            dict [ "name", box "gtfs_trip_id"; "normalization_version", box 1; "component_encoding", box "rfc3986-utf8" ]
-            dict [ "name", box "gtfs_route_id"; "normalization_version", box 1; "component_encoding", box "rfc3986-utf8" ]
-            dict [ "name", box "gtfs_stop_id"; "normalization_version", box 1; "component_encoding", box "rfc3986-utf8" ]
-            dict [ "name", box "gtfs_stop_sequence"; "normalization_version", box 1; "component_encoding", box "decimal-text" ]
-            dict [ "name", box "operational_line_course"; "normalization_version", box 1; "component_encoding", box "rfc3986-utf8-components/slash" ]
-            dict [ "name", box "czptt_pa_id"; "normalization_version", box 1; "component_encoding", box "rfc3986-utf8" ]
-            dict [ "name", box "czptt_tr_id"; "normalization_version", box 1; "component_encoding", box "rfc3986-utf8" ]
-            dict [ "name", box "czptt_pa_sequence"; "normalization_version", box 1; "component_encoding", box "decimal-text" ]
-            dict [ "name", box "cis_line_id"; "normalization_version", box 1; "component_encoding", box "opaque-string" ]
-            dict [ "name", box "cis_trip_id"; "normalization_version", box 1; "component_encoding", box "decimal-int64" ]
-            dict [ "name", box "train_number"; "normalization_version", box 1; "component_encoding", box "opaque-string" ]
-        |]
+        manifest.["namespaces"] <- box (Schema.namespaces |> Array.map (fun item -> dict [ "name", box item.name; "entity_kind", box item.entityKind ]))
         manifest.["relations"] <- box relations
         manifest.["files"] <- box files
         File.WriteAllText(Path.Combine(output, "manifest.json"), JsonSerializer.Serialize(manifest, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
     /// Write the production package from a compiler's hand-off. `compiled`
-    /// holds relations a compiler already wrote natively (path, row count).
-    let writePackage (compiled: Map<string, string * int>) (nativeSummaries: JrUtil.Serving.Model.NativeCallArtifacts option) (progress: string -> int64 -> unit) (input: CompilerOutput.Output) output =
+    /// holds relations a compiler already wrote natively (path, row count);
+    /// rows generated here for the same relation are appended to them.
+    let writePackage (compiled: Map<string, string * int>) (native: JrUtil.Serving.Model.NativeCallArtifacts option) (progress: string -> int64 -> unit) (input: CompilerOutput.Output) output =
         if Directory.Exists(output) || File.Exists(output) then invalidArg "output" "Production package output already exists"
+        if input.feed <> "jdf" && input.feed <> "czptt" then invalidArg "input" $"Unknown package feed {input.feed}"
         Directory.CreateDirectory(output) |> ignore
         let progressLock = obj()
         let mutable currentPhase = "production-package"
@@ -275,33 +234,17 @@ module PackageWriter =
             if input.gtfs.Count = 0 then invalidArg "input" "Compiler output has no GTFS tables"
             let serving = Path.Combine(output, "serving")
             Directory.CreateDirectory(serving) |> ignore
-            phase "start-independent-output-jobs"
-            let startJob name action =
-                Task.Run(fun () ->
-                    let started = Stopwatch.StartNew()
-                    action ()
-                    Serilog.Log.Information(
-                        "Production package job complete: {Job}; elapsed_ms={ElapsedMs}",
-                        name, int64 started.Elapsed.TotalMilliseconds))
-            let gtfsZipJob = startJob "zip-gtfs" (fun () -> writeGtfsZip input output)
             let counts = Dictionary<string,int>()
-            let bindingsState, suppliedState =
+            let suppliedState =
                 phase "prepare-serving-core"
                 let tripCallSummaries = Dictionary<string, TripCallSummary>(StringComparer.Ordinal)
                 let nonContiguousTripSequences = Dictionary<string, HashSet<int>>(StringComparer.Ordinal)
-                let targetCallSchedules = Dictionary<string, TargetCallSchedule>(StringComparer.Ordinal)
-                let wantedTargetTrips =
-                    if nativeSummaries.IsSome || not (CompilerOutput.has input.mappings "source_to_output_trips.csv") then HashSet<string>(StringComparer.Ordinal) else
-                    HashSet<string>(
-                        CompilerOutput.values input.mappings "source_to_output_trips.csv" [| "output_trip_id" |]
-                        |> Seq.map (fun row -> row.[0]), StringComparer.Ordinal)
-                let mutable core = gtfsRelations input tripCallSummaries nonContiguousTripSequences
-                if nativeSummaries.IsNone then
+                let mutable core = gtfsRelations input
+                if native.IsNone then
                     phase "write-ordered-trip_call"
-                    let relation = Schema.relations |> Array.find (fun value -> value.name = "trip_call")
-                    let target = Path.Combine(serving, "trip_call.parquet")
-                    counts.[relation.name] <- writeOrderedTripCalls advance input target tripCallSummaries nonContiguousTripSequences wantedTargetTrips targetCallSchedules
-                    core <- core |> Map.remove relation.name
+                    counts.["trip_call"] <-
+                        writeOrderedTripCalls advance input (Path.Combine(serving, "trip_call.parquet"))
+                            tripCallSummaries nonContiguousTripSequences (operationalPaths input)
                     phase "write-ordered-shapes"
                     let shapeCount, pointCount = writeOrderedShapes advance input serving
                     counts.["shape"] <- shapeCount
@@ -309,51 +252,28 @@ module PackageWriter =
                     core <- core |> Map.remove "shape" |> Map.remove "shape_point"
                     phase "write-ordered-trip"
                     counts.["trip"] <- writeOrderedTrips advance input (Path.Combine(serving, "trip.parquet"))
-                    core <- core |> Map.remove "trip"
-                phase "prepare-source-bindings"
-                let bindingsSequence, calls, baseCoverage =
-                    match nativeSummaries with
-                    | Some native -> BindingWriter.readNativeFacts native.tripFacts native.summaries, Seq.empty, Seq.empty
-                    | None -> bindingRows None input input.manifest tripCallSummaries nonContiguousTripSequences targetCallSchedules
-                let bindings = bindingsSequence |> Seq.toArray
-                let czptt, czpttCalls =
-                    if CompilerOutput.has input.sidecars "operational_calls" then
-                        czpttRelations input bindings input.manifest
-                    else Map.empty, Seq.empty
-                if nativeSummaries.IsNone then
-                    // Do not overlap the dominant nationwide source-call sort
-                    // with every other serving relation.  On the national
-                    // overlay this used to keep tens of millions of call rows
-                    // active while feature/provenance relations were sorted.
-                    phase "typed-source_call_map"
-                    let target = Path.Combine(serving, "source_call_map.parquet")
-                    let report operation count =
-                        lock progressLock (fun () -> currentPhase <- "source-calls-" + operation; completed <- count)
-                    let rows = Seq.append calls (SourceCallWriter.fromModelRows czpttCalls)
-                    counts.["source_call_map"] <- SourceCallWriter.writeMappedTyped target rows CancellationToken.None report
-                    targetCallSchedules.Clear()
-                    // Drop the source-call projection closures and their
-                    // lookup tables before constructing identity/semantic
-                    // relations from the same nationwide bindings.
-                    reclaimManagedPhaseMemory ()
-                let projectedBase = projectedBaseRelations input
-                phase "prepare-serving-identities"
+                phase "prepare-serving-keys"
                 reclaimManagedPhaseMemory ()
-                let identities = identityRelations input bindings input.manifest
-                reclaimManagedPhaseMemory ()
-                phase "prepare-native-semantics"
+                let keys = keyRelations input tripCallSummaries nonContiguousTripSequences
+                phase "prepare-serving-semantics"
                 let semantics =
-                    if CompilerOutput.has input.sidecars "source_route_stop_zone_metadata"
-                       || CompilerOutput.has input.sidecars "source_notice_metadata" then
-                        semanticRelations nativeSummaries input input.manifest
+                    if [ "source_notice_metadata"; "source_route_stop_zone_metadata"; "source_transfer_metadata"
+                         "source_location_feature_metadata"; "source_travel_restriction_metadata"; "source_trip_feature_metadata" ]
+                       |> List.exists (CompilerOutput.has input.sidecars) then
+                        semanticRelations native input
                     else Map.empty
-                let generated =
-                    identities |> Map.fold (fun state name rows -> state |> Map.add name rows) core
-                    |> fun state -> semantics |> Map.fold (fun current name rows -> current |> Map.add name rows) state
-                    |> fun state -> czptt |> Map.fold (fun current name rows -> current |> Map.add name rows) state
-                    |> Map.add "source_trip_map" (bindings |> Seq.map bindingRow)
-                    |> fun state -> if nativeSummaries.IsSome then state |> Map.add "source_call_map" czpttCalls else state
-                    |> Map.add "source_trip_coverage" (Seq.append (czptt |> Map.tryFind "source_trip_coverage" |> Option.defaultValue Seq.empty) baseCoverage)
+                let czptt =
+                    if CompilerOutput.has input.sidecars "operational_calls" then
+                        czpttRelations input tripCallSummaries nonContiguousTripSequences
+                    else Map.empty
+                let projectedBase = projectedBaseRelations input
+                let merge (state: Map<string, seq<IDictionary<string, obj>>>) (rows: Map<string, seq<IDictionary<string, obj>>>) =
+                    rows |> Map.fold (fun current name values ->
+                        match current |> Map.tryFind name with
+                        | Some existing -> current |> Map.add name (Seq.append existing values)
+                        | None -> current |> Map.add name values) state
+                let generated = [ keys; semantics; czptt ] |> List.fold merge core
+                // Base package rows win over regenerated rows with the same key.
                 let preferBase name baseRows currentRows = seq {
                     let relation = Schema.relations |> Array.find (fun relation -> relation.name = name)
                     let seen = HashSet<string>(StringComparer.Ordinal)
@@ -368,51 +288,33 @@ module PackageWriter =
                     projectedBase
                     |> Map.fold (fun state name baseRows ->
                         let current = state |> Map.tryFind name |> Option.defaultValue Seq.empty
-                        let combined = preferBase name baseRows current
-                        state |> Map.add name combined) generated
-                gtfsZipJob.Wait()
-                ref bindings, ref supplied
+                        state |> Map.add name (preferBase name baseRows current)) generated
+                ref supplied
             for relation in Schema.relations do
                 let target = Path.Combine(serving, relation.name + ".parquet")
                 // route_stop and the zone relations are derived from the finished calls below.
                 if counts.ContainsKey(relation.name) || relation.name = "route_stop" || relation.name.EndsWith("_zone") then () else
-                match compiled |> Map.tryFind relation.name with
-                | Some (path, count) ->
+                let rows = suppliedState.Value |> Map.tryFind relation.name
+                match compiled |> Map.tryFind relation.name, rows with
+                | Some (path, count), None ->
                     phase ("finalize-" + relation.name)
                     File.Move(path, target)
                     counts.[relation.name] <- count
                     advance (int64 count)
-                | None ->
-                    match nativeSummaries with
-                    | _ when relation.name = "source_trip_map" ->
-                        let report operation count =
-                            lock progressLock (fun () -> currentPhase <- "source-trips-" + operation; completed <- count)
-                        counts.[relation.name] <- BindingWriter.write target CancellationToken.None report bindingsState.Value
-                        if nativeSummaries.IsNone then bindingsState.Value <- Array.empty
-                    | None when relation.name = "source_call_map" ->
-                        phase "typed-source_call_map"
-                        let report operation count =
-                            lock progressLock (fun () -> currentPhase <- "source-calls-" + operation; completed <- count)
-                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
-                        counts.[relation.name] <- SourceCallWriter.writeMapped target rows CancellationToken.None report
-                    | Some native when relation.name = "source_call_map" ->
-                        phase "sort-and-write-native-source-calls"
-                        let byTrip = bindingsState.Value |> Seq.map (fun binding -> binding.trip_id, binding.binding_id) |> dict
-                        let report operation count =
-                            lock progressLock (fun () -> currentPhase <- "source-calls-" + operation; completed <- count)
-                        counts.[relation.name] <- SourceCallWriter.write target native.sourceCalls byTrip CancellationToken.None report
-                        bindingsState.Value <- Array.empty
-                    | None when relation.name = "shape" || relation.name = "shape_point" ->
-                        phase ("write-ordered-" + relation.name)
-                        let rows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
-                        counts.[relation.name] <- writeParquet advance target relation rows
-                    | _ ->
-                        phase ("dedup-" + relation.name)
-                        let sourceRows = suppliedState.Value |> Map.tryFind relation.name |> Option.defaultValue Seq.empty
-                        let mutable read = 0L
-                        let rows = deduplicated output relation (sourceRows |> Seq.map (fun row -> read <- read + 1L; advance read; row))
-                        phase ("write-" + relation.name)
-                        counts.[relation.name] <- writeParquet advance target relation rows
+                | written, rows ->
+                    phase ("dedup-" + relation.name)
+                    let sourceRows = rows |> Option.defaultValue Seq.empty
+                    let mutable read = 0L
+                    let unique = deduplicated output relation (sourceRows |> Seq.map (fun row -> read <- read + 1L; advance read; row))
+                    phase ("write-" + relation.name)
+                    match written with
+                    | None -> counts.[relation.name] <- writeParquet advance target relation unique
+                    | Some (path, _) ->
+                        let part = target + ".generated"
+                        writeParquet advance part relation unique |> ignore
+                        counts.[relation.name] <- RelationWriter.concat target relation [ path; part ] CancellationToken.None
+                        File.Delete(path)
+                        File.Delete(part)
                 suppliedState.Value <- suppliedState.Value |> Map.remove relation.name
                 // Relation writers allocate large, short-lived column and
                 // sort buffers.  Reclaim them before the next relation when
@@ -427,12 +329,14 @@ module PackageWriter =
                 RouteStopWriter.finalize serving (zoneInputs input) (fun name count ->
                     lock progressLock (fun () -> currentPhase <- name; completed <- count))
             for KeyValue(name, count) in routeStops.counts do counts.[name] <- count
+            phase "project-gtfs"
+            let feedInfo = match input.gtfs.TryGetValue("feed_info.txt") with | true, table -> Some table | _ -> None
+            GtfsProjection.write serving feedInfo (Path.Combine(output, "gtfs.zip"))
             phase "write-diagnostics-summary"
             writeDiagnosticsSummary input output routeStops.summary
             phase "hash-production-payloads"
             writeManifest input output counts
             phase "validate-production-package"
-            suppliedState.Value <- Map.empty
             reclaimManagedPhaseMemory ()
             Validation.validatePackage output |> ignore
             lock progressLock completePhase

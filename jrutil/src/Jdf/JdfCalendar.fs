@@ -118,7 +118,7 @@ let internal materializeUniqueCalendars (prepared: CalendarPreparation) =
         | _ ->
             let entry, changes = schedule
             let bitmap = entry |> Option.map (fun value -> value.weekdayService |> Array.map (fun active -> if active then '1' else '0') |> String) |> Option.defaultValue "exc"
-            let service = $"gtfs:service:{bitmap}:{unique.Count}"
+            let service = $"jdf:service:{bitmap}:{unique.Count}"
             unique.Add(schedule, service)
             services.Add(trip, service)
             entry |> Option.iter (fun value -> calendar.Add({ value with id = service }))

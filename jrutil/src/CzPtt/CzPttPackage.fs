@@ -26,6 +26,18 @@ let private json (value: obj) =
     use document = JsonDocument.Parse(JsonSerializer.Serialize(value, JsonSerializerOptions(WriteIndented = true)))
     document.RootElement.Clone()
 
+/// SHA-256 of the CZPTT input: the file itself, or for a directory the
+/// digest of its sorted `relative path=file digest` lines.
+let inputDigest (inputPath: string) =
+    if File.Exists(inputPath) then Hashing.sha256File inputPath
+    else
+        let root = Path.GetFullPath(inputPath)
+        Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+        |> Seq.map (fun path -> Path.GetRelativePath(root, path).Replace('\\', '/') + "=" + Hashing.sha256File path)
+        |> Seq.sortWith (fun left right -> String.CompareOrdinal(left, right))
+        |> String.concat "\n"
+        |> Hashing.sha256Text
+
 /// `progress phase state` reports "started"/"completed" for each phase.
 let write (options: Options) (inputPath: string) (outputPath: string) (progress: string -> string -> unit) =
     let finalOutput = Path.GetFullPath(outputPath)
@@ -44,7 +56,7 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
                 CzPttBundle.SpillBacked options.catalog options.conversion inputPath scratch
                 options.sr70Path options.osmPath options.osmAliasesPath progress
         progress "prepare-package-input" "started"
-        let feed = result.feed |> Gtfs.deduplicateCalendar |> Gtfs.fillStandardRequiredFields
+        let feed = result.feed |> Gtfs.deduplicateCalendarWithPrefix "czptt:service" |> Gtfs.fillStandardRequiredFields
         let standard, czech = Gtfs.feedTables feed
         let asTables entries =
             entries |> Seq.map (fun (name, header, rows) -> name, CompilerOutput.memoryTable header rows) |> CompilerOutput.tables
@@ -63,6 +75,7 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
         diagnostics.["merge_diagnostics"] <- box result.mergeDiagnostics
         diagnostics.["coordinate_diagnostics"] <- box result.coordinateDiagnostics
         let input: CompilerOutput.Output = {
+            feed = "czptt"
             gtfs = asTables standard
             czech = asTables czech
             mappings = CompilerOutput.noTables
@@ -71,7 +84,12 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
                 Directory.EnumerateFiles(scratch, "*.parquet")
                 |> Seq.map (fun path -> Path.GetFileNameWithoutExtension(path), CompilerOutput.parquetFileTable path)
                 |> CompilerOutput.tables
-            manifest = json (dict [ "schema_version", box 1; "source_format", box "czptt" ])
+            manifest =
+                json (dict [
+                    "schema_version", box 1; "source_format", box "czptt"
+                    "source", box (dict [
+                        "source_id", box "national-czptt"; "payload_kind", box (if File.Exists(inputPath) then "file" else "directory")
+                        "payload_sha256", box (inputDigest inputPath) ]) ])
             diagnostics = Some (json diagnostics)
             basePackage = None
             diagnosticFiles = Dictionary<string, string>() :> IReadOnlyDictionary<_, _>

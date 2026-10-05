@@ -971,6 +971,8 @@ let convert storagePolicy catalog options inputPath outputDirectory
                     "valid_from", nullableObj (note.validFrom |> Option.map string)
                     "valid_to", nullableObj (note.validTo |> Option.map string)
                     "resolved", box note.resolved
+                    "from_sequence", nullableObj note.firstSequence
+                    "to_sequence", nullableObj note.lastSequence
                 ]))
         |> Seq.sortBy (fun value ->
             string value.["source_note_id"],
@@ -988,6 +990,8 @@ let convert storagePolicy catalog options inputPath outputDirectory
             field<string> "valid_from" true
             field<string> "valid_to" true
             field<bool> "resolved" false
+            field<int> "from_sequence" true
+            field<int> "to_sequence" true
         |] noteRows)
     progress "write-note-metadata" "completed"
 

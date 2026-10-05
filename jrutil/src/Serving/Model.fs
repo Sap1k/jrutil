@@ -9,20 +9,16 @@ open System
 /// this model; provider-specific matching state and diagnostic scores are not
 /// part of the production boundary.
 module Model =
+    /// One source key of a public trip, valid on the trip's dates within
+    /// [validFrom, validTo]. `bindingKey` is a compiler-internal join key.
     type TripBinding = {
-        binding_id: string; source_id: string; trip_namespace: string; source_trip_id: string
-        trip_id: string; service_id: string; valid_from: DateOnly; valid_to: DateOnly
-        binding_status: string; scheduled_start: Nullable<int>; scheduled_end: Nullable<int>
-        source_route_id: string; source_direction_id: string; source_start_location_id: string
-        source_end_location_id: string; source_block_id: string
-        call_pattern_sha256: string; variant_key: string
+        bindingKey: string; sourceId: string; keyNamespace: string; identifier: string
+        tripId: string; serviceId: string; validFrom: DateOnly; validTo: DateOnly
+        method: string
     }
 
     /// Native facts emitted alongside the GTFS sink, owned by the compilation scratch scope.
     type NativeCallArtifacts = {
-        summaries: string
-        sourceCalls: string
-        tripFacts: string
         transferSequences: IDictionary<struct(string * int64), int>
     }
 

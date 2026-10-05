@@ -51,6 +51,8 @@ module ColumnWriter =
         | Date values -> Schema.Date, false, values.Length
         | OptionalDate values -> Schema.Date, true, values.Length
 
+    let rowCount column = let _, _, count = describe column in count
+
     // Includes array headers and text objects, even when a producer happens to
     // share strings. Compression/native headroom belongs to the execution budget.
     let estimatedBytes column =
@@ -183,6 +185,12 @@ module ColumnReader =
         | Schema.Float64, true -> OptionalFloat64 (optionalValues<double> group field count)
         | Schema.Boolean, false -> Boolean (values<bool> group field count)
         | Schema.Boolean, true -> OptionalBoolean (optionalValues<bool> group field count)
+        // Parquet.Net reads date32 back as DateTime.
+        | Schema.Date, false when field.ClrType = typeof<DateTime> ->
+            Date (values<DateTime> group field count |> Array.map DateOnly.FromDateTime)
+        | Schema.Date, true when field.ClrType = typeof<DateTime> ->
+            OptionalDate (optionalValues<DateTime> group field count
+                          |> Array.map (fun value -> if value.HasValue then Nullable(DateOnly.FromDateTime value.Value) else Nullable()))
         | Schema.Date, false -> Date (values<DateOnly> group field count)
         | Schema.Date, true -> OptionalDate (optionalValues<DateOnly> group field count)
 

@@ -1,0 +1,59 @@
+# Intended differences for serving schema 5.0 (docs/PRODUCTION_CONTRACT.md).
+
+# Removed relations: source_trip_map, source_entity_map and the road/rail key
+# relations become source_key; source_call_map becomes call_key (differing
+# sequences only); the three feature/note link relations become assignment;
+# travel_restriction_assignment is renamed travel_restriction; CZPTT
+# operational relations become trip_call rows and operational_point
+# locations; location_zone and source_trip_coverage are dropped.
+file serving/source_trip_map.parquet
+file serving/source_call_map.parquet
+file serving/source_entity_map.parquet
+file serving/source_trip_coverage.parquet
+file serving/road_route_key.parquet
+file serving/road_trip_key.parquet
+file serving/rail_trip_key.parquet
+file serving/service_note_assignment.parquet
+file serving/service_feature_assignment.parquet
+file serving/location_feature.parquet
+file serving/travel_restriction_assignment.parquet
+file serving/operational_location.parquet
+file serving/operational_journey.parquet
+file serving/operational_call.parquet
+file serving/location_zone.parquet
+
+# Added relations.
+file serving/source_key.parquet
+file serving/call_key.parquet
+file serving/assignment.parquet
+file serving/travel_restriction.parquet
+
+# Reshaped relations: feed-prefixed service, transfer, note and assignment ids;
+# location domain, coordinate precision and source, platform codes and
+# operational points; trip run keys; trip_call operational columns and CZPTT
+# railway points; route_stop keyed by route_stop_id; typed note and
+# connection codes.
+relation location
+relation route
+relation service_calendar
+relation service_exception
+relation shape
+relation trip
+relation trip_call
+relation transfer
+relation route_stop
+relation route_stop_zone
+relation call_zone
+relation service_note
+relation connection_claim
+
+# gtfs.zip is projected from the relations: prefixed service ids, platform
+# codes, calendar.txt rows for exception-only services, no stop zone_id.
+gtfs *.txt
+manifest relations
+manifest serving_schema_version
+manifest namespaces
+manifest sources
+manifest files
+manifest feed_version
+diagnostics route_stop_order

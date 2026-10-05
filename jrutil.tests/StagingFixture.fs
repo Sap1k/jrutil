@@ -49,12 +49,18 @@ module StagingFixture =
             if Directory.Exists(root) then
                 for path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories) do
                     diagnosticFiles.[target + "/" + Path.GetRelativePath(root, path).Replace('\\', '/')] <- path
-        { gtfs = files "gtfs-intermediate" "*.txt"
+        let manifest = if File.Exists(manifestPath) then json manifestPath else JsonDocument.Parse("{}").RootElement.Clone()
+        let feed =
+            match manifest.TryGetProperty("source_format") with
+            | true, value when value.ValueKind = JsonValueKind.String && value.GetString() = "czptt" -> "czptt"
+            | _ -> "jdf"
+        { feed = feed
+          gtfs = files "gtfs-intermediate" "*.txt"
           czech = files "extensions" "*.txt"
           mappings = files "mappings" "*.csv"
           reports = files "reports" "*.csv"
           sidecars = sidecars
-          manifest = if File.Exists(manifestPath) then json manifestPath else JsonDocument.Parse("{}").RootElement.Clone()
+          manifest = manifest
           diagnostics = if File.Exists(diagnosticsPath) then Some (json diagnosticsPath) else None
           basePackage = basePackage
           diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> }

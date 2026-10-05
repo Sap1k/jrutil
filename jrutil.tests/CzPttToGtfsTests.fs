@@ -1839,7 +1839,8 @@ type CzPttToGtfsTests() =
                     "gtfs_trip_id"; "stop_sequence"; "source_pa_id"; "source_sequence" |]
                 "source_note_metadata.parquet", [|
                     "source_note_id"; "source_pa_id"; "note_kind"; "source_code"
-                    "gtfs_trip_id"; "label"; "raw_value"; "valid_from"; "valid_to"; "resolved" |]
+                    "gtfs_trip_id"; "label"; "raw_value"; "valid_from"; "valid_to"; "resolved"
+                    "from_sequence"; "to_sequence" |]
                 "source_feature_metadata.parquet", [|
                     "source_feature_id"; "gtfs_trip_id"; "call_sequence"; "source_code"
                     "feature_kind"; "note_id"; "source_object_id" |]
@@ -1889,16 +1890,22 @@ type CzPttToGtfsTests() =
                 JrUtil.Serving.PackageReader.readTextRows
                     (Path.Combine(production, "serving", relation + ".parquet")) columns
                 |> Seq.toArray
-            Assert.AreEqual(2, (rows "operational_location" [|"source_location_id"|]).Length)
-            Assert.AreEqual(1, (rows "operational_journey" [|"source_journey_id"|]).Length)
-            Assert.AreEqual(2, (rows "operational_call" [|"source_journey_id"; "sequence"|]).Length)
+            // Every trip is a part of its path (run).
+            Assert.IsTrue(rows "trip" [|"run_key"; "run_part"|] |> Array.forall (fun row -> row.[0] <> "" && row.[1] <> ""))
+            Assert.IsTrue(rows "location" [|"domain"|] |> Array.forall (fun row -> row.[0] = "heavy_rail"))
             Assert.AreEqual(2, (rows "service_note" [|"note_id"|]).Length)
-            Assert.AreEqual(2, (rows "service_note_assignment" [|"assignment_id"|]).Length)
-            Assert.AreEqual(3, (rows "service_feature_assignment" [|"feature_id"|]).Length)
-            let namespaces = rows "source_trip_map" [|"trip_namespace"|] |> Array.map (fun row -> row.[0])
-            CollectionAssert.Contains(namespaces, "czptt_pa_id")
-            CollectionAssert.Contains(namespaces, "czptt_tr_id")
-            Assert.IsTrue((rows "source_call_map" [|"call_namespace"; "source_sequence"|]) |> Array.exists (fun row -> row.[0] = "czptt_pa_sequence"))
+            let assignments = rows "assignment" [|"kind"|] |> Array.map (fun row -> row.[0])
+            Assert.AreEqual(2, assignments |> Array.filter ((=) "note") |> Array.length)
+            Assert.AreEqual(3, assignments |> Array.filter ((<>) "note") |> Array.length)
+            let namespaces = rows "source_key" [|"namespace"|] |> Array.map (fun row -> row.[0])
+            CollectionAssert.Contains(namespaces, "czptt:pa")
+            CollectionAssert.Contains(namespaces, "czptt:tr")
+            // PA sequences are the trip-part sequences.
+            Assert.AreEqual(0, (rows "call_key" [|"namespace"|]).Length)
+            use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(production, "manifest.json")))
+            let source = manifest.RootElement.GetProperty("sources").[0]
+            Assert.AreEqual("national-czptt", source.GetProperty("source_id").GetString())
+            Assert.AreEqual(CzPttPackage.inputDigest input, source.GetProperty("payload_sha256").GetString())
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 

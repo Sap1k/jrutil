@@ -1,7 +1,7 @@
 {
   "bundle_format": "jrutil-production",
   "bundle_version": 3,
-  "serving_schema_version": 4,
+  "serving_schema_version": "5.0",
   "diagnostics_schema_version": 1,
   "identity_contract": "jrutil-identity-v1",
   "required_files": [

@@ -30,15 +30,11 @@ open JrUtil.RegionalOverlay.Model
 module PackageRows =
     type internal TripCallSummary = TripCallWriter.Summary
 
-    type internal TargetCallSchedule = {
-        firstSequence: int
-        calls: struct(int * Nullable<int> * Nullable<int>) array
-    }
-
     [<Struct>]
     type internal ServingTripRow = {
         tripId: string; routeId: string; serviceId: string
         direction: Nullable<int16>; headsign: string; shortName: string; blockKey: string
+        runKey: string; runPart: Nullable<int16>
         wheelchair: Nullable<int16>; bikes: Nullable<int16>; shapeId: string
     }
 
@@ -71,27 +67,44 @@ module PackageRows =
     let internal nullableString value =
         if String.IsNullOrWhiteSpace(value) then null else box value
 
-    let internal bindingRow (binding: TripBinding) =
+    /// The `source_key` row of a trip binding.
+    let internal tripKeyRow (binding: TripBinding) =
         objectRow [
-            "binding_id", box binding.binding_id
-            "source_id", box binding.source_id
-            "trip_namespace", box binding.trip_namespace
-            "source_trip_id", box binding.source_trip_id
-            "trip_id", box binding.trip_id
-            "service_id", box binding.service_id
-            "valid_from", box binding.valid_from
-            "valid_to", box binding.valid_to
-            "binding_status", box binding.binding_status
-            "scheduled_start", box binding.scheduled_start
-            "scheduled_end", box binding.scheduled_end
-            "source_route_id", nullableString binding.source_route_id
-            "source_direction_id", nullableString binding.source_direction_id
-            "source_start_location_id", nullableString binding.source_start_location_id
-            "source_end_location_id", nullableString binding.source_end_location_id
-            "source_block_id", nullableString binding.source_block_id
-            "call_pattern_sha256", box binding.call_pattern_sha256
-            "variant_key", nullableString binding.variant_key
-        ]
+            "entity_kind", box "trip"; "namespace", box binding.keyNamespace; "identifier", box binding.identifier
+            "public_id", box binding.tripId; "valid_from", box binding.validFrom; "valid_to", box binding.validTo
+            "binding_method", box binding.method ]
+
+    /// Source-qualified key namespace: `pid-gtfs` + `gtfs_trip_id` is
+    /// `pid:gtfs_trip_id`.
+    let internal sourceNamespace (sourceId: string) (name: string) =
+        let system = if sourceId.EndsWith("-gtfs", StringComparison.Ordinal) then sourceId.Substring(0, sourceId.Length - 5) else sourceId
+        system + ":" + name
+
+    /// Overlay trip-matching method as a v5 `binding_method`.
+    let internal bindingMethod (method: string) =
+        if isNull method || method = "" then "source_native"
+        elif method = "authoritative_source_trip_set" || method = "source_native" || method = "operator_crosswalk" then method
+        elif method.StartsWith("companion_assertion", StringComparison.Ordinal) then "companion_assertion"
+        elif method.StartsWith("structural", StringComparison.Ordinal) then "structural_match"
+        else "structural_match"
+
+    /// JDF/CZPTT coordinate precision as a v5 `coordinate_precision`.
+    let internal coordinatePrecision (value: string) =
+        match value with
+        | "estimated" -> "estimated"
+        | "missing" -> "missing"
+        | _ -> "exact"
+
+    /// Source coordinate provenance as a v5 `coordinate_source`.
+    let internal coordinateSource (value: string) =
+        if String.IsNullOrWhiteSpace(value) then null
+        elif value.StartsWith("osm", StringComparison.Ordinal) then "osm"
+        elif value.Contains("route-time", StringComparison.Ordinal) then "route_time"
+        elif value.Contains("route-end", StringComparison.Ordinal) then "route_end"
+        elif value.Contains("sr70", StringComparison.OrdinalIgnoreCase) then "sr70"
+        elif value.Contains("gapfill", StringComparison.OrdinalIgnoreCase) then "gapfill"
+        elif value = "overlay" then "overlay"
+        else "catalogue"
 
     let internal nullableParsed parse value =
         if String.IsNullOrWhiteSpace(value) then null else box (parse value)

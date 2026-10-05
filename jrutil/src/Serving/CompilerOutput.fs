@@ -27,6 +27,9 @@ module CompilerOutput =
     }
 
     type Output = {
+        /// Package feed: "jdf" (with any regional overlay) or "czptt". It is
+        /// the prefix of generated identifiers and selects location.domain.
+        feed: string
         /// Standard GTFS tables by file name, e.g. "trips.txt".
         gtfs: IReadOnlyDictionary<string, Table>
         /// Compiler-internal Czech tables (cz_trips.txt, cz_routes.txt, ...).

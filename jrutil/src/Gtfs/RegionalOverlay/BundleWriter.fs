@@ -160,6 +160,7 @@ let private compile ({
             use document = JsonDocument.Parse(text)
             document.RootElement.Clone()
         let output: JrUtil.Serving.CompilerOutput.Output = {
+            feed = "jdf"
             gtfs = tablesIn "gtfs-intermediate" "*.txt"
             czech = tablesIn "extensions" "*.txt"
             mappings = tablesIn "mappings" "*.csv"

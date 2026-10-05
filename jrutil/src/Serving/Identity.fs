@@ -52,6 +52,10 @@ module Identity =
         |> Seq.map (fun (name, value) -> encodeComponent name + "=" + encodeComponent value)
         |> String.concat "&"
 
-    let bindingId kind fields =
-        let digest = sha256 ("jrutil-serving-v2\n" + kind + "\n" + canonicalFields fields)
-        "v1:" + kind + ":" + digest.Substring(0, 32)
+    let private digest kind fields =
+        (sha256 ("jrutil-serving-v2\n" + kind + "\n" + canonicalFields fields)).Substring(0, 32)
+
+    let bindingId kind fields = "v1:" + kind + ":" + digest kind fields
+
+    /// Feed-prefixed generated identifier (`<feed>:<kind>:<digest>`).
+    let feedId (feed: string) kind fields = feed + ":" + kind + ":" + digest kind fields

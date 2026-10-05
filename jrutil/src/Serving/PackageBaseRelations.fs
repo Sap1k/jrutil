@@ -58,40 +58,29 @@ module PackageBaseRelations =
             let nullableText name (row: IDictionary<string,obj>) =
                 match row.[name] with | null -> "" | value -> unbox<string> value
             let direct name = packageRelationRows package name
+            let feed = input.feed
+            let projected (idField: string) (kind: string) (identity: IDictionary<string,obj> -> string -> (string * string) list) (row: IDictionary<string,obj>) =
+                let trip = nullableText "trip_id" row
+                if trip = "" then
+                    let route = nullableText "route_id" row
+                    if route = "" || targetRoutes.Contains(route) then Seq.singleton row else Seq.empty
+                else
+                    projectTrip trip |> Seq.map (fun struct(target, service) ->
+                        if target = trip && (isNull row.["service_id"] || unbox<string> row.["service_id"] = service) then row else
+                        let result = copyRow row
+                        result.["trip_id"] <- box target
+                        if not (isNull result.["service_id"]) then result.["service_id"] <- box service
+                        result.[idField] <- box (Identity.feedId feed kind (identity row target))
+                        result)
             let notes = direct "service_note"
-            let noteAssignments = direct "service_note_assignment" |> Seq.collect (fun row ->
-                let trip = nullableText "trip_id" row
-                if trip = "" then
-                    let route = nullableText "route_id" row
-                    if route = "" || targetRoutes.Contains(route) then Seq.singleton row else Seq.empty
-                else
-                    projectTrip trip |> Seq.map (fun struct(target, service) ->
-                        if target = trip && (isNull row.["service_id"] || unbox<string> row.["service_id"] = service) then row else
-                        let result = copyRow row
-                        result.["trip_id"] <- box target
-                        if not (isNull result.["service_id"]) then result.["service_id"] <- box service
-                        result.["assignment_id"] <- box (Identity.bindingId "note-assignment" [
-                            "note", unbox<string> row.["note_id"]
-                            "scope", unbox<string> row.["scope"]
-                            "route", nullableText "route_id" row
-                            "trip", target ])
-                        result))
-            let features = direct "service_feature_assignment" |> Seq.collect (fun row ->
-                let trip = nullableText "trip_id" row
-                if trip = "" then
-                    let route = nullableText "route_id" row
-                    if route = "" || targetRoutes.Contains(route) then Seq.singleton row else Seq.empty
-                else
-                    projectTrip trip |> Seq.map (fun struct(target, service) ->
-                        if target = trip && (isNull row.["service_id"] || unbox<string> row.["service_id"] = service) then row else
-                        let result = copyRow row
-                        result.["trip_id"] <- box target
-                        if not (isNull result.["service_id"]) then result.["service_id"] <- box service
-                        result.["feature_id"] <- box (Identity.bindingId "service-feature" [
-                            "trip", target; "code", unbox<string> row.["source_code"]
-                            "source", unbox<string> row.["source_id"] ])
-                        result))
-            let locations = direct "location_feature" |> Seq.filter (fun row -> targetLocations.Contains(unbox<string> row.["location_id"]))
+            let assignments =
+                direct "assignment" |> Seq.collect (fun row ->
+                    match unbox<string> row.["scope"] with
+                    | "location" ->
+                        if targetLocations.Contains(unbox<string> row.["location_id"]) then Seq.singleton row else Seq.empty
+                    | _ ->
+                        projected "assignment_id" "assignment-projection" (fun row target ->
+                            [ "assignment", unbox<string> row.["assignment_id"]; "trip", target ]) row)
             let connections = direct "connection_claim" |> Seq.collect (fun row ->
                 let origin = unbox<string> row.["origin_trip_id"]
                 projectTrip origin |> Seq.map (fun struct(target, service) ->
@@ -101,47 +90,21 @@ module PackageBaseRelations =
                     if not (isNull result.["service_id"]) then result.["service_id"] <- box service
                     let originalId = unbox<string> row.["connection_id"]
                     if target <> origin then
-                        result.["connection_id"] <- box (Identity.bindingId "connection-projection" [ "connection", originalId; "trip", target ])
+                        result.["connection_id"] <- box (Identity.feedId feed "connection-projection" [ "connection", originalId; "trip", target ])
                     let targetTrip = nullableText "target_trip_id" row
                     if targetTrip <> "" then
                         match projectTrip targetTrip |> Seq.tryHead with
                         | Some struct(projected, _) -> result.["target_trip_id"] <- box projected
                         | None -> result.["target_trip_id"] <- null
                     result))
-            let restrictions = direct "travel_restriction_assignment" |> Seq.collect (fun row ->
-                let trip = nullableText "trip_id" row
-                if trip = "" then
-                    let route = nullableText "route_id" row
-                    if route = "" || targetRoutes.Contains(route) then Seq.singleton row else Seq.empty
-                else
-                    projectTrip trip |> Seq.map (fun struct(target, service) ->
-                        if target = trip && (isNull row.["service_id"] || unbox<string> row.["service_id"] = service) then row else
-                        let result = copyRow row
-                        result.["trip_id"] <- box target
-                        if not (isNull result.["service_id"]) then result.["service_id"] <- box service
-                        result.["assignment_id"] <- box (Identity.bindingId "restriction" [
-                            "scope", unbox<string> row.["scope"]
-                            "route", nullableText "route_id" row
-                            "trip", target
-                            "route_stop", unbox<string> row.["source_route_stop_id"]
-                            "group", unbox<string> row.["group_code"] ])
-                        result))
-            let entities = direct "source_entity_map" |> Seq.filter (fun row ->
-                let target = unbox<string> row.["public_id"]
-                match unbox<string> row.["entity_kind"] with
-                | "route" -> targetRoutes.Contains(target)
-                | "stop_place" | "boarding_point" | "location" -> targetLocations.Contains(target)
-                | _ -> true)
-            let routeKeys = direct "road_route_key" |> Seq.filter (fun row -> targetRoutes.Contains(unbox<string> row.["route_id"]))
+            let restrictions =
+                direct "travel_restriction" |> Seq.collect (projected "restriction_id" "restriction-projection" (fun row target ->
+                    [ "restriction", unbox<string> row.["restriction_id"]; "trip", target ]))
             Map [
                 "service_note", notes
-                "service_note_assignment", noteAssignments
-                "service_feature_assignment", features
-                "location_feature", locations
+                "assignment", assignments
                 "connection_claim", connections
-                "travel_restriction_assignment", restrictions
-                "source_entity_map", entities
-                "road_route_key", routeKeys
+                "travel_restriction", restrictions
             ]
 
     /// Deduplicate a generic relation by primary key without sorting it.

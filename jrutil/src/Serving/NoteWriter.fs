@@ -3,7 +3,6 @@ namespace JrUtil.Serving
 
 open System
 open System.IO
-open System.Threading
 
 module NoteWriter =
     type Row = {
@@ -12,14 +11,15 @@ module NoteWriter =
         serviceNoteType: string
     }
 
-    let private scope row =
-        if not (String.IsNullOrEmpty(row.trip)) then "trip"
-        elif not (String.IsNullOrEmpty(row.route)) then "route" else "source"
-    let private assignmentId row =
-        Identity.bindingId "note-assignment" [ "note", row.id; "scope", scope row;
-                                             "route", row.route; "trip", row.trip ]
+    /// The `assignment` that links a note to its trip or route.
+    let assignment (feed: string) (row: Row) : AssignmentWriter.Row =
+        let scope = if not (String.IsNullOrEmpty(row.trip)) then "trip" else "route"
+        { AssignmentWriter.empty with
+            id = Identity.feedId feed "note-assignment" [ "note", row.id; "scope", scope; "route", row.route; "trip", row.trip ]
+            scope = scope; kind = "note"; route = row.route; trip = row.trip; note = row.id }
 
-    let write (prefix: string) sourceId digest token (progress: string -> int64 -> unit) (rows: unit -> seq<Row>) =
+    /// Write `service_note`; its links are `assignment` rows.
+    let write (path: string) token (progress: string -> int64 -> unit) (rows: seq<Row>) =
         let normalize text = if String.IsNullOrWhiteSpace(text) then null else text
         let writeDate (output: BinaryWriter) (value: Nullable<DateOnly>) =
             output.Write(value.HasValue)
@@ -36,29 +36,15 @@ module NoteWriter =
         let bytes row =
             192L + ([| row.id; row.kind; row.route; row.trip; row.label; row.text; row.serviceNoteType |]
                     |> Array.sumBy (fun value -> if isNull value then 0L else 24L + int64 value.Length * 2L))
-        let relation name (key: Row -> string) columns =
-            let path = prefix + "." + name + ".parquet"
-            let schema = Schema.relations |> Array.find (fun relation -> relation.name = name)
-            let keyed = rows () |> Seq.map (fun row -> struct(key row, row))
-            let count =
-                RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token
-                    (fun phase count -> progress (name + "-" + phase) count)
-                    (fun struct((key: string), row) -> bytes row + 48L + int64 key.Length * 2L)
-                    (fun struct(key, _) -> key)
-                    (fun output struct(key, row) -> output.Write(key: string); encode output row)
-                    (fun input -> let key = input.ReadString() in struct(key, decode input)) columns keyed
-            name, (path, count)
-        let note = relation "service_note" _.id (fun rows ->
-            let column f = rows |> Array.map (fun struct(_, row) -> f row)
-            [| ColumnWriter.Text(column _.id); ColumnWriter.Text(column _.kind)
-               ColumnWriter.Text(column (fun row -> normalize row.label)); ColumnWriter.Text(column (fun row -> normalize row.text))
-               ColumnWriter.OptionalDate(column _.validFrom); ColumnWriter.OptionalDate(column _.validTo)
-               ColumnWriter.Text(column (fun row -> normalize row.serviceNoteType))
-               ColumnWriter.Text(Array.create rows.Length sourceId); ColumnWriter.Text(Array.create rows.Length digest)
-               ColumnWriter.Text(column _.id) |])
-        let assignments = relation "service_note_assignment" assignmentId (fun rows ->
-            let column f = rows |> Array.map (fun struct(_, row) -> f row)
-            [| ColumnWriter.Text(rows |> Array.map (fun struct(key, _) -> key)); ColumnWriter.Text(column _.id)
-               ColumnWriter.Text(column scope); ColumnWriter.Text(column (fun row -> normalize row.route))
-               ColumnWriter.Text(column (fun row -> normalize row.trip)); ColumnWriter.Text(Array.create rows.Length null) |])
-        Map [note; assignments]
+        let schema = Schema.relations |> Array.find (fun relation -> relation.name = "service_note")
+        RelationWriter.write path schema (16L * 1024L * 1024L) (4L * 1024L * 1024L) 8192 token
+            (fun phase count -> progress ("service_note-" + phase) count)
+            bytes _.id encode decode
+            (fun rows ->
+                let column f = rows |> Array.map f
+                [| ColumnWriter.Text(column _.id); ColumnWriter.Text(column _.kind)
+                   ColumnWriter.Text(column (fun row -> normalize row.label)); ColumnWriter.Text(column (fun row -> normalize row.text))
+                   ColumnWriter.OptionalDate(column _.validFrom); ColumnWriter.OptionalDate(column _.validTo)
+                   ColumnWriter.Text(column (fun row -> normalize row.serviceNoteType))
+                   ColumnWriter.Text(column _.id) |])
+            rows

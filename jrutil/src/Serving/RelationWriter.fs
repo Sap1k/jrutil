@@ -36,3 +36,13 @@ module RelationWriter =
               size key encode decode columns rows =
         let unique = HashDedup.dedup (Path.GetDirectoryName(path)) dedupBudget token progress schema.name size key encode decode rows
         writeRows path schema columnBudget maximumColumnRows token progress size columns unique
+
+    /// Concatenate relation files of one schema (rows in file order).
+    let concat (path: string) (schema: Schema.Relation) (parts: string seq) (token: CancellationToken) =
+        use output = new ColumnWriter.Writer(path, schema, 8192, token, 64L * 1024L * 1024L)
+        for part in parts do
+            for columns in ColumnReader.groups part schema do
+                let rows = if columns.Length = 0 then 0 else ColumnWriter.rowCount columns.[0]
+                for start in 0 .. 8192 .. rows - 1 do
+                    output.Append(ColumnReader.slice start (min 8192 (rows - start)) columns)
+        int output.RowCount

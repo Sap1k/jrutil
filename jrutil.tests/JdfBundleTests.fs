@@ -250,46 +250,45 @@ type JdfBundleTests() =
             JrUtil.Serving.Validation.compareByteIdentical first second
 
             let files = Directory.GetFiles(first, "*", SearchOption.AllDirectories)
-            assertEqual 33 files.Length
+            assertEqual 22 files.Length
             assertEqual false (Directory.Exists(Path.Combine(first, "gtfs-intermediate")))
             assertEqual false (File.Exists(Path.Combine(first, "source_call_metadata.parquet")))
 
             use manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "manifest.json")))
             assertEqual "jrutil-production" (manifest.RootElement.GetProperty("bundle_format").GetString())
             assertEqual 3 (manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            assertEqual 4 (manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
-            assertEqual 30 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
+            assertEqual "5.0" (manifest.RootElement.GetProperty("serving_schema_version").GetString())
+            assertEqual 19 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
 
             let relation name columns =
                 JrUtil.Serving.PackageReader.readTextRows
                     (Path.Combine(first, "serving", name + ".parquet")) columns
                 |> Seq.toArray
-            assertEqual true ((relation "source_call_map" [|"binding_id"; "source_sequence"; "call_sequence"|]).Length > 0)
+            // JDF calls keep their source sequence, so no call needs a key.
+            assertEqual 0 (relation "call_key" [|"identifier"|]).Length
+            assertEqual true (relation "source_key" [|"namespace"|] |> Array.exists (fun row -> row.[0] = "cis:line_trip"))
             // Zaslinky zone tokens stay on their route stop (slot) when all its calls agree.
             let slotZones = relation "route_stop_zone" [|"route_stop_id"; "source_order"; "zone_code"|]
             assertEqual
                 [ "jdf:route:586001/1/jdf:stop:100/1|0|6"; "jdf:route:586001/1/jdf:stop:100/1|1|193"; "jdf:route:586001/1/jdf:stop:200/1|0|193" ]
                 (slotZones |> Seq.map (String.concat "|") |> Seq.sort |> Seq.toList)
             assertEqual 0 (relation "call_zone" [|"trip_id"|]).Length
-            assertEqual
-                [ "jdf:stop:100|193"; "jdf:stop:100|6"; "jdf:stop:200|193" ]
-                (relation "location_zone" [|"location_id"; "zone_code"|] |> Seq.map (String.concat "|") |> Seq.sort |> Seq.toList)
             // Each served call points at an ordered slot of its line direction.
-            let routeStops = relation "route_stop" [|"route_id"; "route_stop_id"; "direction"; "sequence"; "location_id"|]
-            let slotIds = routeStops |> Seq.map (fun row -> row.[1]) |> set
+            let routeStops = relation "route_stop" [|"route_stop_id"; "route_id"; "direction"; "sequence"; "location_id"|]
+            let slotIds = routeStops |> Seq.map (fun row -> row.[0]) |> set
             assertEqual true (relation "trip_call" [|"route_stop_id"|] |> Array.forall (fun row -> slotIds.Contains(row.[0])))
-            let restrictionStops = relation "travel_restriction_assignment" [|"route_stop_id"|] |> Array.map (fun row -> row.[0]) |> Array.filter ((<>) "")
+            let restrictionStops = relation "travel_restriction" [|"route_stop_id"|] |> Array.map (fun row -> row.[0]) |> Array.filter ((<>) "")
             assertEqual true (restrictionStops.Length > 0)
             assertEqual true (restrictionStops |> Array.forall slotIds.Contains)
             assertEqual 3 ((relation "service_note" [|"note_id"; "kind"; "text"|]).Length)
             assertEqual 1 ((relation "connection_claim" [|"connection_id"; "origin_trip_id"; "wait_minutes"|]).Length)
-            assertEqual 5 ((relation "travel_restriction_assignment" [|"assignment_id"; "scope"; "group_code"|]).Length)
+            assertEqual 5 ((relation "travel_restriction" [|"restriction_id"; "scope"; "group_code"|]).Length)
 
             let scratch = Path.Combine(root, "compiler-view")
             let gtfsPath, _ = JrUtil.Serving.PackageReader.prepareCompilerView first scratch
             let parsed = Gtfs.gtfsParseFolder () gtfsPath
             parsed.trips |> Seq.iter (fun trip ->
-                assertEqual true (trip.serviceId.StartsWith("gtfs:service:")))
+                assertEqual true (trip.serviceId.StartsWith("jdf:service:")))
             let callKeys = parsed.stopTimes |> Seq.map (fun call -> call.tripId, call.stopSequence) |> set
             assertEqual true (callKeys.Count > 0)
         finally
@@ -324,12 +323,9 @@ type JdfBundleTests() =
             let output = Path.Combine(root, "bundle")
             JdfBundle.execute { JdfBundleModel.defaultBundleOptions with snapshotDescriptorPath=descriptorPath; converterVersion="test-commit" } input output |> ignore
 
-            let bindings =
-                JrUtil.Serving.PackageReader.readTextRows
-                    (Path.Combine(output, "serving", "source_trip_map.parquet"))
-                    [|"binding_id"; "trip_id"|]
-                |> Seq.toArray
-            let tripIds = bindings |> Array.map (fun row -> row.[1])
+            let tripIds =
+                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output, "serving", "trip.parquet")) [|"trip_id"|]
+                |> Seq.map (fun row -> row.[0]) |> Seq.toArray
             let copiedTripId = "jdf:trip:586001:260101:11"
             assertEqual true (tripIds |> Array.contains copiedTripId)
 
@@ -341,16 +337,11 @@ type JdfBundleTests() =
                 |> Seq.filter (fun call -> call.tripId = copiedTripId)
                 |> Seq.map (fun call -> call.stopSequence)
                 |> Seq.toArray
-            let bindingIds =
-                bindings
-                |> Seq.filter (fun row -> row.[1] = copiedTripId)
-                |> Seq.map (fun row -> row.[0])
-                |> set
             let actualSequences =
                 JrUtil.Serving.PackageReader.readTextRows
-                    (Path.Combine(output, "serving", "source_call_map.parquet"))
-                    [|"binding_id"; "call_sequence"|]
-                |> Seq.filter (fun row -> bindingIds.Contains(row.[0]))
+                    (Path.Combine(output, "serving", "trip_call.parquet"))
+                    [|"trip_id"; "sequence"|]
+                |> Seq.filter (fun row -> row.[0] = copiedTripId)
                 |> Seq.map (fun row -> Convert.ToInt32(row.[1]))
                 |> Seq.toArray
             assertEqual expectedSequences actualSequences

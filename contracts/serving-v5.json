@@ -1,6 +1,6 @@
 {
   "serving_schema_version": "5.0",
-  "status": "draft",
+  "status": "normative",
   "parquet_metadata": {
     "obehy.schema_version": "5.0",
     "obehy.relation": "<relation name>",
@@ -14,12 +14,12 @@
   "rules": {
     "dates": "date32, inclusive service dates",
     "times": "signed int32 seconds after noon minus 12 h local time (Europe/Prague) of the service date, as GTFS stop_times; equals the wall-clock reading except on DST change days; values above 86400 continue into the next day",
-    "ids": "every primary-key identifier starts with its feed prefix (jdf: or czptt:), so the two packages can share tables; strings are opaque case-sensitive UTF-8",
+    "ids": "every primary-key identifier starts with its feed prefix (jdf: or czptt:, and overlay: for regional-overlay entities in the JDF package), so the two packages can share tables; strings are opaque case-sensitive UTF-8",
     "enumerations": "a field with enum takes only the listed values (int16 enums as decimal text keys)",
     "lists": "repeated rows only",
     "row_group_maximum": 65536,
     "row_order": "unspecified; primary keys are unique",
-    "gtfs": "gtfs.zip is a pure projection of these relations",
+    "gtfs": "gtfs.zip is a pure projection of these relations; feed_info.txt is build metadata passed through from the compiler",
     "provenance": "source ids and snapshot digests are in the manifest; rows keep source_object_id only"
   },
   "enumerations": {

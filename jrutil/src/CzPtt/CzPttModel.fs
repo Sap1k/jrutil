@@ -168,6 +168,9 @@ and CzPttNote = {
     validFrom: LocalDate option
     validTo: LocalDate option
     tripIds: string array
+    /// PA sequences of the note's first and last location, when resolved.
+    firstSequence: int option
+    lastSequence: int option
     resolved: bool
 }
 

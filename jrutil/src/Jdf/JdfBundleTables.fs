@@ -325,42 +325,89 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                 "coordinate_precision", box coordinatePrecision
                 "coordinate_source", nullableObj (stopLocationSources |> Map.tryFind stop.id) ])
 
+    // JDF attribute codes as typed `assignment` kinds (JDF_SEMANTICS.md).
+    // Travel exclusions (§, A-C) are `travel_restriction`, not features.
+    let tripFeatureKind attribute =
+        match attribute with
+        | JdfModel.WeekdayService | JdfModel.HolidaySundayService | JdfModel.DayOfWeekService _ -> Some "calendar_designation"
+        | JdfModel.ReservationAvailable -> Some "reservation_available"
+        | JdfModel.OnlyWithReservation -> Some "reservation_required"
+        | JdfModel.NotStopping -> Some "not_stopping"
+        | JdfModel.TakesDiversion -> Some "diversion"
+        | JdfModel.WheelchairAccessible -> Some "wheelchair_accessible_vehicle"
+        | JdfModel.PartlyWheelchairAccessible -> Some "partly_wheelchair_accessible_vehicle"
+        | JdfModel.FoodAvailable -> Some "refreshments_on_vehicle"
+        | JdfModel.BaggageTransport -> Some "luggage_transport"
+        | JdfModel.BicycleTransport -> Some "bicycle_transport"
+        | JdfModel.RequestStop -> Some "request_stop"
+        | JdfModel.ExitOnly -> Some "exit_only"
+        | JdfModel.BoardingOnly -> Some "boarding_only"
+        | JdfModel.CommisionServiceOnly -> Some "on_request"
+        | JdfModel.ConditionalService -> Some "conditional"
+        | JdfModel.PartOfIntegratedTransport -> Some "integrated_transport"
+        | JdfModel.SelfServiceTicketTrain -> Some "self_service_ticketing"
+        | JdfModel.ToiletsAvailable -> Some "toilet"
+        | JdfModel.WheelchairAccessibleToilets -> Some "accessible_toilet"
+        | JdfModel.CityTransportTransfer -> Some "urban_transport_interchange"
+        | JdfModel.BorderStopOnly -> Some "border_control_only"
+        | JdfModel.VisuallyImpairedAccessible -> Some "visually_impaired_accessible"
+        | JdfModel.AccessibilityTerminal -> Some "accessibility_terminal"
+        | JdfModel.RailwayTransfer -> Some "rail_interchange"
+        | JdfModel.LineTransportTransfer -> Some "line_interchange"
+        | JdfModel.MetroTransfer -> Some "metro_interchange"
+        | JdfModel.ShipTransfer -> Some "ship_terminal"
+        | JdfModel.AirportNearby -> Some "airport_nearby"
+        | JdfModel.ParkAndRideNearby -> Some "park_and_ride"
+        | JdfModel.TravelExclusion0 | JdfModel.TravelExclusion1 | JdfModel.TravelExclusion2 | JdfModel.TravelExclusion3 -> None
+
+    let locationFeatureKind attribute =
+        match attribute with
+        | JdfModel.WheelchairAccessible -> Some "wheelchair_accessible"
+        | JdfModel.FoodAvailable -> Some "refreshments"
+        | JdfModel.ToiletsAvailable -> Some "toilet"
+        | JdfModel.WheelchairAccessibleToilets -> Some "accessible_toilet"
+        | JdfModel.RequestStop -> Some "request_stop"
+        | JdfModel.CityTransportTransfer -> Some "urban_transport_interchange"
+        | JdfModel.BorderStopOnly -> Some "border_control_only"
+        | JdfModel.VisuallyImpairedAccessible -> Some "visually_impaired_accessible"
+        | JdfModel.AccessibilityTerminal -> Some "accessibility_terminal"
+        | JdfModel.RailwayTransfer -> Some "rail_interchange"
+        | JdfModel.LineTransportTransfer -> Some "line_interchange"
+        | JdfModel.MetroTransfer -> Some "metro_interchange"
+        | JdfModel.ShipTransfer -> Some "ship_terminal"
+        | JdfModel.AirportNearby -> Some "airport_nearby"
+        | JdfModel.ParkAndRideNearby -> Some "park_and_ride"
+        | _ -> None
+
     let locationFeatures () =
         batch.stops
         |> Seq.collect (fun stop ->
             let gtfsStopId = JdfGtfsRules.jdfStopId stop.id
             if not (retainedStopIds.Contains(gtfsStopId)) then Seq.empty else
             Jdf.parseAttributes batch stop.attributes
-            |> Seq.map (fun attribute ->
+            |> Seq.choose (fun attribute ->
                 let code = attribute.CsvSerialize()
-                row [
-                    "gtfs_stop_id", box gtfsStopId; "source_code", box code
-                    "feature_kind", box (match attribute with | JdfModel.WheelchairAccessible -> "wheelchair_boarding_accessible" | _ -> "jdf_stop_attribute")
-                    "source_object_id", box $"{gtfsStopId}:attribute:{Uri.EscapeDataString(code)}" ]))
+                locationFeatureKind attribute |> Option.map (fun kind ->
+                    row [
+                        "gtfs_stop_id", box gtfsStopId; "source_code", box code; "feature_kind", box kind
+                        "source_object_id", box $"{gtfsStopId}:attribute:{Uri.EscapeDataString(code)}" ])))
         |> Seq.sortBy (fun value -> string value.["gtfs_stop_id"], string value.["source_code"])
         |> Seq.toArray
 
-    let tripFeatures () : seq<JrUtil.Serving.FeatureWriter.Row> =
+    let tripFeatures () : seq<JrUtil.Serving.AssignmentWriter.Row> =
         batch.trips
         |> Seq.collect (fun trip ->
             let gtfsTripId = JdfGtfsRules.jdfTripId batch trip.routeId trip.routeDistinction trip.id
             if not (retainedTripIds.Contains(gtfsTripId)) then Seq.empty
             else
                 Jdf.parseAttributes batch trip.attributes
-                |> Seq.map (fun attribute ->
+                |> Seq.choose (fun attribute ->
                     let code = attribute.CsvSerialize()
-                    let kind =
-                        match attribute with
-                        | JdfModel.WheelchairAccessible -> "wheelchair_accessible_full"
-                        | JdfModel.PartlyWheelchairAccessible -> "wheelchair_accessible_partial"
-                        | JdfModel.ReservationAvailable -> "reservation_available"
-                        | JdfModel.OnlyWithReservation -> "reservation_required"
-                        | JdfModel.BicycleTransport -> "bicycle_transport"
-                        | _ -> "jdf_trip_attribute"
-                    { scope = "trip"; route = ""; trip = gtfsTripId
-                      callSequence = Nullable(); service = ""; code = code; kind = kind
-                      note = ""
-                      sourceObject = $"{gtfsTripId}:attribute:{Uri.EscapeDataString(code)}" }))
+                    tripFeatureKind attribute |> Option.map (fun kind ->
+                        { JrUtil.Serving.AssignmentWriter.empty with
+                            id = JrUtil.Serving.Identity.feedId "jdf" "trip-feature" [ "trip", gtfsTripId; "code", code; "kind", kind ]
+                            scope = "trip"; kind = kind; trip = gtfsTripId; code = code
+                            sourceObject = $"{gtfsTripId}:attribute:{Uri.EscapeDataString(code)}" })))
 
     let routeStopZones () =
         batch.routeStops
@@ -397,14 +444,14 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
             if not (notice.noteType.IsSome && text.IsNone) && (text.IsSome || label.IsSome) then
                 let trip = JdfGtfsRules.jdfTripId batch notice.routeId notice.routeDistinction notice.tripId
                 if retainedTripIds.Contains(trip) then
-                    yield { empty (tripNoticeId notice.routeId notice.routeDistinction notice.tripId notice.id) "service_note" "" trip with
+                    yield { empty (tripNoticeId notice.routeId notice.routeDistinction notice.tripId notice.id) "timetable_note" "" trip with
                                 text = text |> Option.defaultValue ""; label = label |> Option.defaultValue ""
                                 validFrom = date notice.dateFrom; validTo = date notice.dateTo
                                 serviceNoteType = notice.noteType |> Option.map serviceNoteTypeName |> Option.defaultValue "" }
         for ordinal, notice in batch.reservationOptions |> withOwnerOrdinals (fun notice -> notice.routeId, notice.routeDistinction, notice.tripId) do
             let trip = JdfGtfsRules.jdfTripId batch notice.routeId notice.routeDistinction notice.tripId
             if not (String.IsNullOrWhiteSpace(notice.note)) && retainedTripIds.Contains(trip) then
-                yield { empty (reservationNoticeId notice.routeId notice.routeDistinction notice.tripId ordinal) "reservation" "" trip with text = notice.note }
+                yield { empty (reservationNoticeId notice.routeId notice.routeDistinction notice.tripId ordinal) "reservation_note" "" trip with text = notice.note }
     }
     let transfers () =
         batch.transfers

@@ -54,8 +54,11 @@ type RegionalGtfsOverlayTests() =
             let manifestPath = Path.Combine(stage, "manifest.json")
             let manifest = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(manifestPath)).AsObject()
             match manifest.["source_snapshot"] with
-            | :? System.Text.Json.Nodes.JsonObject as snapshot when isNull snapshot.["source_id"] ->
-                snapshot.["source_id"] <- System.Text.Json.Nodes.JsonValue.Create("national-jdf-vld-drahy")
+            | :? System.Text.Json.Nodes.JsonObject as snapshot ->
+                if isNull snapshot.["source_id"] then
+                    snapshot.["source_id"] <- System.Text.Json.Nodes.JsonValue.Create("national-jdf-vld-drahy")
+                if isNull snapshot.["payload_sha256"] then
+                    snapshot.["payload_sha256"] <- System.Text.Json.Nodes.JsonValue.Create(String('b', 64))
             | _ -> ()
             match manifest.["service_horizon"] with
             | null -> ()
@@ -72,7 +75,7 @@ type RegionalGtfsOverlayTests() =
                 let rows = lines.[1..] |> Array.map (fun line -> let fields = line.Split(',') in fields.[route], (if fields.[kind] = "detour" then "True" else "False"))
                 let relation: JrUtil.Serving.Schema.Relation = {
                     name = "source_route_metadata"
-                    fields = [| for name in [ "gtfs_route_id"; "detour" ] -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false } |]
+                    fields = [| for name in [ "gtfs_route_id"; "detour" ] -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false; enumeration = null } |]
                     primaryKey = [| "gtfs_route_id" |]; foreignKeys = [||] }
                 use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_route_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
                 writer.Append([| JrUtil.Serving.ColumnWriter.Text(rows |> Array.map fst); JrUtil.Serving.ColumnWriter.Text(rows |> Array.map snd) |])
@@ -84,7 +87,7 @@ type RegionalGtfsOverlayTests() =
                 let rows = lines.[1..] |> Array.map (fun line -> line.Split(','))
                 let relation: JrUtil.Serving.Schema.Relation = {
                     name = "source_stop_metadata"
-                    fields = [| for name in header -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false } |]
+                    fields = [| for name in header -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false; enumeration = null } |]
                     primaryKey = [| "gtfs_stop_id" |]; foreignKeys = [||] }
                 use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_stop_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
                 writer.Append(header |> Array.mapi (fun index _ -> JrUtil.Serving.ColumnWriter.Text(rows |> Array.map (fun row -> row.[index]))))
@@ -173,16 +176,16 @@ type RegionalGtfsOverlayTests() =
         let ext = Path.Combine(basePath, "extensions")
         write (Path.Combine(basePath, "manifest.json")) """{"source_snapshot":{"retrieved_at":"2026-08-20T00:00:00+02:00"}}"""
         write (Path.Combine(basePath, "evidence.bin")) "national-evidence"
-        write (Path.Combine(gtfs, "agency.txt")) "agency_id,agency_name,agency_url,agency_timezone\na,National,https://example.test,Europe/Prague\n"
-        write (Path.Combine(gtfs, "stops.txt")) "stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,location_type,parent_station,stop_timezone,wheelchair_boarding,platform_code\nbp1,,City Alpha,,50.0000,14.0000,,,1,,Europe/Prague,0,\nbp2,,Beta,,50.0010,14.0010,,,1,,Europe/Prague,0,\nbp3,,City Clinic Alpha,,50.0001,14.0001,,,1,,Europe/Prague,0,\nbp4,,Gamma,,50.0005,14.0005,,,1,,Europe/Prague,0,\n"
-        write (Path.Combine(gtfs, "routes.txt")) "route_id,agency_id,route_short_name,route_long_name,route_desc,route_type,route_url,route_color,route_text_color,route_sort_order\nr1,a,100,National bus,,701,,111111,ffffff,\nr1v,a,100,National bus variant,,701,,111111,ffffff,\nr2,a,10,National tram,,900,,222222,ffffff,\nr3,a,101,Edited-pattern bus,,701,,333333,ffffff,\nr4,a,102,Availability bus,,701,,444444,ffffff,\n"
-        write (Path.Combine(gtfs, "trips.txt")) "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id,shape_id,wheelchair_accessible,bikes_allowed\nr1,bd,bt1,National Alpha,National short,0,,,1,2\nr1v,bd,bt1dup,Protected variant headsign,Protected variant short,0,,,2,1\nr2,td,bt2,National Beta,National tram short,0,,,1,2\nr3,ed,bt3good,Good aligned schedule,,0,,,1,2\nr3,ed,bt3bad,Bad aligned schedule,,0,,,1,2\nr4,ad,bt4a,Availability A,,0,,,1,2\nr4,ad,bt4b,Availability B,,0,,,1,2\n"
-        write (Path.Combine(gtfs, "calendar_dates.txt")) "service_id,date,exception_type\nbd,20251215,1\nbd,20251216,1\ntd,20251215,1\ned,20251215,1\nad,20251215,1\nold,20240101,1\n"
+        write (Path.Combine(gtfs, "agency.txt")) "agency_id,agency_name,agency_url,agency_timezone\njdf:agency:a,National,https://example.test,Europe/Prague\n"
+        write (Path.Combine(gtfs, "stops.txt")) "stop_id,stop_code,stop_name,stop_desc,stop_lat,stop_lon,zone_id,stop_url,location_type,parent_station,stop_timezone,wheelchair_boarding,platform_code\njdf:stop:bp1,,City Alpha,,50.0000,14.0000,,,1,,Europe/Prague,0,\njdf:stop:bp2,,Beta,,50.0010,14.0010,,,1,,Europe/Prague,0,\njdf:stop:bp3,,City Clinic Alpha,,50.0001,14.0001,,,1,,Europe/Prague,0,\njdf:stop:bp4,,Gamma,,50.0005,14.0005,,,1,,Europe/Prague,0,\n"
+        write (Path.Combine(gtfs, "routes.txt")) "route_id,agency_id,route_short_name,route_long_name,route_desc,route_type,route_url,route_color,route_text_color,route_sort_order\njdf:route:r1,jdf:agency:a,100,National bus,,701,,111111,ffffff,\njdf:route:r1v,jdf:agency:a,100,National bus variant,,701,,111111,ffffff,\njdf:route:r2,jdf:agency:a,10,National tram,,900,,222222,ffffff,\njdf:route:r3,jdf:agency:a,101,Edited-pattern bus,,701,,333333,ffffff,\njdf:route:r4,jdf:agency:a,102,Availability bus,,701,,444444,ffffff,\n"
+        write (Path.Combine(gtfs, "trips.txt")) "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,block_id,shape_id,wheelchair_accessible,bikes_allowed\njdf:route:r1,jdf:service:bd,jdf:trip:bt1,National Alpha,National short,0,,,1,2\njdf:route:r1v,jdf:service:bd,jdf:trip:bt1dup,Protected variant headsign,Protected variant short,0,,,2,1\njdf:route:r2,jdf:service:td,jdf:trip:bt2,National Beta,National tram short,0,,,1,2\njdf:route:r3,jdf:service:ed,jdf:trip:bt3good,Good aligned schedule,,0,,,1,2\njdf:route:r3,jdf:service:ed,jdf:trip:bt3bad,Bad aligned schedule,,0,,,1,2\njdf:route:r4,jdf:service:ad,jdf:trip:bt4a,Availability A,,0,,,1,2\njdf:route:r4,jdf:service:ad,jdf:trip:bt4b,Availability B,,0,,,1,2\n"
+        write (Path.Combine(gtfs, "calendar_dates.txt")) "service_id,date,exception_type\njdf:service:bd,20251215,1\njdf:service:bd,20251216,1\njdf:service:td,20251215,1\njdf:service:ed,20251215,1\njdf:service:ad,20251215,1\njdf:service:old,20240101,1\n"
         write (Path.Combine(gtfs, "feed_info.txt")) "feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version,feed_contact_email\nNational,https://example.test,cs,20240101,20270101,base,\n"
-        write (Path.Combine(ext, "cz_routes.txt")) "route_id,cis_line_id,public_line_number,source_provenance\nr1,100,100,jdf\nr1v,100,100,jdf\nr2,199010,10,jdf\nr3,101,101,jdf\nr4,102,102,jdf\n"
-        write (Path.Combine(gtfs, "stop_times.txt")) "trip_id,arrival_time,departure_time,stop_id,stop_sequence,stop_headsign,pickup_type,drop_off_type,shape_dist_traveled,timepoint\nbt1,08:00:00,08:00:00,bp1,1,,0,0,,1\nbt1,08:05:00,08:05:00,bp4,2,,0,0,,1\nbt1,08:10:00,08:10:00,bp2,3,,0,0,,1\nbt1dup,08:00:00,08:00:00,bp1,1,,0,0,,1\nbt1dup,08:05:00,08:05:00,bp4,2,,0,0,,1\nbt1dup,08:10:00,08:10:00,bp2,3,,0,0,,1\nbt2,09:00:00,09:00:00,bp1,1,,0,0,,1\nbt2,09:10:00,09:10:00,bp2,2,,0,0,,1\nbt3good,10:00:00,10:00:00,bp1,1,,0,0,,1\nbt3good,10:05:00,10:05:00,bp4,2,,0,0,,1\nbt3good,10:06:00,10:06:00,bp3,3,,0,0,,1\nbt3good,10:10:00,10:10:00,bp2,4,,0,0,,1\nbt3bad,10:00:00,10:00:00,bp1,1,,0,0,,1\nbt3bad,10:02:00,10:02:00,bp3,2,,0,0,,1\nbt3bad,10:08:00,10:08:00,bp4,3,,0,0,,1\nbt3bad,10:10:00,10:10:00,bp2,4,,0,0,,1\nbt4a,11:00:00,11:00:00,bp1,1,,0,0,,1\nbt4a,11:10:00,11:10:00,bp2,2,,0,0,,1\nbt4b,11:10:00,11:10:00,bp1,1,,0,0,,1\nbt4b,11:20:00,11:20:00,bp2,2,,0,0,,1\n"
-        write (Path.Combine(ext, "cz_trips.txt")) "trip_id,cis_line_id,cis_trip_id,train_number,source_trip_ids,coverage_sources\nbt1,100,1,,bt1,jdf\nbt1dup,100,1,,bt1dup,jdf\nbt2,,2,,bt2,jdf\nbt3good,101,3,,bt3good,jdf\nbt3bad,101,4,,bt3bad,jdf\nbt4a,102,5,,bt4a,jdf\nbt4b,102,6,,bt4b,jdf\n"
-        write (Path.Combine(ext, "cz_stops.txt")) "stop_id,stop_place_id,cis_stop_id,post_id,asw_id,source_ids\nbp1,bp1,,,,bp1\nbp2,bp2,,,,bp2\nbp3,bp3,,,,bp3\nbp4,bp4,,,,bp4\n"
+        write (Path.Combine(ext, "cz_routes.txt")) "route_id,cis_line_id,public_line_number,source_provenance\njdf:route:r1,000100,100,jdf\njdf:route:r1v,000100,100,jdf\njdf:route:r2,199010,10,jdf\njdf:route:r3,000101,101,jdf\njdf:route:r4,000102,102,jdf\n"
+        write (Path.Combine(gtfs, "stop_times.txt")) "trip_id,arrival_time,departure_time,stop_id,stop_sequence,stop_headsign,pickup_type,drop_off_type,shape_dist_traveled,timepoint\njdf:trip:bt1,08:00:00,08:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt1,08:05:00,08:05:00,jdf:stop:bp4,2,,0,0,,1\njdf:trip:bt1,08:10:00,08:10:00,jdf:stop:bp2,3,,0,0,,1\njdf:trip:bt1dup,08:00:00,08:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt1dup,08:05:00,08:05:00,jdf:stop:bp4,2,,0,0,,1\njdf:trip:bt1dup,08:10:00,08:10:00,jdf:stop:bp2,3,,0,0,,1\njdf:trip:bt2,09:00:00,09:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt2,09:10:00,09:10:00,jdf:stop:bp2,2,,0,0,,1\njdf:trip:bt3good,10:00:00,10:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt3good,10:05:00,10:05:00,jdf:stop:bp4,2,,0,0,,1\njdf:trip:bt3good,10:06:00,10:06:00,jdf:stop:bp3,3,,0,0,,1\njdf:trip:bt3good,10:10:00,10:10:00,jdf:stop:bp2,4,,0,0,,1\njdf:trip:bt3bad,10:00:00,10:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt3bad,10:02:00,10:02:00,jdf:stop:bp3,2,,0,0,,1\njdf:trip:bt3bad,10:08:00,10:08:00,jdf:stop:bp4,3,,0,0,,1\njdf:trip:bt3bad,10:10:00,10:10:00,jdf:stop:bp2,4,,0,0,,1\njdf:trip:bt4a,11:00:00,11:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt4a,11:10:00,11:10:00,jdf:stop:bp2,2,,0,0,,1\njdf:trip:bt4b,11:10:00,11:10:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt4b,11:20:00,11:20:00,jdf:stop:bp2,2,,0,0,,1\n"
+        write (Path.Combine(ext, "cz_trips.txt")) "trip_id,cis_line_id,cis_trip_id,train_number,source_trip_ids,coverage_sources\njdf:trip:bt1,000100,1,,jdf:trip:bt1,jdf\njdf:trip:bt1dup,000100,1,,jdf:trip:bt1dup,jdf\njdf:trip:bt2,,2,,jdf:trip:bt2,jdf\njdf:trip:bt3good,000101,3,,jdf:trip:bt3good,jdf\njdf:trip:bt3bad,000101,4,,jdf:trip:bt3bad,jdf\njdf:trip:bt4a,000102,5,,jdf:trip:bt4a,jdf\njdf:trip:bt4b,000102,6,,jdf:trip:bt4b,jdf\n"
+        write (Path.Combine(ext, "cz_stops.txt")) "stop_id,stop_place_id,cis_stop_id,post_id,asw_id,source_ids\njdf:stop:bp1,jdf:stop:bp1,,,,jdf:stop:bp1\njdf:stop:bp2,jdf:stop:bp2,,,,jdf:stop:bp2\njdf:stop:bp3,jdf:stop:bp3,,,,jdf:stop:bp3\njdf:stop:bp4,jdf:stop:bp4,,,,jdf:stop:bp4\n"
 
         let sourceDir = Path.Combine(root, "source")
         write (Path.Combine(sourceDir, "agency.txt")) "agency_id,agency_name,agency_url,agency_timezone\npid,PID,https://pid.cz,Europe/Prague\n"
@@ -192,10 +195,10 @@ type RegionalGtfsOverlayTests() =
             .Replace("sa,Alpha,", "sa,City Alpha,")
             .Replace("Unrelated source label", "Gamma") |> write fixtureStops
         write (Path.Combine(sourceDir, "routes.txt")) "route_id,agency_id,route_short_name,route_long_name,route_type,route_color,route_text_color\nsrbus,pid,X,PID bus,3,abcdef,000000\nsrtram,pid,10,PID tram,0,fedcba,111111\nsredit,pid,101,PID edited bus,3,aaaaaa,ffffff\nsravail,pid,102,PID availability bus,3,bbbbbb,ffffff\nsrrail,pid,R,Rail,2,999999,ffffff\n"
-        write (Path.Combine(sourceDir, "trips.txt")) "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,shape_id,sub_agency_id\nsrbus,sd,st1_251201,PID headsign,PID short,1,sh1,sub1\nsrbus,sd,st1_251215,PID newer headsign,PID newer short,1,sh1,sub1\nsrtram,td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2\nsredit,ed,st3_251201,PID edited headsign,,0,,sub3\nsravail,ad,st4claim_251201,PID availability exact,,0,,sub4\nsravail,ad,st4amb_251201,PID availability ambiguous,,0,,sub4\nsrrail,rd,railtrip_251201,Rail,Rail,0,railshape,rail\n"
+        write (Path.Combine(sourceDir, "trips.txt")) "route_id,service_id,trip_id,trip_headsign,trip_short_name,direction_id,shape_id,sub_agency_id\nsrbus,sd,st1_251201,PID headsign,PID short,1,sh1,sub1\nsrbus,sd,st1_251215,PID newer headsign,PID newer short,1,sh1,sub1\nsrtram,jdf:service:td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2\nsredit,jdf:service:ed,st3_251201,PID edited headsign,,0,,sub3\nsravail,jdf:service:ad,st4claim_251201,PID availability exact,,0,,sub4\nsravail,jdf:service:ad,st4amb_251201,PID availability ambiguous,,0,,sub4\nsrrail,rd,railtrip_251201,Rail,Rail,0,railshape,rail\n"
         write (Path.Combine(sourceDir, "stop_times.txt")) "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type,shape_dist_traveled\nst1_251201,08:03:00,08:03:00,sa,1,0,0,0\nst1_251201,08:08:00,08:08:00,sg,2,0,0,500\nst1_251201,08:13:00,08:13:00,sb,3,0,0,1000\nst1_251215,08:04:00,08:04:00,sa,1,0,0,0\nst1_251215,08:09:00,08:09:00,sg,2,0,0,500\nst1_251215,08:14:00,08:14:00,sb,3,0,0,1000\nst2_251201,09:00:45,09:00:45,sa,1,0,0,0\nst2_251201,09:10:05,09:10:05,sb,2,0,0,1000\nst3_251201,10:00:00,10:00:00,sa,1,0,0,0\nst3_251201,10:05:00,10:05:00,sg,2,0,0,500\nst3_251201,10:10:00,10:10:00,sb,3,0,0,1000\nst4claim_251201,11:00:00,11:00:00,sa,1,0,0,0\nst4claim_251201,11:10:00,11:10:00,sb,2,0,0,1000\nst4amb_251201,11:05:00,11:05:00,sa,1,0,0,0\nst4amb_251201,11:15:00,11:15:00,sb,2,0,0,1000\nrailtrip_251201,10:00:00,10:00:00,sa,1,0,0,0\nrailtrip_251201,10:10:00,10:10:00,sb,2,0,0,1000\n"
-        write (Path.Combine(sourceDir, "calendar_dates.txt")) "service_id,date,exception_type\nsd,20251215,1\ntd,20251215,1\ned,20251215,1\nad,20251215,1\nrd,20251215,1\n"
-        write (Path.Combine(sourceDir, "route_sub_agencies.txt")) "route_id,route_licence_number,sub_agency_id,sub_agency_name\nsrbus,100,sub1,One\nsrbus,999,sub9,Other licence\nsrtram,199010,sub2,Tram\nsredit,101,sub3,Edited\nsravail,102,sub4,Availability\nsrrail,777,rail,Rail\n"
+        write (Path.Combine(sourceDir, "calendar_dates.txt")) "service_id,date,exception_type\nsd,20251215,1\njdf:service:td,20251215,1\njdf:service:ed,20251215,1\njdf:service:ad,20251215,1\nrd,20251215,1\n"
+        write (Path.Combine(sourceDir, "route_sub_agencies.txt")) "route_id,route_licence_number,sub_agency_id,sub_agency_name\nsrbus,000100,sub1,One\nsrbus,000999,sub9,Other licence\nsrtram,199010,sub2,Tram\nsredit,000101,sub3,Edited\nsravail,000102,sub4,Availability\nsrrail,000777,rail,Rail\n"
         write (Path.Combine(sourceDir, "shapes.txt")) "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,shape_dist_traveled\nsh1,50.0001,14.0001,1,0\nsh1,50.0005,14.0005,2,500\nsh1,50.0011,14.0011,3,1000\nsh2,50.0001,14.0001,1,0\nsh2,50.0012,14.0012,2,1000\nrailshape,50,14,1,0\nrailshape,51,15,2,1000\n"
         write (Path.Combine(sourceDir, "transfers.txt")) "from_stop_id,to_stop_id,transfer_type,min_transfer_time,from_trip_id,to_trip_id,max_waiting_time\nsb,sa,2,60,st1_251215,st2_251201,300\nsa,sb,2,30,,,120\nsa,sb,2,30,railtrip_251201,st1_251215,120\n"
         write (Path.Combine(sourceDir, "pathways.txt")) "pathway_id,from_stop_id,to_stop_id,pathway_mode,is_bidirectional\np,sa,sb,1,1\n"
@@ -227,7 +230,7 @@ type RegionalGtfsOverlayTests() =
         try
             let basePath, sourceZip, descriptor, policy = makeFixture root
             let czRoutes = Path.Combine(basePath, "extensions", "cz_routes.txt")
-            write czRoutes "route_id,cis_line_id,public_line_number,source_provenance,timetable_kind\nr1,100,100,jdf,regular\nr1v,100,100,jdf,detour\nr2,199010,10,jdf,regular\nr3,101,101,jdf,regular\nr4,102,102,jdf,regular\n"
+            write czRoutes "route_id,cis_line_id,public_line_number,source_provenance,timetable_kind\njdf:route:r1,000100,100,jdf,regular\njdf:route:r1v,000100,100,jdf,detour\njdf:route:r2,199010,10,jdf,regular\njdf:route:r3,000101,101,jdf,regular\njdf:route:r4,000102,102,jdf,regular\n"
             let json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(policy))
             json.["source"].["trip_set_authority"].["modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"bus\"]")
             json.["source"].["trip_set_authority"].["source_native_modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"bus\"]")
@@ -238,7 +241,7 @@ type RegionalGtfsOverlayTests() =
             let routes = readGtfs output "routes.txt"
             let routeLine id =
                 routes.Split('\n') |> Array.find (fun line -> line.StartsWith(id + ",", StringComparison.Ordinal) || line.StartsWith("\"" + id + "\",", StringComparison.Ordinal))
-            Assert.IsTrue((routeLine "r1").Contains("abcdef"), "The regular route takes source display fields")
+            Assert.IsTrue((routeLine "jdf:route:r1").Contains("abcdef"), "The regular route takes source display fields")
             Assert.IsFalse(
                 routes.Contains("overlay:pid-gtfs:route:"),
                 "A line with one regular and one detour route must not get a source-native route:
@@ -251,7 +254,7 @@ type RegionalGtfsOverlayTests() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-location-" + Guid.NewGuid().ToString("N"))
         try
             let basePath, sourceZip, descriptor, policy = makeFixture root
-            write (Path.Combine(basePath, "stop-metadata.csv")) "gtfs_stop_id,town,district,nearby_place,country,okres,coordinate_precision\nbp1,City,Alpha,,CZ,BM,stop\nbp2,Beta,,,CZ,KV,estimated\n"
+            write (Path.Combine(basePath, "stop-metadata.csv")) "gtfs_stop_id,town,district,nearby_place,country,okres,coordinate_precision\njdf:stop:bp1,City,Alpha,,CZ,BM,stop\njdf:stop:bp2,Beta,,,CZ,KV,estimated\n"
             let metadata package =
                 JrUtil.Serving.PackageReader.readTextRows (Path.Combine(package, "serving", "location.parquet"))
                     [| "location_id"; "municipality_name"; "district_name"; "district_code"; "nearby_place"; "country_code"; "coordinate_precision" |]
@@ -259,14 +262,14 @@ type RegionalGtfsOverlayTests() =
                 |> dict
             let basePackage = productionBase basePath
             let baseLocations = metadata basePackage
-            Assert.AreEqual("City|Alpha|BM||CZ|stop", baseLocations.["bp1"])
-            Assert.AreEqual("Beta||KV||CZ|estimated", baseLocations.["bp2"])
+            Assert.AreEqual("City|Alpha|BM||CZ|exact", baseLocations.["jdf:stop:bp1"])
+            Assert.AreEqual("Beta||KV||CZ|estimated", baseLocations.["jdf:stop:bp2"])
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
             execute None policy 2026 binding basePath output |> ignore
             let outputLocations = metadata output
-            Assert.AreEqual("City|Alpha|BM||CZ|stop", outputLocations.["bp1"], "The overlay keeps base location metadata")
-            Assert.AreEqual("Beta||KV||CZ|estimated", outputLocations.["bp2"])
+            Assert.AreEqual("City|Alpha|BM||CZ|exact", outputLocations.["jdf:stop:bp1"], "The overlay keeps base location metadata")
+            Assert.AreEqual("Beta||KV||CZ|estimated", outputLocations.["jdf:stop:bp2"])
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -306,11 +309,11 @@ type RegionalGtfsOverlayTests() =
             let diagnosticEvents = File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv")
             Assert.IsTrue(diagnosticEvents.Contains("trip_equivalent_tie_expanded"))
             Assert.IsFalse(diagnosticEvents.Split('\n') |> Array.exists (fun line -> line.Contains("ambiguous") && line.Contains("st1_")))
-            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "traces" "source_to_output_trips.csv").Contains("bt1dup"))
+            Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "traces" "source_to_output_trips.csv").Contains("jdf:trip:bt1dup"))
             let tripMappings = File.ReadAllText(diagnosticPath output1 "traces" "source_to_output_trips.csv")
-            Assert.IsTrue(tripMappings.Contains("st3_251201") && tripMappings.Contains("bt3good"), "Aligned intermediate call times must resolve an edited-pattern tie")
-            Assert.IsFalse(tripMappings.Split('\n') |> Array.exists (fun line -> line.Contains("st3_251201") && line.Contains("bt3bad")))
-            Assert.IsTrue(tripMappings.Split('\n') |> Array.exists (fun line -> line.Contains("st4amb_251201") && line.Contains("bt4b")))
+            Assert.IsTrue(tripMappings.Contains("st3_251201") && tripMappings.Contains("jdf:trip:bt3good"), "Aligned intermediate call times must resolve an edited-pattern tie")
+            Assert.IsFalse(tripMappings.Split('\n') |> Array.exists (fun line -> line.Contains("st3_251201") && line.Contains("jdf:trip:bt3bad")))
+            Assert.IsTrue(tripMappings.Split('\n') |> Array.exists (fun line -> line.Contains("st4amb_251201") && line.Contains("jdf:trip:bt4b")))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("trip_target_availability_resolved"))
             let baseTripMappings = File.ReadAllLines(diagnosticPath output1 "traces" "base_to_output_trips.csv") |> Array.skip 1
             Assert.AreEqual(
@@ -327,7 +330,7 @@ type RegionalGtfsOverlayTests() =
             Assert.IsFalse(trips.Contains("PID headsign"))
             Assert.IsTrue(trips.Contains("National Alpha"))
             Assert.IsTrue(trips.Contains("Protected variant headsign"), "Equal-claim expansion must preserve target-specific national trip fields")
-            Assert.AreEqual(2, trips.Split('\n') |> Array.filter (fun line -> line.Contains("bt1:overlay:")) |> Array.length)
+            Assert.AreEqual(2, trips.Split('\n') |> Array.filter (fun line -> line.Contains("jdf:trip:bt1:overlay:")) |> Array.length)
             let stopTimes = readGtfs output1 "stop_times.txt"
             Assert.IsTrue(stopTimes.Contains("08:04:00"), "The newest overlapping source revision must provide authoritative times")
             Assert.IsFalse(stopTimes.Contains("08:03:00"), "An older overlapping source revision must be superseded")
@@ -338,7 +341,7 @@ type RegionalGtfsOverlayTests() =
             let stops = readGtfs output1 "stops.txt"
             Assert.IsTrue(stops.Contains("overlay:pid-gtfs:post:"))
             Assert.IsFalse(stops.Contains("PID headsign"))
-            let inferredParent = stops.Split('\n') |> Array.find (fun line -> line.StartsWith("bp4,", StringComparison.Ordinal) || line.StartsWith("\"bp4\",", StringComparison.Ordinal))
+            let inferredParent = stops.Split('\n') |> Array.find (fun line -> line.StartsWith("jdf:stop:bp4,", StringComparison.Ordinal) || line.StartsWith("\"jdf:stop:bp4\",", StringComparison.Ordinal))
             Assert.IsTrue(inferredParent.Contains("51") && inferredParent.Contains("15"), "A context-inferred stop place must receive the valid source centroid")
             let sourcePostIds =
                 stops.Split('\n')
@@ -453,9 +456,9 @@ type RegionalGtfsOverlayTests() =
             let sourceTrips = Path.Combine(root, "source", "trips.txt")
             File.ReadAllText(sourceTrips)
                 .Replace(
-                    "srtram,td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2",
-                    "srtram,td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2\n" +
-                    "srtram,td,st2dup_251201,PID tram headsign,PID tram short,1,sh2,sub2")
+                    "srtram,jdf:service:td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2",
+                    "srtram,jdf:service:td,st2_251201,PID tram headsign,PID tram short,1,sh2,sub2\n" +
+                    "srtram,jdf:service:td,st2dup_251201,PID tram headsign,PID tram short,1,sh2,sub2")
             |> write sourceTrips
             File.Delete(sourceZip)
             ZipFile.CreateFromDirectory(Path.Combine(root, "source"), sourceZip)
@@ -485,7 +488,7 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(
                 File.ReadAllText(Path.Combine(output, "diagnostics.json")).Contains("\"trip\"", StringComparison.Ordinal),
                 "Authoritative additions must reach coverage report generation")
-            Assert.IsFalse((readGtfs output "trips.txt").Split('\n') |> Array.exists (fun line -> line.Contains(",bt2,")))
+            Assert.IsFalse((readGtfs output "trips.txt").Split('\n') |> Array.exists (fun line -> line.Contains(",jdf:trip:bt2,")))
             let additionCalls =
                 (readGtfs output "stop_times.txt").Split('\n')
                 |> Array.filter (fun line -> line.StartsWith(additionTripId + ",", StringComparison.Ordinal) || line.StartsWith("\"" + additionTripId + "\",", StringComparison.Ordinal))
@@ -600,7 +603,8 @@ type RegionalGtfsOverlayTests() =
             Assert.AreEqual(1, selected.Length, "One PID trip must not inherit two baseline instances")
             let noteAssignments =
                 JrUtil.Serving.PackageReader.readTextRows
-                    (Path.Combine(output, "serving", "service_note_assignment.parquet")) [|"assignment_id"|]
+                    (Path.Combine(output, "serving", "assignment.parquet")) [|"kind"|]
+                |> Seq.filter (fun row -> row.[0] = "note")
                 |> Seq.length
             Assert.AreEqual(0, noteAssignments, "Snapshot-only evidence must not become an unbounded semantic assignment")
             Assert.IsTrue(File.ReadAllText(Path.Combine(output + ".diagnostics", "manifest.json")).Contains("base-package"))
@@ -627,7 +631,7 @@ type RegionalGtfsOverlayTests() =
             let output = Path.Combine(root, "output")
             execute None policy 2026 binding basePath output |> ignore
             let trips = (readGtfs output "trips.txt").Split('\n')
-            let trip = trips |> Array.find (fun row -> row.Contains("\"bt2\""))
+            let trip = trips |> Array.find (fun row -> row.Contains("\"jdf:trip:bt2\""))
             let routeId = trip.Split(',').[0].Trim('"')
             Assert.IsTrue(routeId.StartsWith("overlay:pid-gtfs:route:"))
             let routes = (readGtfs output "routes.txt").Split('\n')
@@ -636,12 +640,12 @@ type RegionalGtfsOverlayTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``Configured radius finds a unique stop beyond the old 125 metre limit``() =
+    member _.``Configured radius finds a unique stop beyond the jdf:service:old 125 metre limit``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-radius-" + Guid.NewGuid().ToString("N"))
         try
             let basePath, sourceZip, descriptor, policy = makeFixture root
             let baseStops = Path.Combine(basePath, "gtfs-intermediate", "stops.txt")
-            File.ReadAllText(baseStops).Replace("bp2,,Beta,,50.0010", "bp2,,Beta,,50.0030") |> write baseStops
+            File.ReadAllText(baseStops).Replace("jdf:stop:bp2,,Beta,,50.0010", "jdf:stop:bp2,,Beta,,50.0030") |> write baseStops
             write (Path.Combine(root, "stops.csv")) "source_namespace,source_id,target_namespace,target_id,valid_from,valid_to,review_note\n"
             File.ReadAllText(policy).Replace("\"maximum_distance_metres\": 125", "\"maximum_distance_metres\": 300") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
@@ -658,7 +662,7 @@ type RegionalGtfsOverlayTests() =
         try
             let basePath, sourceZip, descriptor, policy = makeFixture root
             let baseStops = Path.Combine(basePath, "gtfs-intermediate", "stops.txt")
-            File.ReadAllText(baseStops).Replace("bp4,,Gamma,,50.0005,14.0005", "bp4,,Poliklinika Budějovická,,50.0005,14.0005") |> write baseStops
+            File.ReadAllText(baseStops).Replace("jdf:stop:bp4,,Gamma,,50.0005,14.0005", "jdf:stop:bp4,,Poliklinika Budějovická,,50.0005,14.0005") |> write baseStops
             let sourceDir = Path.Combine(root, "source")
             let sourceStops = Path.Combine(sourceDir, "stops.txt")
             File.ReadAllText(sourceStops).Replace("sg,Gamma,51.0000,15.0000", "sg,Budějovická,50.0005,14.0005") |> write sourceStops
@@ -683,13 +687,13 @@ type RegionalGtfsOverlayTests() =
         try
             let basePath, sourceZip, descriptor, policy = makeFixture root
             let baseStops = Path.Combine(basePath, "gtfs-intermediate", "stops.txt")
-            File.ReadAllText(baseStops).Replace("bp2,,Beta,,50.0010,14.0010", "bp2,,Beta [?],,49.0000,13.0000") |> write baseStops
+            File.ReadAllText(baseStops).Replace("jdf:stop:bp2,,Beta,,50.0010,14.0010", "jdf:stop:bp2,,Beta [?],,49.0000,13.0000") |> write baseStops
             write (Path.Combine(root, "stops.csv")) "source_namespace,source_id,target_namespace,target_id,valid_from,valid_to,review_note\n"
             File.ReadAllText(policy).Replace("\"modes\": []", "\"modes\": [\"tram\"]") |> write policy
             let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
             let output = Path.Combine(root, "output")
             execute None policy 2026 binding basePath output |> ignore
-            let stop = (readGtfs output "stops.txt").Split('\n') |> Array.find (fun row -> row.StartsWith("bp2,", StringComparison.Ordinal) || row.StartsWith("\"bp2\",", StringComparison.Ordinal))
+            let stop = (readGtfs output "stops.txt").Split('\n') |> Array.find (fun row -> row.StartsWith("jdf:stop:bp2,", StringComparison.Ordinal) || row.StartsWith("\"jdf:stop:bp2\",", StringComparison.Ordinal))
             Assert.IsTrue(stop.Contains("Beta") && not (stop.Contains("[?]")) && stop.Contains("50.0011") && stop.Contains("14.0011"), stop)
             let report = File.ReadAllText(diagnosticPath output "events" "stop_group_matches.csv")
             Assert.IsTrue(report.Contains("gtfs_authoritative") && report.Contains("pid_name_and_coordinates"))
@@ -861,7 +865,7 @@ type RegionalGtfsOverlayTests() =
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
             Assert.AreEqual(3, manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            Assert.AreEqual(4, manifest.RootElement.GetProperty("serving_schema_version").GetInt32())
+            Assert.AreEqual("5.0", manifest.RootElement.GetProperty("serving_schema_version").GetString())
             // The production base contributes its own source.
             Assert.AreEqual(3, manifest.RootElement.GetProperty("sources").GetArrayLength())
             JrUtil.Serving.Validation.validatePackage output1 |> ignore
@@ -882,17 +886,18 @@ type RegionalGtfsOverlayTests() =
             Assert.IsFalse(trips.Contains("jr"), "Heavy rail must remain excluded")
             let jmkTripBindings =
                 JrUtil.Serving.PackageReader.readTextRows
-                    (Path.Combine(output1, "serving", "source_trip_map.parquet"))
-                    [| "source_id"; "source_trip_id" |]
+                    (Path.Combine(output1, "serving", "source_key.parquet"))
+                    [| "namespace"; "identifier" |]
                 |> Seq.toArray
             Assert.IsFalse(
-                jmkTripBindings |> Array.exists (fun row -> row.[0] = "ids-jmk-gtfs" && row.[1] = "jt"),
+                jmkTripBindings |> Array.exists (fun row -> row.[0] = "ids-jmk:gtfs_trip_id" && row.[1] = "jt"),
                 "PID native-mode permissions must not make an unmatched JMK trolleybus native")
             let zones = File.ReadAllText(diagnosticPath output1 "projection/czech" "cz_stop_zones.txt")
             Assert.IsTrue(zones.Contains("ids-jmk-gtfs") && zones.Contains("overlay:ids-jmk-gtfs:zone:"), zones)
             // IDS JMK stop zones reach the places their trips serve.
             let callZoneSystems =
-                JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output1, "serving", "location_zone.parquet")) [| "zone_system" |]
+                [ "route_stop_zone"; "call_zone" ]
+                |> Seq.collect (fun name -> JrUtil.Serving.PackageReader.readTextRows (Path.Combine(output1, "serving", name + ".parquet")) [| "zone_system" |])
                 |> Seq.map (fun row -> row.[0]) |> Seq.toArray
             Assert.IsTrue(callZoneSystems |> Array.contains "ids-jmk", String.Join(",", callZoneSystems))
             Assert.IsTrue(File.ReadAllText(diagnosticPath output1 "events" "diagnostics.csv").Contains("cross_source_fact_coalesced"))

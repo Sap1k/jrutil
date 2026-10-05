@@ -14,12 +14,8 @@ open JrUtil.GtfsModel
 
 /// Native call facts shared by compiler producers and their serving sink.
 module TripCallWriter =
-    type Summary = {
-        firstSequence: int; lastSequence: int
-        firstStopId: string; lastStopId: string
-        scheduledStart: Nullable<int>; scheduledEnd: Nullable<int>
-        callPatternSha256: string
-    }
+    /// First and last call sequence of a trip.
+    type Summary = { firstSequence: int; lastSequence: int }
 
     [<Struct>]
     type Row = {
@@ -31,12 +27,14 @@ module TripCallWriter =
         routeStopId: string
         arrival: Nullable<int>
         departure: Nullable<int>
-        passage: Nullable<int>
         pickup: int16
         dropoff: int16
         timepoint: bool
         headsign: string
         distance: Nullable<double>
+        subsidiaryCode: string
+        subsidiaryName: string
+        activeLineCode: string
     }
 
     let fromGtfs (call: StopTime) location boarding routeStop =
@@ -46,75 +44,12 @@ module TripCallWriter =
             | Some NoService -> 1s | Some PhoneBefore -> 2s | Some CoordinationWithDriver -> 3s
         { tripId = call.tripId; sequence = call.stopSequence; locationId = location
           passengerService = true; boardingPointId = boarding; routeStopId = routeStop
-          arrival = seconds call.arrivalTime; departure = seconds call.departureTime; passage = Nullable()
+          arrival = seconds call.arrivalTime; departure = seconds call.departureTime
           pickup = service call.pickupType; dropoff = service call.dropoffType
           timepoint = call.timepoint <> Some Approximate
           headsign = call.headsign |> Option.filter (String.IsNullOrWhiteSpace >> not) |> Option.defaultValue null
-          distance = call.shapeDistTraveled |> Option.map (double >> Nullable) |> Option.defaultValue (Nullable()) }
-
-    /// Append-only typed compiler metadata, outside the production inventory.
-    type SummaryWriter(path: string) =
-        let output = new BinaryWriter(File.Create(path), Encoding.UTF8)
-        let hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
-        let mutable trip = ""
-        let mutable first = Unchecked.defaultof<StopTime>
-        let mutable last = Unchecked.defaultof<StopTime>
-        let mutable closed = false
-        let periodText (value: NodaTime.Period) =
-            let period = value.Normalize()
-            let format (value: int64) = if value < 0L then sprintf "%02d" value else value.ToString("00", CultureInfo.InvariantCulture)
-            String.Concat(format (period.Hours + int64 period.Days * 24L), ":", format period.Minutes, ":", format period.Seconds)
-        let time value = value |> Option.map periodText |> Option.defaultValue ""
-        let service = function
-            | None -> "" | Some RegularlyScheduled -> "0" | Some NoService -> "1"
-            | Some PhoneBefore -> "2" | Some CoordinationWithDriver -> "3"
-        let writeTime (value: NodaTime.Period option) =
-            output.Write(value.IsSome)
-            value |> Option.iter (fun value -> output.Write(int (value.ToDuration().TotalSeconds)))
-        let finish () =
-            if trip <> "" then
-                output.Write(trip)
-                output.Write(first.stopSequence); output.Write(last.stopSequence)
-                output.Write(first.stopId); output.Write(last.stopId)
-                writeTime (first.departureTime |> Option.orElse first.arrivalTime)
-                writeTime (last.arrivalTime |> Option.orElse last.departureTime)
-                output.Write("v1:" + (hash.GetHashAndReset() |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()))
-        member _.Append(call: StopTime) =
-            if closed then raise (ObjectDisposedException("CallSummaryWriter"))
-            if trip <> call.tripId then
-                finish ()
-                trip <- call.tripId
-                first <- call
-            else hash.AppendData([| 10uy |])
-            [ call.stopSequence.ToString(CultureInfo.InvariantCulture); call.stopId
-              time call.arrivalTime; time call.departureTime; service call.pickupType; service call.dropoffType ]
-            |> Identity.compositeKey |> Encoding.UTF8.GetBytes |> hash.AppendData
-            last <- call
-        member _.Complete() =
-            if not closed then
-                finish ()
-                output.Dispose()
-                hash.Dispose()
-                closed <- true
-        interface IDisposable with
-            member _.Dispose() =
-                if not closed then
-                    closed <- true
-                    output.Dispose()
-                    hash.Dispose()
-
-    let readSummaries path =
-        let result = Dictionary<string, Summary>(StringComparer.Ordinal)
-        use input = new BinaryReader(File.OpenRead(path), Encoding.UTF8)
-        let time () = if input.ReadBoolean() then Nullable(input.ReadInt32()) else Nullable()
-        while input.BaseStream.Position < input.BaseStream.Length do
-            let trip = input.ReadString()
-            let value = {
-                firstSequence = input.ReadInt32(); lastSequence = input.ReadInt32()
-                firstStopId = input.ReadString(); lastStopId = input.ReadString()
-                scheduledStart = time (); scheduledEnd = time (); callPatternSha256 = input.ReadString() }
-            result.Add(trip, value)
-        result
+          distance = call.shapeDistTraveled |> Option.map (double >> Nullable) |> Option.defaultValue (Nullable())
+          subsidiaryCode = null; subsidiaryName = null; activeLineCode = null }
 
     type Writer(path: string, token: CancellationToken, ?bufferedOutput: bool) =
         let schema = Schema.relations |> Array.find (fun value -> value.name = "trip_call")
@@ -137,9 +72,11 @@ module TripCallWriter =
                     ColumnWriter.Text(column _.locationId); ColumnWriter.Boolean(column _.passengerService)
                     ColumnWriter.Text(column _.boardingPointId); ColumnWriter.Text(column _.routeStopId)
                     ColumnWriter.OptionalInt32(column _.arrival); ColumnWriter.OptionalInt32(column _.departure)
-                    ColumnWriter.OptionalInt32(column _.passage); ColumnWriter.Int16(column _.pickup)
+                    ColumnWriter.Int16(column _.pickup)
                     ColumnWriter.Int16(column _.dropoff); ColumnWriter.Boolean(column _.timepoint)
-                    ColumnWriter.Text(column _.headsign); ColumnWriter.OptionalFloat64(column _.distance) |]
+                    ColumnWriter.Text(column _.headsign); ColumnWriter.OptionalFloat64(column _.distance)
+                    ColumnWriter.Text(column _.subsidiaryCode); ColumnWriter.Text(column _.subsidiaryName)
+                    ColumnWriter.Text(column _.activeLineCode) |]
         // One compression consumer and at most two queued batches (each <= 8 MiB).
         // The producer waits when full; worker failure completes the channel so
         // a blocked producer cannot hang indefinitely.
@@ -178,7 +115,7 @@ module TripCallWriter =
                 if order > 0 || (order = 0 && row.sequence <= previousSequence) then
                     invalidArg "row" $"Trip calls are not strictly ordered at {row.tripId}/{row.sequence}"
             let textBytes (value: string) = if isNull value then 0L else 24L + int64 value.Length * 2L
-            let rowBytes = 192L + textBytes row.tripId + textBytes row.locationId + textBytes row.boardingPointId + textBytes row.routeStopId + textBytes row.headsign
+            let rowBytes = 216L + textBytes row.tripId + textBytes row.locationId + textBytes row.boardingPointId + textBytes row.routeStopId + textBytes row.headsign + textBytes row.subsidiaryCode + textBytes row.subsidiaryName + textBytes row.activeLineCode
             if rowBytes > batchByteLimit then invalidArg "row" "One trip call exceeds the 32 MiB buffer budget"
             if count = capacity || bytes + rowBytes > batchByteLimit then flush ()
             buffer.[count] <- row

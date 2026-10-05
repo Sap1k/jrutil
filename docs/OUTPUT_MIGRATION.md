@@ -30,3 +30,12 @@ JDF trip ids are `jdf:trip:<line>:<yymmdd>[:det][:<hash>][:pN]:<trip>`, keyed by
 - `validate-package` checks every declared foreign key.
 
 Oběhy accepts only bundle version 3 with serving schema version 4.
+
+## Serving schema 5.0
+
+- The serving version is `major.minor` (`"5.0"`); consumers accept any minor of their major.
+- 30 relations become 19. `source_trip_map`, `source_entity_map`, `road_route_key`, `road_trip_key` and `rail_trip_key` become `source_key` with source-qualified namespaces and no identity rows; `source_call_map` becomes `call_key` with differing sequences only; `service_note_assignment`, `service_feature_assignment` and `location_feature` become `assignment`; `travel_restriction_assignment` is renamed `travel_restriction`; `operational_location`, `operational_journey` and `operational_call` become `trip_call` railway points and `operational_point` locations; `location_zone`, `source_trip_coverage` and binding/call-pattern hashes are removed.
+- Generated ids are feed-prefixed (`jdf:service:…`, `czptt:service:…`, `jdf:transfer:…`, …). Trip, route and stop ids are unchanged.
+- Coded fields use closed enumerations; JDF attribute codes are typed assignment kinds.
+- `gtfs.zip` is projected from the relations; exception-only services gain a `calendar.txt` row with no weekdays, `platform_code` is filled and `stops.zone_id` is no longer written.
+- The CZPTT manifest records the input digest.

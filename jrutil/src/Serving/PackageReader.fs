@@ -122,7 +122,14 @@ module PackageReader =
                         if name = "max_waiting_time" then (match waits.TryGetValue(key) with | true, value -> value | _ -> "")
                         else row.[name])))
 
-        let routeKeys = readTextRows (serving "road_route_key") [| "route_id"; "cis_line_id" |] |> Seq.distinct |> Seq.sortBy id
+        // National keys of the base package, by namespace: (public id, identifier).
+        let keys =
+            readTextRows (serving "source_key") [| "namespace"; "public_id"; "identifier" |]
+            |> Seq.groupBy (fun row -> row.[0])
+            |> Seq.map (fun (keyNamespace, rows) -> keyNamespace, rows |> Seq.map (fun row -> row.[1], row.[2]) |> Seq.distinct |> Seq.toArray)
+            |> dict
+        let keysOf keyNamespace = match keys.TryGetValue(keyNamespace) with | true, rows -> rows | _ -> [||]
+        let routeKeys = keysOf "cis:line" |> Seq.map (fun (route, line) -> [| route; line |]) |> Seq.sortBy id
         let timetableKinds =
             readTextRowsWithOptional [ "timetable_kind" ] (serving "route") [| "route_id"; "timetable_kind" |]
             |> Seq.map (fun row -> row.[0], row.[1]) |> dict
@@ -132,7 +139,7 @@ module PackageReader =
             | _ -> ""
         writeCsv (Path.Combine(extensions, "cz_routes.txt"))
             [| "route_id"; "cis_line_id"; "public_line_number"; "source_provenance"; "timetable_kind" |]
-            (routeKeys |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; "serving-v2"; timetableKind row.[0] |]))
+            (routeKeys |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; "serving"; timetableKind row.[0] |]))
 
         let locations = readTextRows (serving "location") [| "location_id"; "parent_location_id" |]
         writeCsv (Path.Combine(extensions, "cz_stops.txt"))
@@ -140,11 +147,11 @@ module PackageReader =
             (locations |> Seq.map (fun row -> [| row.[0]; if row.[1] = "" then row.[0] else row.[1]; ""; ""; ""; "" |]))
 
         let road =
-            readTextRows (serving "road_trip_key") [| "trip_id"; "cis_line_id"; "cis_trip_id" |]
-            |> Seq.map (fun row -> row.[0], (row.[1], row.[2], ""))
-        let rail =
-            readTextRows (serving "rail_trip_key") [| "trip_id"; "train_number" |]
-            |> Seq.map (fun row -> row.[0], ("", "", row.[1]))
+            keysOf "cis:line_trip"
+            |> Seq.map (fun (trip, identifier) ->
+                let separator = identifier.IndexOf(':')
+                trip, (identifier.Substring(0, separator), identifier.Substring(separator + 1), ""))
+        let rail = keysOf "czptt:train_number" |> Seq.map (fun (trip, train) -> trip, ("", "", train))
         let tripKeys = Seq.append road rail |> Seq.groupBy fst |> Seq.map (fun (trip, values) ->
             let values = values |> Seq.map snd |> Seq.toArray
             let cisLine = values |> Seq.map (fun (line, _, _) -> line) |> Seq.tryFind ((<>) "") |> Option.defaultValue ""
@@ -172,10 +179,10 @@ module PackageReader =
             if slotZones.Count > 0 then
                 for row in readTextRows (serving "trip_call") [| "trip_id"; "sequence"; "route_stop_id" |] do
                     match slotZones.TryGetValue(row.[2]) with
-                    | true, zones -> for code, system in zones do yield [| row.[0]; row.[1]; ""; code; system; "serving-v4" |]
+                    | true, zones -> for code, system in zones do yield [| row.[0]; row.[1]; ""; code; system; "serving" |]
                     | _ -> ()
             for row in readTextRows (serving "call_zone") [| "trip_id"; "sequence"; "zone_code"; "zone_system" |] do
-                yield [| row.[0]; row.[1]; ""; row.[2]; row.[3]; "serving-v4" |]
+                yield [| row.[0]; row.[1]; ""; row.[2]; row.[3]; "serving" |]
         }
         writeCsv (Path.Combine(extensions, "cz_trip_stop_zones.txt"))
             [| "trip_id"; "stop_sequence"; "zone_id"; "zone_code"; "ids_system_id"; "source_provenance" |]
