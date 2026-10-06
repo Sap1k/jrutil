@@ -624,3 +624,68 @@ type JdfMergerTests() =
                 [ false, LocalDate(2024, 12, 15), LocalDate(2026, 12, 12) ],
                 fun merger -> merger.boundValidity(LocalDate(2026, 1, 10), gvdStart, gvdEnd))
         assertEqual [ false, LocalDate(2025, 12, 14), LocalDate(2026, 12, 12) ] resolved
+
+    [<TestMethod>]
+    member this.``A year-long special-day version does not hide later regular versions``() =
+        let date (month: int) (day: int) = LocalDate(2026, month, day)
+        // DPmÚL publishes each special day as its own version valid for a
+        // year, all exported on one day, beside the regular versions.
+        let resolved =
+            this.resolvedValidity [
+                false, date 1 1, date 12 31
+                false, date 1 24, date 12 24
+                false, date 1 25, date 12 25
+                false, date 2 3, date 12 31
+                false, date 9 1, date 12 31
+            ]
+        assertEqual
+            [ false, date 1 1, date 1 23
+              false, date 1 24, date 1 24
+              false, date 1 25, date 2 2
+              false, date 2 3, date 8 31
+              false, date 9 1, date 12 31 ]
+            resolved
+
+    member private _.mergedDayTypeVersions(days: JdfModel.Attribute list) =
+        let refs =
+            days |> List.mapi (fun index value -> { attributeId = 100 + index; value = value; reserved1 = None }: JdfModel.AttributeRef)
+        let batch (reference: JdfModel.AttributeRef) =
+            { template.Value with
+                version = { template.Value.version with creationDate = Some (LocalDate(2026, 9, 25)) }
+                attributeRefs = Array.append template.Value.attributeRefs [| reference |]
+                // Dated notes make a trip's days unknown, which is never disjoint.
+                serviceNotes = [||]
+                routes =
+                    template.Value.routes
+                    |> Array.map (fun route -> {
+                        route with
+                            timetableValidFrom = LocalDate(2026, 12, 26)
+                            timetableValidTo = LocalDate(2027, 12, 30) })
+                trips =
+                    template.Value.trips
+                    |> Array.map (fun trip ->
+                        let attributes = Array.copy trip.attributes
+                        attributes.[0] <- Some reference.attributeId
+                        { trip with attributes = attributes }) }
+        use merger = new JdfMerger.JdfMerger(JdfMerger.MergeStopsById)
+        refs |> List.iter (batch >> merger.add)
+        merger.resolveRouteOverlaps()
+        let licNum = template.Value.routes.[0].id
+        merger.batch.routes
+        |> Array.filter (fun route -> route.id = licNum)
+        |> Array.map (fun route -> route.timetableValidFrom, route.timetableValidTo)
+        |> Array.toList
+
+    [<TestMethod>]
+    member this.``Weekday and weekend versions with one validity are both kept``() =
+        let range = LocalDate(2026, 12, 26), LocalDate(2027, 12, 30)
+        assertEqual
+            [ range; range ]
+            (this.mergedDayTypeVersions [ JdfModel.WeekdayService; JdfModel.HolidaySundayService ])
+
+    [<TestMethod>]
+    member this.``Versions with one validity and shared days keep only one``() =
+        let range = LocalDate(2026, 12, 26), LocalDate(2027, 12, 30)
+        assertEqual
+            [ range ]
+            (this.mergedDayTypeVersions [ JdfModel.WeekdayService; JdfModel.DayOfWeekService 1 ])

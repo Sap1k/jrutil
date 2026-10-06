@@ -399,10 +399,51 @@ type JdfMerger(
         originalValidityByRoute.[(copy.id, newDist)] <-
             originalValidityByRoute.[(copy.id, oldDist)]
 
-    member private this.resolveOneRouteOverlap(r1, r2) =
-        assert (r1.idDistinction <> r2.idDistinction)
-        let r1Date = batchDateByRoute.[(r1.id, r1.idDistinction)]
-        let r2Date = batchDateByRoute.[(r2.id, r2.idDistinction)]
+    /// Day classes a route version's trips can run on: bits 0-6 are
+    /// Monday-Sunday on ordinary days, bit 7 is a public holiday. Conservative:
+    /// a trip without day codes, or with dated "runs also/only" notes, can run
+    /// on any day, so two masks are disjoint only when the versions provably
+    /// never run on the same date.
+    member private _.dayClassMask(route: Route) =
+        let key = route.id, route.idDistinction
+        let attributeValues =
+            attributeRefs |> Seq.map (fun (value: AttributeRef) -> value.attributeId, value.value) |> dict
+        let dated =
+            serviceNotesByRoute.[key]
+            |> Seq.filter (fun (note: ServiceNote) ->
+                note.noteType = Some ServiceAlso || note.noteType = Some ServiceOnly)
+            |> Seq.map (fun note -> note.tripId)
+            |> HashSet
+        let everyDay = 0xFF
+        tripsByRoute.[key]
+        |> Seq.fold (fun mask (trip: Trip) ->
+            let days =
+                trip.attributes
+                |> Array.choose id
+                |> Array.choose (fun id ->
+                    match attributeValues.TryGetValue(id) with
+                    | true, WeekdayService -> Some 0b0001_1111
+                    | true, HolidaySundayService -> Some 0b1100_0000
+                    | true, DayOfWeekService day when day >= 1 && day <= 7 -> Some ((1 <<< (day - 1)) ||| 0b1000_0000)
+                    | _ -> None)
+            let tripMask =
+                if dated.Contains(trip.id) || days.Length = 0 then everyDay
+                else Array.fold (|||) 0 days
+            mask ||| tripMask) 0
+
+    /// Resolve overlapping versions of one licence date by date: on each date
+    /// the version with priority wins (a newer batch, or a detour as below);
+    /// otherwise the one starting later, then the one ending sooner, then the
+    /// first added. Each version keeps the dates it wins, split into
+    /// contiguous ranges. Deciding every date against the published input
+    /// ranges keeps the result independent of the order of comparisons.
+    ///
+    /// Versions with the same validity, batch date and detour flag whose
+    /// trips run on disjoint day classes (a weekday-only and a weekend-only
+    /// timetable published side by side) are kept together instead of one
+    /// deleting the other.
+    member private this.resolveLicenceOverlaps(versions: Route array) =
+        let batchDate (route: Route) = batchDateByRoute.[(route.id, route.idDistinction)]
         // CIS publishes many detour timetables open-ended, ending with the
         // regular versions. Such a detour only lasts until the next version
         // starts, so it has no priority over a variant that starts later and
@@ -413,138 +454,97 @@ type JdfMerger(
             let otherFrom, otherTo =
                 originalValidityByRoute.[(other.id, other.idDistinction)]
             route.detour && not (routeTo = otherTo && routeFrom < otherFrom)
-        let r1Detour = detourPriority r1 r2
-        let r2Detour = detourPriority r2 r1
-        let r2Priority =
-            (r2Detour && (not r1Detour || r1Date < r2Date))
-            || (not r1Detour && r1Date < r2Date)
-        let r1Priority = r1Detour && (not r2Detour || r2Date < r1Date)
+        let hasPriority (route: Route) (other: Route) =
+            let routeDetour = detourPriority route other
+            let otherDetour = detourPriority other route
+            (routeDetour && (not otherDetour || batchDate other < batchDate route))
+            || (not otherDetour && batchDate other < batchDate route)
+        let beats (route: Route) (other: Route) =
+            if hasPriority route other then true
+            elif hasPriority other route then false
+            elif route.timetableValidFrom <> other.timetableValidFrom then
+                route.timetableValidFrom > other.timetableValidFrom
+            elif route.timetableValidTo <> other.timetableValidTo then
+                route.timetableValidTo < other.timetableValidTo
+            else route.idDistinction < other.idDistinction
 
-        // Validity ranges don't overlap, keep both
-        if r1.timetableValidTo < r2.timetableValidFrom
-           || r1.timetableValidFrom > r2.timetableValidTo then ()
-        // Ranges overlap exactly, keep only priority route
-        else if r1.timetableValidFrom = r2.timetableValidFrom
-             && r1.timetableValidTo = r2.timetableValidTo then
-            let toDelete = if r2Priority then r1 else r2
-            Log.Debug(
-                "Route {LicNum} variants overlap exactly, removing {Dist}, \
-                 keeping {Dist2}",
-                r1.id, toDelete.idDistinction,
-                (if r2Priority then r2 else r1).idDistinction)
-            this.deleteRoute(toDelete)
-        // Ranges start at the same day, cut one
-        else if r1.timetableValidFrom = r2.timetableValidFrom
-             && r1.timetableValidTo < r2.timetableValidTo then
-            if r2Priority then
-                Log.Debug("Route {LicNum} variants overlap with same start, \
-                           removing {Dist}",
-                          r1.id, r1.idDistinction)
-                this.deleteRoute(r1)
-            else
-                Log.Debug("Route {LicNum} variants overlap with same start, \
-                           cutting {Dist}",
-                          r1.id, r2.idDistinction)
-                routesByLicNum.[r2.id].Remove(r2) |> ignore
-                routesByLicNum.[r2.id].Add(
-                    {r2 with
-                        timetableValidFrom =
-                            r1.timetableValidTo + Period.FromDays(1)})
-        // Ranges end at the same day, cut one
-        else if r1.timetableValidTo = r2.timetableValidTo
-             && r1.timetableValidFrom > r2.timetableValidFrom then
-            if r2Priority then
-                Log.Debug("Route {LicNum} variants overlap with same end, \
-                           removing {Dist}",
-                          r1.id, r1.idDistinction)
-                this.deleteRoute(r1)
-            else
-                Log.Debug("Route {LicNum} variants overlap with same end, \
-                           cutting {Dist}",
-                          r1.id, r2.idDistinction)
-                routesByLicNum.[r2.id].Remove(r2) |> ignore
-                routesByLicNum.[r2.id].Add(
-                    {r2 with
-                        timetableValidTo =
-                            r1.timetableValidFrom - Period.FromDays(1)})
-        // r2 is a later variant, cut part of old route if not priority
-        else if r1.timetableValidFrom < r2.timetableValidFrom
-             && r1.timetableValidTo < r2.timetableValidTo then
-            if not r1Priority then
-                Log.Debug(
-                    "Route {LicNum} variants overlap, cutting {Dist}",
-                    r1.id, r1.idDistinction)
-                routesByLicNum.[r1.id].Remove(r1) |> ignore
-                routesByLicNum.[r1.id].Add(
-                    {r1 with
-                        timetableValidTo =
-                            r2.timetableValidFrom - Period.FromDays(1)})
-            else
-                Log.Debug(
-                    "Route {LicNum} variants overlap, cutting {Dist}, \
-                     since {Dist2} has priority",
-                    r1.id, r2.idDistinction, r1.idDistinction)
-                routesByLicNum.[r2.id].Remove(r2) |> ignore
-                routesByLicNum.[r2.id].Add(
-                    {r2 with
-                        timetableValidFrom =
-                            r1.timetableValidTo + Period.FromDays(1)})
-        // Validity ranges overlap and r2 is inside r1, duplicate r1
-        // (if not priority)
-        else if r1.timetableValidFrom < r2.timetableValidFrom
-             && r1.timetableValidTo > r2.timetableValidTo then
-            if r1Priority then
-                Log.Debug(
-                    "Route {LicNum} variants overlap and {Dist} is contained \
-                     in {Dist2}, removing the former, since the latter has \
-                     priority",
-                    r1.id, r2.idDistinction, r1.idDistinction)
-                this.deleteRoute(r2)
-            else
-                Log.Debug(
-                    "Route {LicNum} variants overlap and {Dist} is contained \
-                     in {Dist2}, splitting the latter",
-                    r1.id, r2.idDistinction, r1.idDistinction)
-                // Adjust r1's validity for first chunk of split
-                routesByLicNum.[r1.id].Remove(r1) |> ignore
-                routesByLicNum.[r1.id].Add(
-                    {r1 with
-                        timetableValidTo =
-                            r2.timetableValidFrom - Period.FromDays(1)})
-                // Duplicate of r1 for second chunk of split
-                this.copyRoute(
-                    {r1 with
-                        timetableValidFrom =
-                            r2.timetableValidTo + Period.FromDays(1)})
-        // Resolve other overlaps by symmetry (simple overlap but r2 is first,
-        // r1 is inside r2, same start/end date but r2 is shorter)
-        else this.resolveOneRouteOverlap(r2, r1)
+        // Units: one version, or side-by-side versions on disjoint day classes.
+        let units = ResizeArray<ResizeArray<Route> * int>()
+        for route in versions do
+            let mask = this.dayClassMask route
+            let partner =
+                units
+                |> Seq.tryFindIndex (fun (members, unitMask) ->
+                    let head = members.[0]
+                    head.timetableValidFrom = route.timetableValidFrom
+                    && head.timetableValidTo = route.timetableValidTo
+                    && head.detour = route.detour
+                    && batchDate head = batchDate route
+                    && unitMask &&& mask = 0)
+            match partner with
+            | Some index ->
+                let members, unitMask = units.[index]
+                members.Add(route)
+                units.[index] <- (members, unitMask ||| mask)
+            | None -> units.Add((ResizeArray([ route ]), mask))
+        let head index = (fst units.[index]).[0]
+
+        let boundaries =
+            units
+            |> Seq.collect (fun (members, _) ->
+                [ members.[0].timetableValidFrom; members.[0].timetableValidTo + Period.FromDays(1) ])
+            |> Seq.distinct
+            |> Seq.sort
+            |> Seq.toArray
+        let won = Array.init units.Count (fun _ -> ResizeArray<LocalDate * LocalDate>())
+        for i in 0 .. boundaries.Length - 2 do
+            let first, last = boundaries.[i], boundaries.[i + 1] - Period.FromDays(1)
+            let winner =
+                seq { 0 .. units.Count - 1 }
+                |> Seq.filter (fun index ->
+                    let route = head index
+                    route.timetableValidFrom <= first && route.timetableValidTo >= first)
+                |> Seq.fold (fun best index ->
+                    match best with
+                    | Some current when not (beats (head index) (head current)) -> best
+                    | _ -> Some index) None
+            match winner with
+            | Some index ->
+                let ranges = won.[index]
+                if ranges.Count > 0 && snd ranges.[ranges.Count - 1] + Period.FromDays(1) = first then
+                    ranges.[ranges.Count - 1] <- (fst ranges.[ranges.Count - 1], last)
+                else ranges.Add((first, last))
+            | None -> ()
+
+        let dateText (date: LocalDate) = NodaTime.Text.LocalDatePattern.Iso.Format(date)
+        for index in 0 .. units.Count - 1 do
+            let members, _ = units.[index]
+            let ranges = won.[index]
+            for route in members do
+                if ranges.Count = 0 then
+                    Log.Debug(
+                        "Route {LicNum} version {Dist} is superseded on every date, removing it",
+                        route.id, route.idDistinction)
+                    this.deleteRoute(route)
+                else
+                    let first, last = ranges.[0]
+                    if first <> route.timetableValidFrom || last <> route.timetableValidTo || ranges.Count > 1 then
+                        Log.Debug(
+                            "Route {LicNum} version {Dist} keeps {Ranges}",
+                            route.id, route.idDistinction,
+                            ranges |> Seq.map (fun (first, last) -> dateText first + ".." + dateText last) |> String.concat ", ")
+                    routesByLicNum.[route.id].Remove(route) |> ignore
+                    routesByLicNum.[route.id].Add(
+                        { route with timetableValidFrom = first; timetableValidTo = last })
+                    for first, last in ranges |> Seq.skip 1 do
+                        this.copyRoute(
+                            { route with timetableValidFrom = first; timetableValidTo = last })
 
     member this.resolveRouteOverlaps() =
-        for id in routesByLicNum.Keys do
-            let handled = HashSet()
-            // Pointer to mutable state
-            let rsNow = routesByLicNum.[id]
-            let unhandled () =
-                rsNow
-                |> Seq.tryFind (fun r ->
-                    not <| handled.Contains(r.idDistinction))
-            while unhandled () |> Option.isSome do
-                let r2 = unhandled () |> Option.get
-                handled.Add(r2.idDistinction) |> ignore
-                let r1s =
-                    rsNow
-                    |> Seq.filter (fun r ->
-                        r.idDistinction < r2.idDistinction)
-                    |> Seq.sortBy (fun r -> r.idDistinction)
-                    |> Seq.toArray
-                for r1 in r1s do
-                    // Take the newest version of r2
-                    rsNow
-                    |> Seq.tryFind (fun r ->
-                        r.idDistinction = r2.idDistinction)
-                    |> Option.iter (fun r2now ->
-                        this.resolveOneRouteOverlap(r1, r2now))
+        for id in routesByLicNum.Keys |> Seq.toArray do
+            let versions =
+                routesByLicNum.[id] |> Seq.sortBy (fun route -> route.idDistinction) |> Seq.toArray
+            if versions.Length > 1 then this.resolveLicenceOverlaps(versions)
 
     /// Keep only versions valid on or after `reference` within the GVD, clamped to
     /// its bounds. The GVD change is a hard cutover, so validity past its end (often
