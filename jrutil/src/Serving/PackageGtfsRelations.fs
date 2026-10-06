@@ -225,7 +225,7 @@ module PackageGtfsRelations =
             let selectors = [ "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" ] |> List.map (fun name -> name, value name row)
             objectRow [
                 "transfer_key", box (Identity.feedId input.feed "transfer" selectors)
-                "from_location_id", box (value "from_stop_id" row); "to_location_id", box (value "to_stop_id" row)
+                "from_location_id", nullableString (value "from_stop_id" row); "to_location_id", nullableString (value "to_stop_id" row)
                 "from_route_id", nullableString (value "from_route_id" row); "to_route_id", nullableString (value "to_route_id" row)
                 "from_trip_id", nullableString (value "from_trip_id" row); "to_trip_id", nullableString (value "to_trip_id" row)
                 "transfer_type", box (int16 (value "transfer_type" row)); "minimum_transfer_time", nullableParsed integer (value "min_transfer_time" row)

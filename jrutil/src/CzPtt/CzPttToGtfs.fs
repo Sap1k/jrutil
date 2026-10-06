@@ -365,7 +365,7 @@ let convert catalog options pointNames
                             else
                                 let coveredCalls =
                                     journey.calls
-                                    |> Array.mapi (fun index call -> index + 1, call)
+                                    |> Array.map (fun call -> call.sourceIndex + 1, call)
                                     |> Array.filter (fun (_, call) ->
                                         call.sourceIndex >= first && call.sourceIndex <= last)
                                 if coveredCalls.Length = 0 then Seq.empty
@@ -395,7 +395,7 @@ let convert catalog options pointNames
             generatedJourneys
             |> Seq.collect (fun journey ->
                 journey.calls
-                |> Seq.mapi (fun index call -> index + 1, call)
+                |> Seq.map (fun call -> call.sourceIndex + 1, call)
                 |> Seq.filter (fun (_, call) -> hasActivity RequestStop call.location)
                 |> Seq.map (fun (sequence, call) ->
                     let sourceObject = $"{paId message}:sequence:{call.sourceIndex + 1}:activity:0030"

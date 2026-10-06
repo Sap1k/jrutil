@@ -524,6 +524,13 @@ type CzPttToGtfsTests() =
             result.features
             |> Array.exists (fun feature ->
                 feature.tripId = nadTrip.id && feature.kind = "on_request"))
+        // Call features name PA sequences, as stop_times do, on every part.
+        for feature in result.features do
+            feature.callSequence |> Option.iter (fun sequence ->
+                Assert.IsTrue(
+                    result.feed.stopTimes
+                    |> Array.exists (fun call -> call.tripId = feature.tripId && call.stopSequence = sequence),
+                    $"{feature.id} names no call of {feature.tripId}"))
         Assert.IsTrue(
             result.notes
             |> Array.filter (fun note -> note.kind = "czptt_central_note")

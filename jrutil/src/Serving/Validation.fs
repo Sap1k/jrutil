@@ -163,7 +163,7 @@ module Validation =
                 reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
     /// Hash every non-null key of `fields` in a relation file.
-    let private scanKeys (directory: string) (relation: Schema.Relation) (fields: string array) (consume: uint64 -> string -> unit) =
+    let private scanKeys (directory: string) (relation: Schema.Relation) (fields: string array) (consume: uint64 -> (unit -> string) -> unit) =
         let path = Path.Combine(directory, "serving", relation.name + ".parquet")
         use stream = File.OpenRead(path)
         let reader = ParquetReader.CreateAsync(stream).GetAwaiter().GetResult()
@@ -175,7 +175,8 @@ module Validation =
                 for row in 0 .. int group.RowCount - 1 do
                     if columns |> Array.forall (fun column -> not (isNull column.[row])) then
                         let key = columns |> Array.map (fun column -> keyToken column.[row]) |> String.concat "\u001f"
-                        consume (XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(key).AsSpan())) key
+                        let shown () = columns |> Array.map (fun column -> sprintf "%A" column.[row]) |> String.concat ", "
+                        consume (XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(key).AsSpan())) shown
         finally
             reader.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
@@ -197,7 +198,7 @@ module Validation =
                 scanKeys directory relation key.fields (fun hash text ->
                     if not (keys.Contains(hash)) then
                         missing <- missing + 1L
-                        if isNull example then example <- text)
+                        if isNull example then example <- text ())
                 if missing > 0L then
                     let fields = String.concat "," key.fields
                     errors.Add($"serving/{relation.name}.parquet: {missing} rows have ({fields}) missing from {target}, e.g. {example}")

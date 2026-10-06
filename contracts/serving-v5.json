@@ -1059,7 +1059,7 @@
     },
     {
       "name": "transfer",
-      "description": "Resolved, GTFS-shaped transfer rules (resolved connection claims, rail-replacement boundaries).",
+      "description": "Resolved, GTFS-shaped transfer rules (resolved connection claims, rail-replacement boundaries). Locations are null on in-seat transfers between trip parts.",
       "fields": [
         {
           "name": "transfer_key",
@@ -1069,12 +1069,12 @@
         {
           "name": "from_location_id",
           "type": "string",
-          "nullable": false
+          "nullable": true
         },
         {
           "name": "to_location_id",
           "type": "string",
-          "nullable": false
+          "nullable": true
         },
         {
           "name": "from_route_id",

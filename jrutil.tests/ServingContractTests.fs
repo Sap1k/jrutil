@@ -536,6 +536,20 @@ type ServingContractTests() =
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``In-seat transfers between trips carry no locations``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-in-seat-" + Guid.NewGuid().ToString("N"))
+        try
+            let stage = staging root
+            write (Path.Combine(stage, "gtfs-intermediate", "transfers.txt"))
+                $"from_stop_id,to_stop_id,from_trip_id,to_trip_id,transfer_type,min_transfer_time,max_waiting_time\n,,{trip},{trip},4,,\n"
+            let output = Path.Combine(root, "output")
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage output
+            let path = Path.Combine(output, "serving", "transfer.parquet")
+            CollectionAssert.AreEqual([| null |], parquetStrings path "from_location_id")
+            CollectionAssert.AreEqual([| null |], parquetStrings path "to_location_id")
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Carried base call keys require exact target sequence membership``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-call-gap-" + Guid.NewGuid().ToString("N"))
         try
