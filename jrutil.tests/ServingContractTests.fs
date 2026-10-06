@@ -521,6 +521,21 @@ type ServingContractTests() =
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``Regional call keys resolve output positions to trip sequences``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-call-position-" + Guid.NewGuid().ToString("N"))
+        try
+            let stage = staging root
+            // Cut base trips keep their sequence gaps; the mapping counts positions.
+            write (Path.Combine(stage, "gtfs-intermediate", "stop_times.txt"))
+                $"trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type,timepoint\n{trip},25:00:00,25:00:00,{first},1,0,0,1\n{trip},25:10:00,25:10:00,{second},3,0,0,1\n"
+            let output = Path.Combine(root, "output")
+            StagingFixture.finalize Map.empty None (fun _ _ -> ()) stage output
+            CollectionAssert.AreEquivalent(
+                [| $"ids-jmk:gtfs_trip_id|source-trip|0|{trip}|1"; $"ids-jmk:gtfs_trip_id|source-trip|10|{trip}|3" |],
+                relationRows output "call_key" [| "namespace"; "identifier"; "source_sequence"; "trip_id"; "sequence" |] |> Array.map (String.concat "|"))
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Carried base call keys require exact target sequence membership``() =
         let root = Path.Combine(Path.GetTempPath(), "jrutil-serving-call-gap-" + Guid.NewGuid().ToString("N"))
         try

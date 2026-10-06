@@ -175,11 +175,31 @@ module PackageKeyRelations =
             |> Seq.filter isDeclared
 
         // Call keys. Regional source calls whose source sequence differs.
+        // The overlay maps calls by 1-based position in the output trip, so
+        // each position resolves to that trip's sequence, which has gaps on
+        // trips cut from the base package.
         let regionalCalls =
-            CompilerOutput.values input.mappings "source_to_output_calls.csv"
-                [| "source_id"; "source_trip_id"; "output_trip_id"; "source_call_ordinal"; "output_call_ordinal" |]
-            |> Seq.filter (fun row -> row.[3] <> row.[4] && mappedTrips.Contains(struct(row.[0], row.[1], row.[2])))
-            |> Seq.map (fun row -> callKeyRow (sourceNamespace row.[0] "gtfs_trip_id") row.[1] row.[3] row.[2] (integer row.[4]))
+            if not (CompilerOutput.has input.mappings "source_to_output_calls.csv") then Seq.empty else
+            let calls =
+                CompilerOutput.values input.mappings "source_to_output_calls.csv"
+                    [| "source_id"; "source_trip_id"; "output_trip_id"; "source_call_ordinal"; "output_call_ordinal" |]
+                |> Seq.filter (fun row -> mappedTrips.Contains(struct(row.[0], row.[1], row.[2])))
+                |> Seq.toArray
+            let sequences = Dictionary<string, ResizeArray<int>>(StringComparer.Ordinal)
+            for row in calls do sequences.TryAdd(row.[2], ResizeArray()) |> ignore
+            for row in CompilerOutput.values input.gtfs "stop_times.txt" [| "trip_id"; "stop_sequence" |] do
+                match sequences.TryGetValue(row.[0]) with
+                | true, values -> values.Add(integer row.[1])
+                | _ -> ()
+            for values in sequences.Values do values.Sort()
+            calls |> Seq.choose (fun row ->
+                let values = sequences.[row.[2]]
+                let position = integer row.[4]
+                if position < 1 || position > values.Count then
+                    invalidOp $"Call mapping for {row.[2]} names position {position} of {values.Count} calls"
+                let sequence = values.[position - 1]
+                if row.[3] = string sequence then None
+                else Some (callKeyRow (sourceNamespace row.[0] "gtfs_trip_id") row.[1] row.[3] row.[2] sequence))
         // CZPTT path sequences that differ from the trip part's.
         let pathCalls =
             CompilerOutput.values input.sidecars "source_call_metadata" [| "gtfs_trip_id"; "stop_sequence"; "source_pa_id"; "source_sequence" |]
