@@ -80,7 +80,12 @@ let overlay (ctx: CommandContext) =
             diagnosticsOutput = optArgValue args "--diagnostics-out"
             diagnosticTraces = argFlagSet args "--diagnostic-traces"
             stopRegistry = optArgValue args "--stop-registry" |> Option.map StopRegistry.load
-            stopRegistryCandidatesPath = optArgValue args "--stop-registry-candidates" }
+            stopRegistryCandidatesPath = optArgValue args "--stop-registry-candidates"
+            routePresentationRules =
+                optArgValue args "--route-presentation-rules"
+                |> Option.map RouteRules.loadPresentationRules
+                |> Option.defaultValue RouteRules.emptyPresentationRules
+            overridesRoot = optArgValue args "--overrides-root" |> Option.map Path.GetFullPath }
     Log.Information(
         "Regional overlay complete: sources={Sources}; matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}",
         String.concat "," result.sources, result.aggregate.matchedTrips,

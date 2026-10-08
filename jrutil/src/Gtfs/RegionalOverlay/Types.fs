@@ -139,6 +139,11 @@ type CompilationOptions = {
     stopRegistry: JrUtil.StopRegistry.StopRegistry option
     /// Review CSV for source-native stop places that are not pinned yet.
     stopRegistryCandidatesPath: string option
+    /// Reviewed route presentation overrides applied to every output route.
+    routePresentationRules: JrUtil.RouteRules.PresentationRuleSet
+    /// Directory that relative override CSV names in source policies resolve
+    /// against; None resolves them next to each policy.
+    overridesRoot: string option
 }
 
 type MultiSourceOverlayResult = {

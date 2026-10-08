@@ -35,6 +35,7 @@ type Input = {
     converterVersion: string
     diagnosticsOutput: string option
     diagnosticTraces: bool
+    routePresentationRules: JrUtil.RouteRules.PresentationRuleSet
 }
 
 /// Stream the resolved bundle, write reports and atomically activate the output.
@@ -48,6 +49,7 @@ let private compile ({
     converterVersion = converterVersion
     diagnosticsOutput = diagnosticsOutput
     diagnosticTraces = diagnosticTraces
+    routePresentationRules = routePresentationRules
 }: Input) =
     let sibling = Path.GetDirectoryName(prepared.outputBundle)
     let temporary = Path.Combine(sibling, "." + Path.GetFileName(prepared.outputBundle) + ".tmp-" + Guid.NewGuid().ToString("N"))
@@ -62,7 +64,8 @@ let private compile ({
         let context: Context = {
             prepared = prepared; projection = projection; source = source; matches = matches
             gtfsOutput = gtfsOutput; extensionsOutput = extensionsOutput
-            usedStopIds = usedStopIds; usedRouteIds = usedRouteIds; usedAgencyIds = usedAgencyIds }
+            usedStopIds = usedStopIds; usedRouteIds = usedRouteIds; usedAgencyIds = usedAgencyIds
+            routePresentationRules = routePresentationRules }
         BundleCalls.write context sibling
         BundleGtfs.writeTrips context
         let agencyColumns, sourceNativeAgencyRows = BundleGtfs.writeRoutes context

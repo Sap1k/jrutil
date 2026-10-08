@@ -212,6 +212,8 @@ let internal writeManifest (stream: Stream) descriptor (converterVersion: string
                           (internationalDecisions: JdfGtfsRules.InternationalRouteDecision array)
                           (transportModeRules: JdfGtfsRules.TransportModeRuleSet)
                           (transportModeDecisions: JdfGtfsRules.TransportModeDecision array)
+                          (presentationRules: RouteRules.PresentationRuleSet)
+                          (presentationChanges: RouteRules.PresentationChange array)
                           (postPlan: JdfPostPlan.PostEstimationPlan)
                           (routingPbfPath: string option)
                           (postInferenceEvidencePath:string option)
@@ -271,6 +273,14 @@ let internal writeManifest (stream: Stream) descriptor (converterVersion: string
     writer.WriteStartObject("by_effective_mode")
     for mode, values in transportModeDecisions |> Seq.filter (fun d -> d.corrected) |> Seq.groupBy (fun d -> string d.effectiveMode) |> Seq.sortBy fst do
         writer.WriteNumber(mode, values |> Seq.length)
+    writer.WriteEndObject()
+    writer.WriteEndObject()
+    writer.WriteStartObject("route_presentation_overrides")
+    match presentationRules.sha256 with Some value -> writer.WriteString("rules_sha256", value) | None -> writer.WriteNull("rules_sha256")
+    writer.WriteNumber("overridden_routes", presentationChanges |> Seq.distinctBy _.routeId |> Seq.length)
+    writer.WriteStartObject("by_field")
+    for field, values in presentationChanges |> Seq.groupBy _.field |> Seq.sortBy fst do
+        writer.WriteNumber(field, values |> Seq.length)
     writer.WriteEndObject()
     writer.WriteEndObject()
     writer.WriteStartObject("route_type_distribution")

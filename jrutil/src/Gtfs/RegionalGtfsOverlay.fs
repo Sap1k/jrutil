@@ -24,7 +24,7 @@ let compile (options: CompilationOptions) =
     if isNull options.bindings || options.bindings.Length = 0 then
         invalidArg "options" "At least one source binding is required"
     use scratch = new Scratch.Storage(System.IO.Path.GetTempPath())
-    let combined = MultiSourcePreparation.prepare scratch.Directory options.policyPath options.baseBundle options.bindings
+    let combined = MultiSourcePreparation.prepare scratch.Directory options.policyPath options.overridesRoot options.baseBundle options.bindings
     let prepared = InputPreparation.prepare {
         scratch = scratch
         auditDate = options.auditDate
@@ -54,5 +54,6 @@ let compile (options: CompilationOptions) =
         prepared = prepared; projection = projection; source = source; matches = matches
         gvdYear = options.gvdYear; converterVersion = options.converterVersion
         diagnosticsOutput = options.diagnosticsOutput
-        diagnosticTraces = options.diagnosticTraces }
+        diagnosticTraces = options.diagnosticTraces
+        routePresentationRules = options.routePresentationRules }
     { outputPath = result.outputPath; sources = combined.sourceIds; aggregate = result }

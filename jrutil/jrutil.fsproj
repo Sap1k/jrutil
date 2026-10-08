@@ -31,6 +31,7 @@
     <Compile Include="src/CsvSerializer.fs" />
     <Compile Include="src/Holidays.fs" />
     <Compile Include="src/GeoData/StopRegistry.fs" />
+    <Compile Include="src/GeoData/RouteRules.fs" />
     <Compile Include="src/GeoData/Common.fs" />
     <Compile Include="src/GeoData/CzRegions.fs" />
     <Compile Include="src/GeoData/EurTowns.fs" />

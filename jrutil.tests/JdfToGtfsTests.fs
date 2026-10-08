@@ -401,8 +401,8 @@ type JdfToGtfsTests() =
         let source = batch ()
         let route = { source.routes.[0] with id = "915001"; agencyId = "61974757"; transportMode = JdfModel.Bus }
         let rule: JdfGtfsRules.TransportModeRule = {
-            agencyId = "61974757"; routeIdFrom = 915001; routeIdTo = 915019
-            publicLineFrom = 1; publicLineTo = 19; expectedMode = JdfModel.Bus
+            selector = { agencyId = Some "61974757"; licence = RouteRules.LicenceRange("915001", "915019") }
+            publicLine = Some (1, 19); expectedMode = JdfModel.Bus
             effectiveMode = JdfModel.Tram; reason = "reviewed Ostrava tram family" }
         let corrected, decisions =
             JdfGtfsRules.applyTransportModeRules { sha256 = None; rules = [| rule |] }
@@ -416,21 +416,102 @@ type JdfToGtfsTests() =
         assertEqual JdfModel.Trolleybus unchanged.routes.[0].transportMode
         assertEqual false (mismatch |> Array.exactlyOne).corrected
 
+        let otherAgency, none =
+            JdfGtfsRules.applyTransportModeRules { sha256 = None; rules = [| rule |] }
+                { source with routes = [| { route with agencyId = "12345678" } |]; routeIntegrations = [||] }
+        assertEqual JdfModel.Bus otherAgency.routes.[0].transportMode
+        assertEqual 0 none.Length
+
+    [<TestMethod>]
+    member _.``The most specific transport mode rule wins``() =
+        let source = batch ()
+        let route = { source.routes.[0] with id = "915003"; agencyId = "61974757"; transportMode = JdfModel.Bus }
+        let rule licence effective: JdfGtfsRules.TransportModeRule = {
+            selector = { agencyId = None; licence = RouteRules.parseLicencePattern licence }
+            publicLine = None; expectedMode = JdfModel.Bus; effectiveMode = effective; reason = licence }
+        let apply rules =
+            let result, _ =
+                JdfGtfsRules.applyTransportModeRules { sha256 = None; rules = rules }
+                    { source with routes = [| route |]; routeIntegrations = [||] }
+            result.routes.[0].transportMode
+        assertEqual JdfModel.Trolleybus (apply [| rule "915*" JdfModel.Tram; rule "915003" JdfModel.Trolleybus |])
+        assertEqual JdfModel.Trolleybus (apply [| rule "91*" JdfModel.Tram; rule "915*" JdfModel.Trolleybus |])
+        Assert.ThrowsExactly<InvalidOperationException>(fun () ->
+            apply [| rule "915001-915009" JdfModel.Tram; rule "915002-915010" JdfModel.Trolleybus |] |> ignore)
+        |> ignore
+
     [<TestMethod>]
     member _.``Transport mode rule CSV is validated and checksummed``() =
         let path = Path.Combine(Path.GetTempPath(), $"transport-mode-rules-{Guid.NewGuid():N}.csv")
         try
             File.WriteAllText(path,
-                "agency_id,route_id_from,route_id_to,public_line_from,public_line_to,expected_mode,effective_mode,reason\n"
-                + "61974757,915001,915019,1,19,A,E,Reviewed Ostrava tram family\n")
+                "agency_id,licence,public_line,expected_mode,effective_mode,reason\n"
+                + "61974757,915001-915019,1-19,A,E,Reviewed Ostrava tram family\n"
+                + ",545*,,A,E,Any agency\n")
             let loaded = JdfGtfsRules.loadTransportModeRules path
-            let rule = loaded.rules |> Array.exactlyOne
             assertEqual true loaded.sha256.IsSome
-            assertEqual "61974757" rule.agencyId
+            let rule = loaded.rules.[0]
+            assertEqual (Some "61974757") rule.selector.agencyId
+            assertEqual (RouteRules.LicenceRange("915001", "915019")) rule.selector.licence
+            assertEqual (Some (1, 19)) rule.publicLine
             assertEqual JdfModel.Bus rule.expectedMode
             assertEqual JdfModel.Tram rule.effectiveMode
+            assertEqual None loaded.rules.[1].selector.agencyId
+            assertEqual None loaded.rules.[1].publicLine
+            File.WriteAllText(path,
+                "agency_id,licence,public_line,expected_mode,effective_mode,reason\n"
+                + "61974757,915019-915001,,A,E,Reversed\n")
+            Assert.ThrowsExactly<ArgumentException>(fun () -> JdfGtfsRules.loadTransportModeRules path |> ignore) |> ignore
         finally
             if File.Exists(path) then File.Delete(path)
+
+    [<TestMethod>]
+    member _.``Presentation rules override fields by specificity``() =
+        let path = Path.Combine(Path.GetTempPath(), $"route-presentation-{Guid.NewGuid():N}.csv")
+        try
+            File.WriteAllText(path,
+                "agency_id,licence,route_short_name,route_color,route_text_color,reason\n"
+                + ",915*,,00AA00,FFFFFF,Ostrava colours\n"
+                + "61974757,915*,,0000aa,,Operator colour\n"
+                + ",915003,3X,,,Renamed line\n")
+            let rules = RouteRules.loadPresentationRules path
+            let computed: RouteRules.RoutePresentation = { shortName = Some "3"; color = Some "7a0200"; textColor = Some "ffffff" }
+            let resolve agency licence = RouteRules.resolvePresentation rules agency licence computed
+            assertEqual { computed with shortName = Some "3X"; color = Some "0000aa" }
+                        (resolve (Some "61974757") "915003")
+            assertEqual { computed with color = Some "00aa00" } (resolve (Some "12345678") "915004")
+            assertEqual computed (resolve (Some "61974757") "916003")
+            File.WriteAllText(path,
+                "agency_id,licence,route_short_name,route_color,route_text_color,reason\n"
+                + ",915*,,#00AA00,,Bad colour\n")
+            Assert.ThrowsExactly<ArgumentException>(fun () -> RouteRules.loadPresentationRules path |> ignore) |> ignore
+        finally
+            if File.Exists(path) then File.Delete(path)
+
+    [<TestMethod>]
+    member _.``Presentation rules restyle published routes without changing ids``() =
+        let feed = convert (batch ())
+        let route = feed.routes.[0]
+        let licence = (feed.czRoutes.Value |> Array.find (fun value -> value.routeId = route.id)).cisLineId.Value
+        let rules: RouteRules.PresentationRuleSet = {
+            sha256 = None
+            rules = [| { selector = { agencyId = None; licence = RouteRules.Licence licence }
+                         shortName = Some "X1"; color = Some "123456"; textColor = None; reason = "test" } |] }
+        let restyled, changes = JdfToGtfs.applyRoutePresentationRules rules feed
+        let after = restyled.routes |> Array.find (fun value -> value.id = route.id)
+        assertEqual (Some "X1") after.shortName
+        assertEqual (Some "123456") after.color
+        assertEqual route.textColor after.textColor
+        assertEqual (feed.routes |> Array.map _.id) (restyled.routes |> Array.map _.id)
+        assertEqual 2 changes.Length
+        let unchanged, none = JdfToGtfs.applyRoutePresentationRules RouteRules.emptyPresentationRules feed
+        assertEqual feed.routes unchanged.routes
+        assertEqual 0 none.Length
+
+    [<TestMethod>]
+    member _.``JDF agency ids yield the agency IČO``() =
+        assertEqual (Some "61974757") (RouteRules.jdfAgencyIco "jdf:agency:61974757:0")
+        assertEqual None (RouteRules.jdfAgencyIco "overlay:pid-gtfs:agency:99")
 
     [<TestMethod>]
     member _.``Ambiguous or malformed public line identity is not guessed``() =

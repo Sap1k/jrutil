@@ -19,6 +19,8 @@ type Context = {
     usedStopIds: HashSet<string>
     usedRouteIds: HashSet<string>
     usedAgencyIds: HashSet<string>
+    /// Reviewed route presentation overrides; they win over source values.
+    routePresentationRules: JrUtil.RouteRules.PresentationRuleSet
 }
 
 /// IDS JMK fare zones claimed for national stop places.

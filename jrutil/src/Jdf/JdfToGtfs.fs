@@ -225,6 +225,29 @@ let getGtfsRoutesWithPublicLines
 let getGtfsRoutes (jdfBatch: JdfModel.JdfBatch) =
     getGtfsRoutesWithPublicLines (getPublicLineNumbers jdfBatch) jdfBatch
 
+/// Applies reviewed presentation overrides to published routes. Route IDs keep
+/// the source semantics, so an override never changes them.
+let applyRoutePresentationRules (rules: RouteRules.PresentationRuleSet) (feed: GtfsModel.GtfsFeed) =
+    if rules.rules.Length = 0 then feed, [||] else
+    let licences =
+        feed.czRoutes |> Option.defaultValue [||]
+        |> Array.choose (fun route -> route.cisLineId |> Option.map (fun licence -> route.routeId, licence))
+        |> dict
+    let changes = ResizeArray<RouteRules.PresentationChange>()
+    let routes =
+        feed.routes
+        |> Array.map (fun route ->
+            match licences.TryGetValue(route.id) with
+            | true, licence ->
+                let agency = route.agencyId |> Option.bind RouteRules.jdfAgencyIco
+                let computed: RouteRules.RoutePresentation =
+                    { shortName = route.shortName; color = route.color; textColor = route.textColor }
+                let presented, routeChanges = RouteRules.presentRoute rules route.id agency licence computed
+                changes.AddRange(routeChanges)
+                { route with shortName = presented.shortName; color = presented.color; textColor = presented.textColor }
+            | _ -> route)
+    { feed with routes = routes }, changes.ToArray()
+
 let private getGtfsTripsWithEndpoints (endpoints: IDictionary<struct(string * int * int64), int64> option) (jdfBatch: JdfModel.JdfBatch) =
     let lastStopPerTrip = Dictionary<struct (string * int * int64), struct (int64 * int64)>()
     for call in (if endpoints.IsSome then Seq.empty else jdfBatch.tripStops :> seq<_>) do

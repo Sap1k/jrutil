@@ -1,6 +1,6 @@
 // This file is part of JrUtil and is licenced under the GNU AGPLv3 or later
 
-/// CZPTT coordinate sources: SR70, OSM railway candidates, reviewed aliases and name matching.
+/// CZPTT coordinate sources: SR70, OSM railway candidates and name matching.
 module JrUtil.CzPttCoordinates
 
 open System
@@ -369,29 +369,6 @@ let internal loadOsmCandidates path =
             | _ -> None)
         |> Seq.sortBy (fun value -> value.objectId)
         |> Seq.toArray
-
-let internal loadAliases path =
-    match path with
-    | None -> Map.empty
-    | Some file when not (File.Exists(file)) -> Map.empty
-    | Some file ->
-        use document = JsonDocument.Parse(File.ReadAllText(file))
-        let root =
-            if document.RootElement.ValueKind <> JsonValueKind.Object then
-                document.RootElement
-            else
-                match document.RootElement.TryGetProperty("aliases") with
-                | true, value -> value
-                | _ -> document.RootElement
-        if root.ValueKind <> JsonValueKind.Object then Map.empty
-        else
-            root.EnumerateObject()
-            |> Seq.choose (fun property ->
-                if property.Value.ValueKind = JsonValueKind.String
-                then property.Value.GetString() |> Option.ofObj
-                     |> Option.map (fun value -> property.Name, value)
-                else None)
-            |> Map
 
 let internal distanceMeters (latitude1, longitude1) (latitude2, longitude2) =
     Geo.haversineMetres latitude1 longitude1 latitude2 longitude2

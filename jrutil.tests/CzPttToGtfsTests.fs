@@ -1289,7 +1289,7 @@ type CzPttToGtfsTests() =
                 "765347,Kraslice-Pod vlekem,50.340188,12.49709"
             |])
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None (fun _ _ -> ())
 
             let namesByIdentity =
                 result.operationalCalls
@@ -1749,9 +1749,9 @@ type CzPttToGtfsTests() =
             let options: CzPttModel.ConversionOptions = {
                 operationalPointMode = CzPttModel.Gtfs
             }
-            CzPttBundle.convert CzPttBundle.MemoryBacked catalog options input memoryOutput (Some sr70) None None (fun _ _ -> ())
+            CzPttBundle.convert CzPttBundle.MemoryBacked catalog options input memoryOutput (Some sr70) None (fun _ _ -> ())
             |> ignore
-            CzPttBundle.convert CzPttBundle.SpillBacked catalog options input spillOutput (Some sr70) None None (fun _ _ -> ())
+            CzPttBundle.convert CzPttBundle.SpillBacked catalog options input spillOutput (Some sr70) None (fun _ _ -> ())
             |> ignore
             let memoryFiles =
                 Directory.EnumerateFiles(memoryOutput)
@@ -1801,7 +1801,7 @@ type CzPttToGtfsTests() =
             |])
             let phases = ResizeArray<string>()
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None None (fun name state -> phases.Add($"{name}:{state}"))
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None (fun name state -> phases.Add($"{name}:{state}"))
             Assert.AreEqual(1, result.acceptedPaIds.Length)
             let praha =
                 result.feed.stops
@@ -1885,7 +1885,7 @@ type CzPttToGtfsTests() =
             let packageOptions: CzPttPackage.Options = {
                 catalog = catalog
                 conversion = { operationalPointMode = CzPttModel.Gtfs }
-                sr70Path = Some sr70; osmPath = None; osmAliasesPath = None
+                sr70Path = Some sr70; osmPath = None
                 diagnosticsOutput = Some diagnostics; diagnosticTraces = false }
             CzPttPackage.write packageOptions input production (fun _ _ -> ()) |> ignore
             JrUtil.Serving.Validation.validatePackage production |> ignore
@@ -1938,7 +1938,7 @@ type CzPttToGtfsTests() =
             writer.Close()
             File.WriteAllLines(sr70, [| "57076,Praha hl.n.,50.083,14.435" |])
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None (fun _ _ -> ())
             let czech =
                 result.feed.stops
                 |> Array.filter (fun stop -> stop.id.StartsWith("czptt:stop:CZ:"))
@@ -1967,12 +1967,11 @@ type CzPttToGtfsTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
-    member _.``OSM nodes resolve PLC name and reviewed alias matches``() =
+    member _.``OSM nodes resolve PLC and name matches``() =
         let value =
             message [
                 location "11111" "Node station" "08:00:00" ["0001"] None []
                 location "22222" "Way station" "08:10:00" ["0001"] None []
-                location "33333" "Relation station" "08:20:00" ["0001"] None []
             ] []
         for point in value.CzpttInformation.CzpttLocation do
             point.Location.CountryCodeIso <- "AT"
@@ -1983,7 +1982,6 @@ type CzPttToGtfsTests() =
         let input = Path.Combine(root, "input.xml")
         let output = Path.Combine(root, "output")
         let pbf = Path.Combine(root, "fixture.osm.pbf")
-        let aliases = Path.Combine(root, "aliases.json")
         Directory.CreateDirectory(root) |> ignore
         try
             use writer = new StreamWriter(input)
@@ -1999,26 +1997,17 @@ type CzPttToGtfsTests() =
                     "railway", "station"
                     "name", "Way station"
                 ]
-                osmNode 3L 48.40 16.50 [
-                    "railway", "station"
-                    "name", "Relation station"
-                    "addr:country", "AT"
-                ]
             |]
             writeOsmPbf pbf objects
-            File.WriteAllText(
-                aliases,
-                """{"AT:33333":"osm:node:3"}""")
-
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output None (Some pbf) (Some aliases) (fun _ _ -> ())
-            Assert.AreEqual(3, result.coordinateDiagnostics.osmGapFills.Length)
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output None (Some pbf) (fun _ _ -> ())
+            Assert.AreEqual(2, result.coordinateDiagnostics.osmGapFills.Length)
             CollectionAssert.AreEquivalent(
-                [| "AT:11111"; "AT:22222"; "AT:33333" |],
+                [| "AT:11111"; "AT:22222" |],
                 result.coordinateDiagnostics.osmGapFills
                 |> Array.map (fun resolution -> resolution.sourceLocationId))
             CollectionAssert.AreEquivalent(
-                [| "ref_eu_plc"; "normalized_exact_name"; "reviewed_alias" |],
+                [| "ref_eu_plc"; "normalized_exact_name" |],
                 result.coordinateDiagnostics.osmGapFills
                 |> Array.map (fun resolution -> resolution.coordinateMatchMethod))
             Assert.IsTrue(
@@ -2064,7 +2053,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (fun _ _ -> ())
             Assert.AreEqual(
                 2,
                 result.coordinateDiagnostics.authoritativeSr70Resolutions.Length)
@@ -2118,7 +2107,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (fun _ _ -> ())
             Assert.AreEqual(1, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.AreEqual(1, result.coordinateDiagnostics.estimatedResolutions.Length)
             CollectionAssert.Contains(
@@ -2191,7 +2180,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (fun _ _ -> ())
             Assert.AreEqual(
                 0,
                 result.coordinateDiagnostics.unresolvedPassengerPointIds.Length)
@@ -2210,62 +2199,6 @@ type CzPttToGtfsTests() =
             Assert.IsTrue(
                 result.coordinateDiagnostics.ambiguousOsmCandidates
                 |> Array.exists (fun value -> value.StartsWith("DE:55555:ref_eu_plc:")))
-        finally
-            if Directory.Exists(root) then Directory.Delete(root, true)
-
-    [<TestMethod>]
-    member _.``Implausible OSM PLC falls through to a plausible reviewed alias``() =
-        let value =
-            message [
-                location "57076" "Praha" "08:00:00" ["0001"] None []
-                location "44444" "Foreign" "08:15:00" ["0001"] None []
-                location "57016" "Kolín" "08:30:00" ["0001"] None []
-            ] []
-        value.CzpttInformation.CzpttLocation.[1].Location.CountryCodeIso <- "AT"
-        let serializer =
-            System.Xml.Serialization.XmlSerializer(typeof<CzPttXml.CzpttcisMessage>)
-        let root =
-            Path.Combine(Path.GetTempPath(), $"jrutil-czptt-osm-secondary-{Guid.NewGuid():N}")
-        let input = Path.Combine(root, "input.xml")
-        let output = Path.Combine(root, "output")
-        let sr70 = Path.Combine(root, "SR70.csv")
-        let pbf = Path.Combine(root, "fixture.osm.pbf")
-        let aliases = Path.Combine(root, "aliases.json")
-        Directory.CreateDirectory(root) |> ignore
-        try
-            use writer = new StreamWriter(input)
-            serializer.Serialize(writer, value)
-            writer.Close()
-            File.WriteAllLines(sr70, [|
-                "57076,Praha,50.083,14.435"
-                "57016,Kolín,50.026,15.214"
-            |])
-            writeOsmPbf pbf [|
-                osmNode 1L 0.0 0.0 [
-                    "railway", "station"
-                    "ref:EU:PLC", "AT44444"
-                ]
-                osmNode 2L 50.05 14.82 [
-                    "railway", "station"
-                    "name", "Foreign"
-                    "addr:country", "AT"
-                ]
-            |]
-            File.WriteAllText(aliases, """{"AT:44444":"osm:node:2"}""")
-            let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (Some aliases) (fun _ _ -> ())
-            Assert.AreEqual(1, result.coordinateDiagnostics.osmGapFills.Length)
-            Assert.AreEqual(
-                "reviewed_alias",
-                result.coordinateDiagnostics.osmGapFills.[0].coordinateMatchMethod)
-            Assert.AreEqual(
-                Some "osm:node:2",
-                result.coordinateDiagnostics.osmGapFills.[0].coordinateSourceObjectId)
-            Assert.IsTrue(
-                result.coordinateDiagnostics.corridorRejectedOsmCandidates
-                |> Array.exists (fun value ->
-                    value.StartsWith("AT:44444:ref_eu_plc:osm:node:1")))
-            Assert.AreEqual(0, result.coordinateDiagnostics.estimatedResolutions.Length)
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -2304,7 +2237,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (fun _ _ -> ())
             Assert.AreEqual(1, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.AreEqual(
                 "normalized_exact_name",
@@ -2344,7 +2277,7 @@ type CzPttToGtfsTests() =
             |]
 
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (fun _ _ -> ())
             Assert.IsFalse(
                 result.coordinateDiagnostics.osmGapFills
                 |> Array.exists (fun resolution ->
@@ -2429,7 +2362,7 @@ type CzPttToGtfsTests() =
                 writeMessage (Path.Combine(input, denseFile)) dense
                 writeMessage (Path.Combine(input, sparseFile)) sparse
                 let result =
-                    CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
+                    CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None (fun _ _ -> ())
                 let stop =
                     result.feed.stops
                     |> Array.find (fun candidate ->
@@ -2486,7 +2419,7 @@ type CzPttToGtfsTests() =
                 "10002,Anchor B,50.0,14.2"
             |])
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None (fun _ _ -> ())
             CollectionAssert.Contains(
                 result.coordinateDiagnostics.estimatedResolutions
                 |> Array.map (fun resolution -> resolution.sourceLocationId),
@@ -2526,7 +2459,7 @@ type CzPttToGtfsTests() =
                 "10002,Passenger B,50.0,14.2"
             |])
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) None (fun _ _ -> ())
             Assert.IsFalse(
                 result.coordinateDiagnostics.estimatedResolutions
                 |> Array.exists (fun resolution ->
@@ -2605,7 +2538,7 @@ type CzPttToGtfsTests() =
                 ]
             |]
             let result =
-                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) None (fun _ _ -> ())
+                CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Gtfs } input output (Some sr70) (Some pbf) (fun _ _ -> ())
             Assert.AreEqual(3, result.coordinateDiagnostics.osmGapFills.Length)
             Assert.IsTrue(
                 result.coordinateDiagnostics.osmGapFills

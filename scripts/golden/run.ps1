@@ -130,7 +130,8 @@ function Get-FixArguments([string] $Target, [bool] $Posts) {
 }
 
 function Get-BundleArguments([string] $Target, [string] $Merged, [string[]] $PostOptions) {
-    @("jdf-to-bundle", "--international-route-policy=regional-adjacent", "--transport-mode-rules=$config/jdf_transport_mode_rules.csv",
+    @("jdf-to-bundle", "--international-route-policy=regional-adjacent", "--transport-mode-rules=$inputs/geodata/routes/transport-modes.csv",
+      "--route-presentation-rules=$inputs/geodata/routes/presentation.csv",
       "--snapshot-descriptor=$out/$Merged-descriptor.json", "--converter-version=golden", "--gvd-year=2026") +
     $PostOptions + @("--diagnostics-out=$Target-diagnostics") + $common + @("$out/$Merged.zip", $Target)
 }
@@ -146,12 +147,13 @@ function Get-StageArguments([string] $Stage, [string] $Target) {
         "bundle" { Get-BundleArguments $Target "merge" @("--no-estimated-posts") }
         "bundle-posts" { Get-BundleArguments $Target "merge-posts" @("--routing-osm-pbf=$routingPbf", "--post-inference-policy=$PostInferencePolicy") }
         "overlay" { @("regional-gtfs-overlay", "--policy=$config/pid-ids-jmk-production-v1.json", "--gvd-year=2026", "--converter-version=golden",
+                      "--overrides-root=$inputs/geodata/overlay", "--route-presentation-rules=$inputs/geodata/routes/presentation.csv",
                       "--source=pid-gtfs=$overlayInputs/pid-gtfs.zip", "--source-descriptor=pid-gtfs=$overlayInputs/pid-gtfs-descriptor.json",
                       "--source=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs.zip", "--source-descriptor=ids-jmk-gtfs=$overlayInputs/ids-jmk-gtfs-descriptor.json",
                       "--diagnostics-out=$Target-diagnostics") + $common + @("$out/bundle", $Target) }
         "czptt" { @("czptt-to-bundle", "--catalog-snapshot=$czptt/sources/kadr/catalog.json", "--operational-points=sidecar",
                     "--sr70=$czptt/sources/sr70/SR70.csv",
-                    "--osm-pbf=$inputs/osm/railway-locations.osm.pbf", "--osm-aliases=$config/czptt_osm_aliases.json",
+                    "--osm-pbf=$inputs/osm/railway-locations.osm.pbf",
                     "--diagnostics-out=$Target-diagnostics") + $common + @("$czptt/derived/messages.zip", $Target) }
         default { throw "Unknown stage $Stage" }
     }

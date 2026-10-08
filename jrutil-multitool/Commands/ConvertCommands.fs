@@ -39,6 +39,10 @@ let jdfToBundle (ctx: CommandContext) =
             optArgValue args "--transport-mode-rules"
             |> Option.map JdfGtfsRules.loadTransportModeRules
             |> Option.defaultValue JdfGtfsRules.emptyTransportModeRules
+        routePresentationRules =
+            optArgValue args "--route-presentation-rules"
+            |> Option.map RouteRules.loadPresentationRules
+            |> Option.defaultValue RouteRules.emptyPresentationRules
         estimatedPosts = (estimatedPostActivation args).runRoutedInference
         routingPbfPath = optArgValue args "--routing-osm-pbf"
         maximumWorkers = min 8 bundlePlan.resolvedWorkers
@@ -114,7 +118,6 @@ let czpttToBundle (ctx: CommandContext) =
         conversion = { operationalPointMode = operationalPointMode }
         sr70Path = existingFile args "--sr70" "SR70 snapshot"
         osmPath = existingFile args "--osm-pbf" "OSM snapshot"
-        osmAliasesPath = existingFile args "--osm-aliases" "OSM alias file"
         diagnosticsOutput = optArgValue args "--diagnostics-out"
         diagnosticTraces = argFlagSet args "--diagnostic-traces"
     }

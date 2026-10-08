@@ -129,6 +129,29 @@ let writeRoutes (context: Context) =
         }
         |> Seq.sortBy (fun row -> rowValue row "route_id")
         |> Seq.toArray
+    let rules = context.routePresentationRules
+    if rules.rules.Length > 0 then
+        let licenceOf routeId =
+            match prepared.baseCisByRoute.TryGetValue(routeId) with
+            | true, licence -> Some licence
+            | _ ->
+                match source.nativeRoutes.TryGetValue(routeId) with
+                | true, (_, licence) when not (String.IsNullOrWhiteSpace(licence)) -> Some licence
+                | _ -> None
+        for row in outputRouteRows do
+            let routeId = rowValue row "route_id"
+            licenceOf routeId |> Option.iter (fun licence ->
+                let computed: JrUtil.RouteRules.RoutePresentation = {
+                    shortName = optionText (rowValue row "route_short_name")
+                    color = optionText (rowValue row "route_color")
+                    textColor = optionText (rowValue row "route_text_color") }
+                let agency = JrUtil.RouteRules.jdfAgencyIco (rowValue row "agency_id")
+                let _, changes = JrUtil.RouteRules.presentRoute rules routeId agency licence computed
+                for change in changes do
+                    row.[change.field] <- defaultArg change.after ""
+                    let before = defaultArg change.before ""
+                    addDiagnostic prepared.diagnostics "route_presentation_override" routeId
+                        $"{change.field}: {before} -> {row.[change.field]}")
     writeRows (Path.Combine(gtfsOutput, "routes.txt")) routeColumns outputRouteRows
     agencyColumns, sourceNativeAgencyRows
 

@@ -500,9 +500,10 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
             progressCompleted "stream-stop-times" (int64 stopTimeCount) (Some callFacts.emittedCallCount) "rows"
             Log.Information("Bundle phase: preparing remaining GTFS relations")
             started "prepare-remaining-gtfs" (Some 1L) "feeds"
-            let feed =
+            let feed, presentationChanges =
                 JdfToGtfs.finishStreamingFeedWithUniqueCalendars preparation (referencedStopIds |> Set.ofSeq)
-                |> Gtfs.fillStandardRequiredFields
+                |> JdfToGtfs.applyRoutePresentationRules executionOptions.routePresentationRules
+            let feed = Gtfs.fillStandardRequiredFields feed
             logPhaseResources "prepare-remaining-gtfs" phaseTimer
             progressCompleted "prepare-remaining-gtfs" 1L (Some 1L) "feeds"
             validateStopCoordinates feed
@@ -588,10 +589,18 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                       code = if decision.corrected then "corrected_transport_mode" else "transport_mode_rule_mismatch"
                       sourceObjectId = JdfGtfsRules.jdfSourceRouteId decision.routeId decision.routeDistinction
                       message = $"{decision.message}; effective_mode={decision.effectiveMode}" })
+            let presentationDiagnostics =
+                presentationChanges
+                |> Seq.map (fun change ->
+                    let text value = defaultArg value ""
+                    { severity = "info"; code = "route_presentation_override"
+                      sourceObjectId = change.routeId
+                      message = $"{change.field}: {text change.before} -> {text change.after}" })
             let bundleDiagnostics =
                 Seq.concat [ diagnostics batch feed callFacts emittedTransferCalls :> seq<_>
                              internationalDiagnostics
-                             transportModeDiagnostics ]
+                             transportModeDiagnostics
+                             presentationDiagnostics ]
                 |> Seq.sortBy (fun diagnostic -> diagnostic.code, diagnostic.sourceObjectId)
                 |> Seq.toArray
             let missingCoordinateCount =
@@ -608,7 +617,8 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                 serializeJson (fun stream ->
                     writeManifest stream descriptor converterVersion
                                   internationalPolicy filterResult.decisions transportModeRules
-                                  transportModeDecisions preparation.postPlan routingPbfPath
+                                  transportModeDecisions executionOptions.routePresentationRules
+                                  presentationChanges preparation.postPlan routingPbfPath
                                   liveEvidenceTemporaryDirectory
                                   executionOptions.postInferencePolicyPath
                                   batch feed)

@@ -103,13 +103,18 @@ type RegionalGtfsOverlayTests() =
         (RegionalGtfsOverlay.compile {
             auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
             bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
-            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None }).aggregate
+            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None
+            routePresentationRules = RouteRules.emptyPresentationRules; overridesRoot = None }).aggregate
 
-    let executeAll policy gvdYear bindings basePath output =
+    let executeAllWith rules overridesRoot policy gvdYear bindings basePath output =
         RegionalGtfsOverlay.compile {
             auditDate = None; policyPath = policy; gvdYear = gvdYear
             bindings = bindings; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
-            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None }
+            diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None
+            routePresentationRules = rules; overridesRoot = overridesRoot }
+
+    let executeAll policy gvdYear bindings basePath output =
+        executeAllWith RouteRules.emptyPresentationRules None policy gvdYear bindings basePath output
 
     let policyJson = """{
       "schema_version": 4,
@@ -246,6 +251,36 @@ type RegionalGtfsOverlayTests() =
                 routes.Contains("overlay:pid-gtfs:route:"),
                 "A line with one regular and one detour route must not get a source-native route:
 " + routes)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Reviewed presentation overrides win over source display fields``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-presentation-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            // Overrides resolve against --overrides-root, not the policy directory.
+            let reviewed = Path.Combine(root, "reviewed")
+            Directory.CreateDirectory(reviewed) |> ignore
+            File.Move(Path.Combine(root, "stops.csv"), Path.Combine(reviewed, "stops.csv"))
+            let overlayAll = Path.Combine(root, "overlay-all-presentation.json")
+            write overlayAll ($"{{\"schema_version\":1,\"sources\":[{{\"source_id\":\"pid-gtfs\",\"policy\":\"{Path.GetFileName(policy)}\",\"adapter\":\"pid-v1\"}}]}}")
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            Assert.ThrowsExactly<InvalidOperationException>(fun () ->
+                executeAll overlayAll 2026 [| binding |] basePath (Path.Combine(root, "no-root")) |> ignore)
+            |> ignore
+            let rules: RouteRules.PresentationRuleSet = {
+                sha256 = None
+                rules = [| { selector = { agencyId = None; licence = RouteRules.Licence "000100" }
+                             shortName = None; color = Some "0a0b0c"; textColor = None; reason = "test" } |] }
+            let output = Path.Combine(root, "output")
+            executeAllWith rules (Some reviewed) overlayAll 2026 [| binding |] basePath output |> ignore
+            let routes = readGtfs output "routes.txt"
+            let routeLine id =
+                routes.Split('\n') |> Array.find (fun line -> line.StartsWith(id + ",", StringComparison.Ordinal) || line.StartsWith("\"" + id + "\",", StringComparison.Ordinal))
+            Assert.IsTrue((routeLine "jdf:route:r1").Contains("0a0b0c"), routeLine "jdf:route:r1")
+            Assert.IsFalse((routeLine "jdf:route:r1").Contains("abcdef"), routeLine "jdf:route:r1")
+            Assert.IsFalse((routeLine "jdf:route:r2").Contains("0a0b0c"), routeLine "jdf:route:r2")
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
@@ -568,7 +603,8 @@ type RegionalGtfsOverlayTests() =
                     auditDate = Some (NodaTime.LocalDate(2025, 12, 15)); policyPath = overlayAll; gvdYear = 2026
                     bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output
                     converterVersion = "test-commit"; diagnosticsOutput = None; diagnosticTraces = false
-                    stopRegistry = Some registry; stopRegistryCandidatesPath = Some candidates } |> ignore
+                    stopRegistry = Some registry; stopRegistryCandidatesPath = Some candidates
+                    routePresentationRules = RouteRules.emptyPresentationRules; overridesRoot = None } |> ignore
             let emptyRegistry: StopRegistry.StopRegistry = { stops = [||]; posts = [||]; overlayPlaces = [||]; sha256 = "test" }
             let candidates = Path.Combine(root, "candidates.csv")
             compileWithRegistry emptyRegistry candidates (Path.Combine(root, "output-unpinned"))

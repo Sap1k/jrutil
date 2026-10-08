@@ -216,7 +216,7 @@ let private writeIdsJmkOperational root bindings =
     writeValues (Path.Combine(root, "operational_trip_candidates.txt"))
         [| "source_id"; "operational_line_id"; "operational_trip_id"; "trip_id"; "original_trip_id" |] rows
 
-let private writeCombinedOverrides destination (preparedBindings: (string * SourceBinding * string * OverlayPolicy) array) : OverridePolicy =
+let private writeCombinedOverrides destination (overridesRoot: string option) (preparedBindings: (string * SourceBinding * string * OverlayPolicy) array) : OverridePolicy =
     let columns = [| "source_namespace"; "source_id"; "target_namespace"; "target_id"; "valid_from"; "valid_to"; "review_note" |]
     let write kind configured =
         let output = Path.Combine(destination, "combined-" + kind + "-overrides.csv")
@@ -224,7 +224,12 @@ let private writeCombinedOverrides destination (preparedBindings: (string * Sour
             for _, binding, policyPath, sourcePolicy in preparedBindings do
                 let configuredPath = configured sourcePolicy.source.overrides
                 if not (String.IsNullOrWhiteSpace(configuredPath)) then
-                    let path = resolveRelative policyPath configuredPath
+                    let path =
+                        match overridesRoot with
+                        | Some directory when not (Path.IsPathRooted(configuredPath)) ->
+                            Path.GetFullPath(Path.Combine(directory, configuredPath))
+                        | _ -> resolveRelative policyPath configuredPath
+                    if not (File.Exists(path)) then invalidOp $"Configured override CSV does not exist: {path}"
                     for row in csvRows (Path.GetDirectoryName(path)) (Path.GetFileName(path)) do
                         let copy = cloneRow row
                         copy.["source_id"] <- combinedStopGroupId binding.sourceId (rowValue row "source_id")
@@ -234,7 +239,7 @@ let private writeCombinedOverrides destination (preparedBindings: (string * Sour
         output
     { stops = write "stop" (fun value -> value.stops) }
 
-let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding array) =
+let prepare scratchRoot combinedPolicyPath overridesRoot baseBundle (bindings: SourceBinding array) =
     let combinedPolicyPath, combinedPolicy = loadPolicy combinedPolicyPath
     let byId = bindings |> Array.map (fun binding -> binding.sourceId, binding) |> dict
     if byId.Count <> bindings.Length then invalidArg "--source" "Duplicate source binding"
@@ -294,7 +299,7 @@ let prepare scratchRoot combinedPolicyPath baseBundle (bindings: SourceBinding a
 
     let policyDirectory = Path.Combine(scratchRoot, "combined-policy")
     Directory.CreateDirectory(policyDirectory) |> ignore
-    let combinedOverrides = writeCombinedOverrides policyDirectory preparedBindings
+    let combinedOverrides = writeCombinedOverrides policyDirectory overridesRoot preparedBindings
     let template = preparedBindings.[0] |> fun (_, _, _, policy) -> policy
     let sourcePolicies = preparedBindings |> Array.map (fun (_, _, _, policy) -> policy.source)
     let capabilities =

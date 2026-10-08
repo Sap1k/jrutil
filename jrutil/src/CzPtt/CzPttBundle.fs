@@ -120,7 +120,7 @@ let private idsSystem (catalog: CzPttModel.CatalogSnapshot) code =
 /// Convert CZPTT messages into a feed plus operational and source-metadata
 /// sidecars; `outputDirectory` is private scratch for the sidecar spools.
 let convert storagePolicy catalog options inputPath outputDirectory
-            sr70Path osmPath osmAliasesPath
+            sr70Path osmPath
             (progress: string -> string -> unit) =
     Directory.CreateDirectory(outputDirectory) |> ignore
     progress "parse-input" "started"
@@ -149,7 +149,6 @@ let convert storagePolicy catalog options inputPath outputDirectory
     progress "load-coordinate-sources" "started"
     let sr70 = loadSr70Coordinates sr70Path
     let osmCandidates = loadOsmCandidates osmPath
-    let osmAliases = loadAliases osmAliasesPath
     progress "load-coordinate-sources" "completed"
     progress "convert-gtfs" "started"
     let rawResult =
@@ -202,11 +201,6 @@ let convert storagePolicy catalog options inputPath outputDirectory
         |> Seq.groupBy fst
         |> Seq.map (fun (plc, values) ->
             plc, values |> Seq.map snd |> Seq.toArray)
-        |> Map
-    let osmByObjectId =
-        osmCandidates
-        |> Seq.groupBy (fun candidate -> candidate.objectId)
-        |> Seq.map (fun (objectId, values) -> objectId, values |> Seq.toArray)
         |> Map
     let osmByName =
         osmCandidates
@@ -306,15 +300,8 @@ let convert storagePolicy catalog options inputPath outputDirectory
             fuzzyNameTime.Stop()
             values
     let candidateGroups (identity: string * string) =
-        let country, code = identity
-        let alias =
-            osmAliases
-            |> Map.tryFind $"{country}:{code}"
-            |> Option.bind (fun expected -> Map.tryFind expected osmByObjectId)
-            |> Option.defaultValue [||]
         [|
             "ref_eu_plc", fun () -> osmByPlc identity
-            "reviewed_alias", fun () -> alias
             "normalized_exact_name", fun () -> exactNameCandidates identity
             "normalized_railway_name", fun () -> coreNameCandidates identity
             "normalized_fuzzy_name", fun () -> fuzzyNameCandidates identity

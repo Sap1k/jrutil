@@ -120,6 +120,7 @@ type BundleOptions = {
     converterVersion: string
     internationalPolicy: JdfGtfsRules.InternationalRoutePolicy
     transportModeRules: JdfGtfsRules.TransportModeRuleSet
+    routePresentationRules: RouteRules.PresentationRuleSet
     estimatedPosts: bool
     routingPbfPath: string option
     maximumWorkers: int
@@ -152,6 +153,7 @@ let defaultBundleOptions = {
     converterVersion = ""
     internationalPolicy = JdfGtfsRules.KeepAll
     transportModeRules = JdfGtfsRules.emptyTransportModeRules
+    routePresentationRules = RouteRules.emptyPresentationRules
     estimatedPosts = true
     routingPbfPath = None
     maximumWorkers = 1

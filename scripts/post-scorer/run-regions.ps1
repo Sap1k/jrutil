@@ -23,7 +23,7 @@ param(
     [Parameter(Mandatory)] [hashtable] $Regions,
     [string] $OsmCandidates = "",
     [string] $Tool = (Join-Path $PSScriptRoot "..\..\jrutil-multitool\bin\Release\net10.0\jrutil-multitool.exe"),
-    [string] $TransportModeRules = (Join-Path $PSScriptRoot "..\..\..\repo\src\obehy\data\jdf_transport_mode_rules.csv"),
+    [string] $TransportModeRules = (Join-Path $PSScriptRoot "..\..\..\jrunify-ext-geodata\routes\transport-modes.csv"),
     [int] $GvdYear = 2026,
     [double] $TargetPrecision = 0.9
 )

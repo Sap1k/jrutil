@@ -17,7 +17,6 @@ type Options = {
     conversion: CzPttModel.ConversionOptions
     sr70Path: string option
     osmPath: string option
-    osmAliasesPath: string option
     diagnosticsOutput: string option
     diagnosticTraces: bool
 }
@@ -54,7 +53,7 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
         let result =
             CzPttBundle.convert
                 CzPttBundle.SpillBacked options.catalog options.conversion inputPath scratch
-                options.sr70Path options.osmPath options.osmAliasesPath progress
+                options.sr70Path options.osmPath progress
         progress "prepare-package-input" "started"
         let feed = result.feed |> Gtfs.deduplicateCalendarWithPrefix "czptt:service" |> Gtfs.fillStandardRequiredFields
         let standard, czech = Gtfs.feedTables feed

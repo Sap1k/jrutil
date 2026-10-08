@@ -31,6 +31,8 @@ Options:
     --converter-version=VALUE     Exact JrUtil fork version or commit for provenance
     --international-route-policy=VALUE  keep-all (default) or regional-adjacent
     --transport-mode-rules=FILE  Reviewed JDF effective transport-mode rule CSV
+    --route-presentation-rules=FILE  Reviewed route marking and colour overrides (jdf-to-bundle, overlay)
+    --overrides-root=DIR         Resolve relative overlay policy override CSVs against DIR
     --no-estimated-posts         Disable candidate-based internal post inference
     --routing-osm-pbf=FILE       Osmium demand-clipped road/tram PBF for routed inference
     --routing-cache=DIR          Reuse routed inference evidence from earlier runs on the same routing PBF
@@ -59,7 +61,6 @@ Options:
     --operational-points=VALUE  CZPTT internal points: gtfs (default) or sidecar
     --sr70=FILE                 SR70 CSV snapshot for CZPTT point names and coordinates
     --osm-pbf=FILE              Shared regional OSM PBF for CZPTT coordinate gaps
-    --osm-aliases=FILE          Reviewed CZPTT identity-to-OSM-object aliases
     --progress-events           Emit versioned JRUTIL_PROGRESS JSON lines
     --stop-registry=DIR         Reviewed stop ID registry (stops.csv, posts.csv, overlay_places.csv)
     --stop-registry-candidates=FILE  Write unregistered stops, posts or places for registry review

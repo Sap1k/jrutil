@@ -47,11 +47,9 @@ type InternationalRouteFilterResult = {
 }
 
 type TransportModeRule = {
-    agencyId: string
-    routeIdFrom: int
-    routeIdTo: int
-    publicLineFrom: int
-    publicLineTo: int
+    selector: RouteRules.RuleSelector
+    /// Inclusive numeric public line range the source must still have.
+    publicLine: (int * int) option
     expectedMode: JdfModel.TransportMode
     effectiveMode: JdfModel.TransportMode
     reason: string
@@ -81,38 +79,35 @@ let internal parseTransportMode argument = function
     | "P" -> JdfModel.Ferry
     | value -> invalidArg argument $"Unknown JDF transport mode: {value}"
 
+let transportModeHeader =
+    [| "agency_id"; "licence"; "public_line"; "expected_mode"; "effective_mode"; "reason" |]
+
 let loadTransportModeRules (path: string) =
-    let expected = [| "agency_id"; "route_id_from"; "route_id_to"; "public_line_from";
-                      "public_line_to"; "expected_mode"; "effective_mode"; "reason" |]
-    let bytes = File.ReadAllBytes(path)
-    let csv: CsvFile = CsvFile.Parse(System.Text.Encoding.UTF8.GetString(bytes), hasHeaders = true)
-    if csv.Headers <> Some expected then
-        let expectedHeader = String.Join(",", expected)
-        invalidArg "transportModeRules" $"Transport mode rule CSV must have header {expectedHeader}"
-    let integer (field: string) (value: string) =
-        match Int32.TryParse(value.Trim()) with
-        | true, parsed -> parsed
-        | _ -> invalidArg "transportModeRules" $"Invalid {field}: {value}"
+    let argument = "transportModeRules"
+    let rows, sha256 = RouteRules.readRuleCsv argument transportModeHeader path
+    let publicLine line (value: string) =
+        if value = "" then None else
+        let parse (text: string) =
+            match Int32.TryParse(text) with
+            | true, parsed -> parsed
+            | _ -> invalidArg argument $"Line {line}: invalid public_line: {value}"
+        match value.Split('-') with
+        | [| single |] -> Some (parse single, parse single)
+        | [| low; high |] when parse low <= parse high -> Some (parse low, parse high)
+        | _ -> invalidArg argument $"Line {line}: invalid public_line: {value}"
     let rules =
-        csv.Rows
-        |> Seq.map (fun row ->
-            let reason = row.[7].Trim()
-            if String.IsNullOrWhiteSpace(row.[0]) || String.IsNullOrWhiteSpace(reason) then
-                invalidArg "transportModeRules" "Rule agency_id and reason are required"
+        rows
+        |> Array.mapi (fun index row ->
+            let line = index + 2
             let rule = {
-                agencyId = row.[0].Trim()
-                routeIdFrom = integer "route_id_from" row.[1]
-                routeIdTo = integer "route_id_to" row.[2]
-                publicLineFrom = integer "public_line_from" row.[3]
-                publicLineTo = integer "public_line_to" row.[4]
-                expectedMode = parseTransportMode "transportModeRules" (row.[5].Trim())
-                effectiveMode = parseTransportMode "transportModeRules" (row.[6].Trim())
-                reason = reason }
-            if rule.routeIdFrom > rule.routeIdTo || rule.publicLineFrom > rule.publicLineTo then
-                invalidArg "transportModeRules" "Rule ranges must be ascending"
+                selector = RouteRules.parseSelector argument line row.[0] row.[1]
+                publicLine = publicLine line row.[2]
+                expectedMode = parseTransportMode argument row.[3]
+                effectiveMode = parseTransportMode argument row.[4]
+                reason = row.[5] }
+            if rule.reason = "" then invalidArg argument $"Line {line}: reason is required"
             rule)
-        |> Seq.toArray
-    { sha256 = Some (Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()); rules = rules }
+    { sha256 = Some sha256; rules = rules }
 
 let internationalRoutePolicyName = function
     | KeepAll -> "keep-all"
@@ -399,20 +394,24 @@ let applyTransportModeRules (ruleSet: TransportModeRuleSet) (batch: JdfModel.Jdf
     let routes =
         batch.routes
         |> Array.map (fun route ->
-            let numericRoute = match Int32.TryParse(route.id) with true, value -> Some value | _ -> None
             let publicLine =
                 publicLines.[route.id, route.idDistinction]
                 |> Option.bind (fun value -> match Int32.TryParse(value) with true, parsed -> Some parsed | _ -> None)
             let candidates =
                 ruleSet.rules
-                |> Array.filter (fun rule ->
-                    rule.agencyId = route.agencyId
-                    && numericRoute |> Option.exists (fun value -> value >= rule.routeIdFrom && value <= rule.routeIdTo))
-            let matched =
+                |> Array.filter (fun rule -> RouteRules.selectorMatches (Some route.agencyId) route.id rule.selector)
+            let guarded =
                 candidates
-                |> Array.tryFind (fun rule ->
+                |> Array.filter (fun rule ->
                     route.transportMode = rule.expectedMode
-                    && publicLine |> Option.exists (fun value -> value >= rule.publicLineFrom && value <= rule.publicLineTo))
+                    && (match rule.publicLine with
+                        | None -> true
+                        | Some (low, high) -> publicLine |> Option.exists (fun value -> value >= low && value <= high)))
+            let matched =
+                guarded
+                |> Seq.map (fun rule -> rule.selector, Some rule)
+                |> RouteRules.mostSpecific "transport mode"
+                    (fun () -> $"route {route.id}/{route.idDistinction}")
             match matched with
             | Some rule ->
                 decisions.Add {
