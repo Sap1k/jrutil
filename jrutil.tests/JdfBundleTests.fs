@@ -257,7 +257,7 @@ type JdfBundleTests() =
             use manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(first, "manifest.json")))
             assertEqual "jrutil-production" (manifest.RootElement.GetProperty("bundle_format").GetString())
             assertEqual 3 (manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            assertEqual "5.0" (manifest.RootElement.GetProperty("serving_schema_version").GetString())
+            assertEqual "5.1" (manifest.RootElement.GetProperty("serving_schema_version").GetString())
             assertEqual 19 (manifest.RootElement.GetProperty("relations").EnumerateArray() |> Seq.length)
 
             let relation name columns =

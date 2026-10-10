@@ -1,6 +1,6 @@
 # JrUtil production package contract
 
-JrUtil production packages use `bundle_format: jrutil-production`, bundle version 3 and serving schema version 5.0. The checked-in JSON contracts, [production-v3.json](../contracts/production-v3.json) and [serving-v5.json](../contracts/serving-v5.json), are normative. The F# schema declarations (`Serving/Schema.fs`) are tested against them, and `validate-package` enforces them.
+JrUtil production packages use `bundle_format: jrutil-production`, bundle version 3 and serving schema version 5.1. The checked-in JSON contracts, [production-v3.json](../contracts/production-v3.json) and [serving-v5.json](../contracts/serving-v5.json), are normative. The F# schema declarations (`Serving/Schema.fs`) are tested against them, and `validate-package` enforces them.
 
 The package inventory is closed:
 
@@ -39,7 +39,7 @@ Zones are codes, not entities. Each code carries the integrated-transport system
 
 **Calendars.** `service_calendar` holds a validity range and weekday mask; `service_exception` adds or removes single dates. A service known only from exceptions has a calendar row with mask `0`.
 
-**Keys.** `source_key(namespace, identifier) → public_id` maps source identifiers to public ones, with validity and a `binding_method`. Namespaces name their source system (`cis:line_trip`, `czptt:tr`, `pid:gtfs_trip_id`, `ids-jmk:line_course`, …), and the contract fixes each namespace's identifier encoding, for example `582492:143` for CIS line + trip. A public ID resolves to itself without a row. A trip key applies on its trip's service dates within its validity. `call_key` lists source call sequences only where they differ from `trip_call.sequence`. A regional source without a declared namespace publishes no keys until a minor version declares one.
+**Keys.** `source_key(namespace, identifier) → public_id` maps source identifiers to public ones, with validity and a `binding_method`. Namespaces name their source system (`cis:line_trip`, `czptt:tr`, `pid:gtfs_trip_id`, `ids-jmk:line_course`, …), and the contract fixes each namespace's identifier encoding, for example `582492:143` for CIS line + trip. A public ID resolves to itself without a row. A trip key applies on its trip's service dates within its validity. `call_key` lists source call sequences only where they differ from `trip_call.sequence`. A regional source without a declared namespace publishes no keys until a minor version declares one. Czech railway points carry `sr70` keys (the 5-digit SR70 code, no check digit) and their boarding points `sr70:track` keys (`53414:102`), so realtime sources that name points and tracks by SR70 resolve without reading location ids (5.1).
 
 **Locations.** `location` carries `domain` (`surface` for the JDF package, `heavy_rail` for CZPTT), `coordinate_precision` (`exact`/`estimated`/`missing`) and `coordinate_source`. A boarding point's `public_code` is its platform or post designation (GTFS `platform_code`).
 

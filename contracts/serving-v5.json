@@ -1,8 +1,8 @@
 {
-  "serving_schema_version": "5.0",
+  "serving_schema_version": "5.1",
   "status": "normative",
   "parquet_metadata": {
-    "obehy.schema_version": "5.0",
+    "obehy.schema_version": "5.1",
     "obehy.relation": "<relation name>",
     "jrutil.bundle_format": "jrutil-production"
   },
@@ -231,7 +231,9 @@
         "ids-jmk:gtfs_trip_id": "IDS JMK GTFS trip_id, verbatim",
         "ids-jmk:gtfs_route_id": "IDS JMK GTFS route_id, verbatim",
         "ids-jmk:gtfs_stop_id": "IDS JMK GTFS stop_id, verbatim",
-        "ids-jmk:line_course": "IDS JMK line, '/', course number as in api.txt"
+        "ids-jmk:line_course": "IDS JMK line, '/', course number as in api.txt",
+        "sr70": "SR70 code of a Czech railway point, 5 digits without the check digit",
+        "sr70:track": "SR70 code (5 digits), ':', CZPTT track designation"
       }
     }
   },
@@ -295,6 +297,16 @@
       "entity_kind": "trip",
       "encoding": "IDS JMK line, '/', course number as in api.txt",
       "example": "104/25"
+    },
+    "sr70": {
+      "entity_kind": "location",
+      "encoding": "SR70 code of a Czech railway point, 5 digits without the check digit",
+      "example": "53414"
+    },
+    "sr70:track": {
+      "entity_kind": "location",
+      "encoding": "SR70 code (5 digits), ':', CZPTT track designation",
+      "example": "53414:102"
     }
   },
   "relations": [

@@ -26,6 +26,8 @@ module PackageKeyRelations =
     /// one carry a `source:` placeholder, which is no CIS line.
     let private cisLine (line: string) = line.PadLeft(6, '0')
     let private isCisLine (line: string) = line <> "" && line.Length <= 6 && line |> Seq.forall Char.IsAsciiDigit
+    /// A Czech SR70 point code as CZPTT carries it: five digits, no check digit.
+    let private isSr70 (code: string) = code.Length = 5 && code |> Seq.forall Char.IsAsciiDigit
 
     let private declared = Schema.namespaces |> Array.map _.name |> Set.ofArray
 
@@ -135,6 +137,29 @@ module PackageKeyRelations =
                 (entityMappings "route" "source_to_output_routes.csv" "source_route_id" "output_route_id" "gtfs_route_id")
                 (entityMappings "location" "source_to_output_stops.csv" "source_stop_id" "output_stop_id" "gtfs_stop_id")
 
+        // 4b. Czech railway points by their SR70 code (5 digits, no check digit),
+        // and their boarding points (tracks) by code and track designation, so
+        // realtime sources naming points and tracks by SR70 resolve without
+        // reading location ids.
+        let railKeys =
+            if not (CompilerOutput.has input.sidecars "operational_points") then Seq.empty else
+            let points =
+                CompilerOutput.values input.sidecars "operational_points" [| "source_location_id"; "country_code"; "primary_code" |]
+                |> Seq.filter (fun row -> row.[1] = "CZ" && isSr70 row.[2])
+                |> Seq.map (fun row -> "czptt:stop:" + row.[0], row.[2])
+                |> Seq.toArray
+            let codeOf = dict points
+            let tracks =
+                CompilerOutput.values input.gtfs "stops.txt" [| "stop_id"; "parent_station"; "platform_code" |]
+                |> Seq.choose (fun row ->
+                    match codeOf.TryGetValue(row.[1]) with
+                    | true, code when row.[2] <> "" && row.[2] <> "BUS" ->
+                        Some (entityRow "location" "sr70:track" (code + ":" + row.[2]) row.[0] packageFirst packageLast "identity")
+                    | _ -> None)
+            Seq.append
+                (points |> Seq.map (fun (location, code) -> entityRow "location" "sr70" code location packageFirst packageLast "identity"))
+                tracks
+
         // 5. Base package keys the overlay cannot re-derive: re-targeted onto
         // the output trips cut from each base trip, clipped to the cut's dates.
         let baseSlices =
@@ -171,7 +196,7 @@ module PackageKeyRelations =
             Seq.concat [
                 sourceBindings |> Seq.map trip
                 courses |> Seq.map trip
-                nationalTrips; nationalRoutes; regionalEntities; baseKeys ]
+                nationalTrips; nationalRoutes; railKeys; regionalEntities; baseKeys ]
             |> Seq.filter isDeclared
 
         // Call keys. Regional source calls whose source sequence differs.

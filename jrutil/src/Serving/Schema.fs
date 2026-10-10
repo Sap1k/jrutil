@@ -14,7 +14,7 @@ module Schema =
     /// `major.minor`: a minor version only adds relations, trailing nullable
     /// fields, enumeration values or namespaces.
     [<Literal>]
-    let ServingSchemaVersion = "5.0"
+    let ServingSchemaVersion = "5.1"
 
     [<Literal>]
     let ServingSchemaMajor = 5
@@ -119,7 +119,7 @@ module Schema =
         "gtfs_pickup_dropoff", [| "0"; "1"; "2"; "3" |]
         "gtfs_tristate", [| "0"; "1"; "2" |]
         "gtfs_transfer_type", [| "0"; "1"; "2"; "3"; "4"; "5" |]
-        "namespace", [| "cis:line"; "cis:line_trip"; "czptt:train_number"; "czptt:pa"; "czptt:tr"; "pid:gtfs_trip_id"; "pid:gtfs_route_id"; "pid:gtfs_stop_id"; "ids-jmk:gtfs_trip_id"; "ids-jmk:gtfs_route_id"; "ids-jmk:gtfs_stop_id"; "ids-jmk:line_course" |]
+        "namespace", [| "cis:line"; "cis:line_trip"; "czptt:train_number"; "czptt:pa"; "czptt:tr"; "pid:gtfs_trip_id"; "pid:gtfs_route_id"; "pid:gtfs_stop_id"; "ids-jmk:gtfs_trip_id"; "ids-jmk:gtfs_route_id"; "ids-jmk:gtfs_stop_id"; "ids-jmk:line_course"; "sr70"; "sr70:track" |]
     ]
 
     /// Source-qualified key namespaces with their identifier encodings.
@@ -136,6 +136,8 @@ module Schema =
         { name = "ids-jmk:gtfs_route_id"; entityKind = "route"; pattern = "^.+$" }
         { name = "ids-jmk:gtfs_stop_id"; entityKind = "location"; pattern = "^.+$" }
         { name = "ids-jmk:line_course"; entityKind = "trip"; pattern = "^[^/]+/[^/]+$" }
+        { name = "sr70"; entityKind = "location"; pattern = "^[0-9]{5}$" }
+        { name = "sr70:track"; entityKind = "location"; pattern = "^[0-9]{5}:.+$" }
     |]
 
     let relationNames = relations |> Array.map (fun value -> value.name)

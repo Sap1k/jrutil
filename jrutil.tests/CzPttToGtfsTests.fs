@@ -1907,6 +1907,18 @@ type CzPttToGtfsTests() =
             let namespaces = rows "source_key" [|"namespace"|] |> Array.map (fun row -> row.[0])
             CollectionAssert.Contains(namespaces, "czptt:pa")
             CollectionAssert.Contains(namespaces, "czptt:tr")
+            // Czech railway points and their tracks by SR70 code; every key names a location.
+            let locationIds = rows "location" [|"location_id"|] |> Array.map (fun row -> row.[0]) |> Set
+            let railKeys =
+                rows "source_key" [|"entity_kind"; "namespace"; "identifier"; "public_id"|]
+                |> Array.filter (fun row -> row.[1].StartsWith("sr70"))
+            Assert.IsTrue(railKeys |> Array.exists (fun row -> row.[1] = "sr70"))
+            Assert.IsTrue(railKeys |> Array.forall (fun row -> row.[0] = "location" && locationIds.Contains row.[3]))
+            for row in railKeys |> Array.filter (fun row -> row.[1] = "sr70") do
+                Assert.AreEqual($"czptt:stop:CZ:{row.[2]}", row.[3])
+            for row in railKeys |> Array.filter (fun row -> row.[1] = "sr70:track") do
+                let code, track = row.[2].Split(':').[0], row.[2].Split(':').[1]
+                Assert.AreEqual($"czptt:stop:CZ:{code}:platform:{track}", row.[3])
             // PA sequences are the trip-part sequences.
             Assert.AreEqual(0, (rows "call_key" [|"namespace"|]).Length)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(production, "manifest.json")))

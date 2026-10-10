@@ -423,7 +423,7 @@ type ServingContractTests() =
             let waits = relationRows first "transfer" [| "maximum_waiting_time" |]
             Assert.IsTrue(waits |> Array.exists (fun row -> row.[0] = "300"))
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(first, "manifest.json")))
-            Assert.AreEqual("5.0", manifest.RootElement.GetProperty("serving_schema_version").GetString())
+            Assert.AreEqual("5.1", manifest.RootElement.GetProperty("serving_schema_version").GetString())
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]

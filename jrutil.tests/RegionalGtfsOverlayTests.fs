@@ -901,7 +901,7 @@ type RegionalGtfsOverlayTests() =
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
             Assert.AreEqual(3, manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            Assert.AreEqual("5.0", manifest.RootElement.GetProperty("serving_schema_version").GetString())
+            Assert.AreEqual("5.1", manifest.RootElement.GetProperty("serving_schema_version").GetString())
             // The production base contributes its own source.
             Assert.AreEqual(3, manifest.RootElement.GetProperty("sources").GetArrayLength())
             JrUtil.Serving.Validation.validatePackage output1 |> ignore
