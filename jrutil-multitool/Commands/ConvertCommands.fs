@@ -120,6 +120,7 @@ let czpttToBundle (ctx: CommandContext) =
         osmPath = existingFile args "--osm-pbf" "OSM snapshot"
         diagnosticsOutput = optArgValue args "--diagnostics-out"
         diagnosticTraces = argFlagSet args "--diagnostic-traces"
+        routeShapes = routeShapeOptions args
     }
     let bundleProgress name state =
         ctx.Phase "convert" name state

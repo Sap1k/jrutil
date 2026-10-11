@@ -21,6 +21,7 @@
     <Compile Include="src/Core/Hashing.fs" />
     <Compile Include="src/Core/Memory.fs" />
     <Compile Include="src/Core/Geo.fs" />
+    <Compile Include="src/Core/RouteShapeOptions.fs" />
     <Compile Include="src/Execution.fs" />
     <Compile Include="src/ReflectionUtils.fs" />
     <Compile Include="src/UnionCodec.fs" />
@@ -76,6 +77,7 @@
     <Compile Include="src/Serving/PackageKeyRelations.fs" />
     <Compile Include="src/Serving/PackageSemanticRelations.fs" />
     <Compile Include="src/Serving/GtfsProjection.fs" />
+    <Compile Include="src/Serving/RouteShapes.fs" />
     <Compile Include="src/Serving/PackageWriter.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Shapes.fs" />
     <Compile Include="src/Gtfs/RegionalOverlay/Policy.fs" />

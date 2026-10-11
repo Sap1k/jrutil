@@ -144,6 +144,8 @@ type CompilationOptions = {
     /// Directory that relative override CSV names in source policies resolve
     /// against; None resolves them next to each policy.
     overridesRoot: string option
+    /// Generate missing route shapes in the output package.
+    routeShapes: JrUtil.RouteShapeOptions option
 }
 
 type MultiSourceOverlayResult = {

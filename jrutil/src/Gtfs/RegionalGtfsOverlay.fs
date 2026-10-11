@@ -55,5 +55,6 @@ let compile (options: CompilationOptions) =
         gvdYear = options.gvdYear; converterVersion = options.converterVersion
         diagnosticsOutput = options.diagnosticsOutput
         diagnosticTraces = options.diagnosticTraces
-        routePresentationRules = options.routePresentationRules }
+        routePresentationRules = options.routePresentationRules
+        routeShapes = options.routeShapes }
     { outputPath = result.outputPath; sources = combined.sourceIds; aggregate = result }

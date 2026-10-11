@@ -646,7 +646,8 @@ let private writeBundleCore (executionOptions: BundleOptions) inputPath outputPa
                 manifest = jsonElement manifestText
                 diagnostics = Some (jsonElement diagnosticsText)
                 basePackage = None
-                diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> })
+                diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _>
+                routeShapes = None })
         Log.Information("Bundle phase: activating completed bundle")
         JdfPostInferencePolicy.PostInferencePhaseProbe.record "activation"
         let productionTemp = temp + ".production"

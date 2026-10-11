@@ -49,6 +49,9 @@ module CompilerOutput =
         /// Files copied verbatim into the optional diagnostics artifact, keyed
         /// by artifact-relative path.
         diagnosticFiles: IReadOnlyDictionary<string, string>
+        /// Generate missing route shapes while writing the package; None keeps
+        /// the package exactly as without the phase.
+        routeShapes: JrUtil.RouteShapeOptions option
     }
 
     let private tryTable (tables: IReadOnlyDictionary<string, Table>) name =

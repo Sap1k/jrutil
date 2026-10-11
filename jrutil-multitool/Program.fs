@@ -17,6 +17,7 @@ Usage:
     jrutil-multitool.exe czptt-to-bundle [options] --catalog-snapshot=FILE <CzPtt-in-file> <bundle-out-dir>
     jrutil-multitool.exe regional-gtfs-overlay [options] --policy=FILE --gvd-year=YEAR --converter-version=VALUE (--source=BINDING --source-descriptor=BINDING)... <base-bundle> <overlay-bundle-out>
     jrutil-multitool.exe validate-package <package-dir>
+    jrutil-multitool.exe shape-patterns <package-dir> <patterns-out-dir>
     jrutil-multitool.exe compare-packages (--byte-identical | --semantic) [--expect=FILE] <left-package> <right-package>
     jrutil-multitool.exe fix-jdf [options] <JDF-in-dir> <JDF-out-dir>
     jrutil-multitool.exe merge-jdf [options] --gvd-year=YEAR --reference-date=DATE <JDF-out-dir> <JDF-in-dir>...
@@ -53,6 +54,9 @@ Options:
     --byte-identical                      Require every production byte to match
     --semantic                            Compare relations by key, GTFS as row multisets, JSON canonically
     --expect=FILE                         Allow-list of intended semantic differences (`<kind> <glob>` lines)
+    --route-shapes=EXE                    Generate missing route shapes with this companion (overlay, czptt-to-bundle)
+    --route-shapes-graph=DIR              Route-shapes osr graph (obehy-motis-shapes extract)
+    --route-shapes-cache=DIR              Route-shapes companion result cache
     --output=DIR                           Replay report output directory
     -j --jobs=VALUE             Worker count or auto (default: auto)
     --memory-budget=VALUE       RAM budget such as 10GiB or auto (default: auto)
@@ -72,6 +76,7 @@ let commands: (string * string option * (CommandContext -> int)) list = [
     "regional-gtfs-overlay", Some "Regional GTFS overlay failed", PackageCommands.overlay
     "validate-package", Some "Production package validation failed", PackageCommands.validate
     "compare-packages", Some "Package comparison failed", PackageCommands.compare
+    "shape-patterns", Some "Shape pattern export failed", PackageCommands.shapePatterns
     "jdf-to-bundle", Some "JDF bundle conversion failed", ConvertCommands.jdfToBundle
     "jdf-export-post-features", Some "JDF post-inference feature export failed", ConvertCommands.jdfExportPostFeatures
     "czptt-to-bundle", Some "CZPTT bundle conversion failed", ConvertCommands.czpttToBundle

@@ -122,6 +122,27 @@ module PackageReader =
                         if name = "max_waiting_time" then (match waits.TryGetValue(key) with | true, value -> value | _ -> "")
                         else row.[name])))
 
+        // gtfs.zip carries no JDF kilometres (shape distances are metres along a
+        // generated shape); restore trip_call.source_kilometre as the compiler's
+        // stop distance. stop_times.txt is the passenger calls in trip_call order.
+        let stopTimesPath = Path.Combine(gtfs, "stop_times.txt")
+        if File.Exists(stopTimesPath) then
+            let columns = [| "trip_id"; "arrival_time"; "departure_time"; "stop_id"; "stop_sequence"; "stop_headsign"
+                             "pickup_type"; "drop_off_type"; "shape_dist_traveled"; "timepoint" |]
+            let calls =
+                readTextRowsWithOptional [ "source_kilometre" ] (serving "trip_call")
+                    [| "trip_id"; "sequence"; "passenger_service"; "source_kilometre" |]
+                |> Seq.filter (fun row -> row.[2] = "True")
+            let restored = Path.Combine(gtfs, "stop_times.restored")
+            do
+                use call = calls.GetEnumerator()
+                writeCsv restored columns (csvValues gtfs "stop_times.txt" columns |> Seq.map (fun row ->
+                    if not (call.MoveNext()) || call.Current.[0] <> row.[0] || call.Current.[1] <> row.[4] then
+                        invalidOp $"stop_times.txt does not follow trip_call at {row.[0]}/{row.[4]}"
+                    row.[8] <- call.Current.[3]
+                    row))
+            File.Move(restored, stopTimesPath, true)
+
         // National keys of the base package, by namespace: (public id, identifier).
         let keys =
             readTextRows (serving "source_key") [| "namespace"; "public_id"; "identifier" |]

@@ -104,14 +104,14 @@ type RegionalGtfsOverlayTests() =
             auditDate = auditDate; policyPath = policy; gvdYear = gvdYear
             bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None
-            routePresentationRules = RouteRules.emptyPresentationRules; overridesRoot = None }).aggregate
+            routePresentationRules = RouteRules.emptyPresentationRules; overridesRoot = None; routeShapes = None }).aggregate
 
     let executeAllWith rules overridesRoot policy gvdYear bindings basePath output =
         RegionalGtfsOverlay.compile {
             auditDate = None; policyPath = policy; gvdYear = gvdYear
             bindings = bindings; baseBundle = productionBase basePath; outputBundle = output; converterVersion = "test-commit"
             diagnosticsOutput = Some (output + ".diagnostics"); diagnosticTraces = true; stopRegistry = None; stopRegistryCandidatesPath = None
-            routePresentationRules = rules; overridesRoot = overridesRoot }
+            routePresentationRules = rules; overridesRoot = overridesRoot; routeShapes = None }
 
     let executeAll policy gvdYear bindings basePath output =
         executeAllWith RouteRules.emptyPresentationRules None policy gvdYear bindings basePath output
@@ -604,7 +604,7 @@ type RegionalGtfsOverlayTests() =
                     bindings = [| binding |]; baseBundle = productionBase basePath; outputBundle = output
                     converterVersion = "test-commit"; diagnosticsOutput = None; diagnosticTraces = false
                     stopRegistry = Some registry; stopRegistryCandidatesPath = Some candidates
-                    routePresentationRules = RouteRules.emptyPresentationRules; overridesRoot = None } |> ignore
+                    routePresentationRules = RouteRules.emptyPresentationRules; overridesRoot = None; routeShapes = None } |> ignore
             let emptyRegistry: StopRegistry.StopRegistry = { stops = [||]; posts = [||]; overlayPlaces = [||]; sha256 = "test" }
             let candidates = Path.Combine(root, "candidates.csv")
             compileWithRegistry emptyRegistry candidates (Path.Combine(root, "output-unpinned"))
@@ -901,7 +901,7 @@ type RegionalGtfsOverlayTests() =
             for relative in files1 do CollectionAssert.AreEqual(File.ReadAllBytes(Path.Combine(output1, relative)), File.ReadAllBytes(Path.Combine(output2, relative)), relative)
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output1, "manifest.json")))
             Assert.AreEqual(3, manifest.RootElement.GetProperty("bundle_version").GetInt32())
-            Assert.AreEqual("5.1", manifest.RootElement.GetProperty("serving_schema_version").GetString())
+            Assert.AreEqual("5.2", manifest.RootElement.GetProperty("serving_schema_version").GetString())
             // The production base contributes its own source.
             Assert.AreEqual(3, manifest.RootElement.GetProperty("sources").GetArrayLength())
             JrUtil.Serving.Validation.validatePackage output1 |> ignore

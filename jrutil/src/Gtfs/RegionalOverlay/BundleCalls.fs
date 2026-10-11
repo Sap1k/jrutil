@@ -46,10 +46,9 @@ let write (context: Context) sibling =
         | Some selection when ordinal < selection.outputStopIds.Length ->
             if not (String.IsNullOrEmpty(selection.outputStopIds.[ordinal])) then
                 setCallField outputRow "stop_id" <| selection.outputStopIds.[ordinal]
+            // A base call keeps its JDF kilometre value unless the source supplies a distance.
             selection.distances.[ordinal]
-                |> Option.map (fun value -> value.ToString("G29", CultureInfo.InvariantCulture))
-                |> Option.defaultValue ""
-                |> setCallField outputRow "shape_dist_traveled"
+                |> Option.iter (fun value -> setCallField outputRow "shape_dist_traveled" <| value.ToString("G29", CultureInfo.InvariantCulture))
             selection.arrivals.[ordinal] |> Option.iter (fun value -> setCallField outputRow "arrival_time" <| value)
             selection.departures.[ordinal] |> Option.iter (fun value -> setCallField outputRow "departure_time" <| value)
             match selection.sourceOrdinalByTarget.[ordinal] with

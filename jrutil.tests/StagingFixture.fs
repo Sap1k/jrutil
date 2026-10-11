@@ -63,8 +63,13 @@ module StagingFixture =
           manifest = manifest
           diagnostics = if File.Exists(diagnosticsPath) then Some (json diagnosticsPath) else None
           basePackage = basePackage
-          diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> }
+          diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _>
+          routeShapes = None }
 
     /// Write a production package from a fixture tree.
     let finalize compiled nativeSummaries progress (legacy: string) outputPath =
         PackageWriter.writePackage compiled nativeSummaries progress (output legacy) outputPath
+
+    /// `finalize` with the route-shapes package phase.
+    let finalizeWithShapes routeShapes (legacy: string) outputPath =
+        PackageWriter.writePackage Map.empty None (fun _ _ -> ()) { output legacy with routeShapes = Some routeShapes } outputPath

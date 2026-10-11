@@ -35,6 +35,8 @@ module TripCallWriter =
         subsidiaryCode: string
         subsidiaryName: string
         activeLineCode: string
+        /// The source's kilometre value of the call (JDF, tariff distance).
+        sourceKilometre: Nullable<double>
     }
 
     let fromGtfs (call: StopTime) location boarding routeStop =
@@ -48,8 +50,11 @@ module TripCallWriter =
           pickup = service call.pickupType; dropoff = service call.dropoffType
           timepoint = call.timepoint <> Some Approximate
           headsign = call.headsign |> Option.filter (String.IsNullOrWhiteSpace >> not) |> Option.defaultValue null
-          distance = call.shapeDistTraveled |> Option.map (double >> Nullable) |> Option.defaultValue (Nullable())
-          subsidiaryCode = null; subsidiaryName = null; activeLineCode = null }
+          // Metres along the trip's shape, set by the route-shapes phase. The
+          // compiler's stop distance is the JDF kilometre value.
+          distance = Nullable()
+          subsidiaryCode = null; subsidiaryName = null; activeLineCode = null
+          sourceKilometre = call.shapeDistTraveled |> Option.map (double >> Nullable) |> Option.defaultValue (Nullable()) }
 
     type Writer(path: string, token: CancellationToken, ?bufferedOutput: bool) =
         let schema = Schema.relations |> Array.find (fun value -> value.name = "trip_call")
@@ -76,7 +81,7 @@ module TripCallWriter =
                     ColumnWriter.Int16(column _.dropoff); ColumnWriter.Boolean(column _.timepoint)
                     ColumnWriter.Text(column _.headsign); ColumnWriter.OptionalFloat64(column _.distance)
                     ColumnWriter.Text(column _.subsidiaryCode); ColumnWriter.Text(column _.subsidiaryName)
-                    ColumnWriter.Text(column _.activeLineCode) |]
+                    ColumnWriter.Text(column _.activeLineCode); ColumnWriter.OptionalFloat64(column _.sourceKilometre) |]
         // One compression consumer and at most two queued batches (each <= 8 MiB).
         // The producer waits when full; worker failure completes the channel so
         // a blocked producer cannot hang indefinitely.

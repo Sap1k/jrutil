@@ -1886,7 +1886,7 @@ type CzPttToGtfsTests() =
                 catalog = catalog
                 conversion = { operationalPointMode = CzPttModel.Gtfs }
                 sr70Path = Some sr70; osmPath = None
-                diagnosticsOutput = Some diagnostics; diagnosticTraces = false }
+                diagnosticsOutput = Some diagnostics; diagnosticTraces = false; routeShapes = None }
             CzPttPackage.write packageOptions input production (fun _ _ -> ()) |> ignore
             JrUtil.Serving.Validation.validatePackage production |> ignore
             Assert.IsFalse(Directory.EnumerateFileSystemEntries(root) |> Seq.exists (fun path -> Path.GetFileName(path).StartsWith(".")))
