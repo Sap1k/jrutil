@@ -65,7 +65,7 @@ module PackageWriter =
           routeStops = collect routeStops StringComparer.Ordinal
           places = collect places StringComparer.Ordinal }
 
-    let private writeDiagnosticsSummary (input: CompilerOutput.Output) output (routeStops: RouteStopWriter.Summary) =
+    let private writeDiagnosticsSummary (input: CompilerOutput.Output) output (routeStops: RouteStopWriter.Summary) (routeShapes: RouteShapes.Summary option) =
         let events = ResizeArray<string * string * string * string>()
         match input.diagnostics with
         | None -> ()
@@ -100,7 +100,7 @@ module PackageWriter =
                     row |> Seq.map (fun pair -> pair.Key, box pair.Value) |> dict :> obj)
                 |> Seq.toArray
             if rows.Length > 0 then coverage.[Path.GetFileNameWithoutExtension(fileName)] <- box rows
-        let diagnostics = dict [
+        let diagnostics = Dictionary<string, obj>(dict [
             "schema_version", box Schema.DiagnosticsSchemaVersion
             "counts_by_code", box counts
             "examples_by_code", box examples
@@ -109,7 +109,8 @@ module PackageWriter =
                 "route_directions", box routeStops.routeDirections; "patterns", box routeStops.patterns
                 "slots", box routeStops.slots; "maximum_patterns_per_route_direction", box routeStops.maximumPatterns
                 "route_stop_zones", box routeStops.routeStopZones; "call_zones", box routeStops.callZones
-                "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ]
+                "unmatched_call_zone_calls", box routeStops.unmatchedCallZones ]) ])
+        routeShapes |> Option.iter (fun summary -> diagnostics.["route_shapes"] <- box summary.diagnostics)
         File.WriteAllText(Path.Combine(output, "diagnostics.json"), JsonSerializer.Serialize(diagnostics, JsonSerializerOptions(WriteIndented = true)) + "\n", new UTF8Encoding(false))
 
     let private writeManifest (input: CompilerOutput.Output) output (relationCounts: IDictionary<string,int>) =
@@ -329,11 +330,19 @@ module PackageWriter =
                 RouteStopWriter.finalize serving (zoneInputs input) (fun name count ->
                     lock progressLock (fun () -> currentPhase <- name; completed <- count))
             for KeyValue(name, count) in routeStops.counts do counts.[name] <- count
+            // Optional: shapes for trips that still have none, before projection.
+            let routeShapes =
+                input.routeShapes |> Option.map (fun options ->
+                    phase "route-shapes"
+                    let summary = RouteShapes.write serving input.feed options
+                    counts.["shape"] <- counts.["shape"] + summary.shapeRows
+                    counts.["shape_point"] <- counts.["shape_point"] + summary.pointRows
+                    summary)
             phase "project-gtfs"
             let feedInfo = match input.gtfs.TryGetValue("feed_info.txt") with | true, table -> Some table | _ -> None
             GtfsProjection.write serving feedInfo (Path.Combine(output, "gtfs.zip"))
             phase "write-diagnostics-summary"
-            writeDiagnosticsSummary input output routeStops.summary
+            writeDiagnosticsSummary input output routeStops.summary routeShapes
             phase "hash-production-payloads"
             writeManifest input output counts
             phase "validate-production-package"

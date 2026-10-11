@@ -48,7 +48,9 @@ module TripCallWriter =
           pickup = service call.pickupType; dropoff = service call.dropoffType
           timepoint = call.timepoint <> Some Approximate
           headsign = call.headsign |> Option.filter (String.IsNullOrWhiteSpace >> not) |> Option.defaultValue null
-          distance = call.shapeDistTraveled |> Option.map (double >> Nullable) |> Option.defaultValue (Nullable())
+          // Metres along the trip's shape, set by the route-shapes phase; source
+          // distances (JDF kilometre posts, feed units) are not published.
+          distance = Nullable()
           subsidiaryCode = null; subsidiaryName = null; activeLineCode = null }
 
     type Writer(path: string, token: CancellationToken, ?bufferedOutput: bool) =

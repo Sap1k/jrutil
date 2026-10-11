@@ -19,6 +19,7 @@ type Options = {
     osmPath: string option
     diagnosticsOutput: string option
     diagnosticTraces: bool
+    routeShapes: JrUtil.RouteShapeOptions option
 }
 
 let private json (value: obj) =
@@ -92,6 +93,7 @@ let write (options: Options) (inputPath: string) (outputPath: string) (progress:
             diagnostics = Some (json diagnostics)
             basePackage = None
             diagnosticFiles = Dictionary<string, string>() :> IReadOnlyDictionary<_, _>
+            routeShapes = options.routeShapes
         }
         progress "prepare-package-input" "completed"
         progress "write-package" "started"

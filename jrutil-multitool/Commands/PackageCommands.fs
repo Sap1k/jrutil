@@ -1,6 +1,6 @@
 // This file is part of JrUtil and is licenced under the GNU AGPLv3 or later
 
-/// validate-package, compare-packages and regional-gtfs-overlay.
+/// validate-package, compare-packages, shape-patterns and regional-gtfs-overlay.
 module JrUtil.Multitool.Commands.PackageCommands
 
 open System
@@ -39,6 +39,16 @@ let compare (ctx: CommandContext) =
         Log.Information("Compared {Count} package parts; {Differences} differences, {Unexpected} unexpected",
                         report.compared.Length, report.differences.Length, report.unexpected.Length)
         if report.isEquivalent then 0 else 1
+
+/// The route-shapes patterns of a finished package, without routing them
+/// (pattern counts and companion benchmarks; Oběhy BASE_PLAN.md section 17).
+let shapePatterns (ctx: CommandContext) =
+    let package = argValue ctx.Args "<package-dir>"
+    JrUtil.Serving.Validation.validatePackage package |> ignore
+    let scan = JrUtil.Serving.RouteShapes.writePatterns package (argValue ctx.Args "<patterns-out-dir>")
+    Log.Information("Shape patterns: trips={Trips}; already_shaped={Shaped}; routed_trips={Routed}; patterns={Patterns}; estimated_stop={Estimated}; too_few_points={TooFew}",
+                    scan.tripCount, scan.alreadyShaped, scan.trips.Count, scan.patterns.Count, scan.estimatedStop, scan.tooFewPoints)
+    0
 
 let private parseOverlayBindings args =
     let parseBinding argumentName (value: string) =
@@ -85,7 +95,8 @@ let overlay (ctx: CommandContext) =
                 optArgValue args "--route-presentation-rules"
                 |> Option.map RouteRules.loadPresentationRules
                 |> Option.defaultValue RouteRules.emptyPresentationRules
-            overridesRoot = optArgValue args "--overrides-root" |> Option.map Path.GetFullPath }
+            overridesRoot = optArgValue args "--overrides-root" |> Option.map Path.GetFullPath
+            routeShapes = routeShapeOptions args }
     Log.Information(
         "Regional overlay complete: sources={Sources}; matched_trips={MatchedTrips}; unmatched_trips={UnmatchedTrips}; ambiguous_trips={AmbiguousTrips}",
         String.concat "," result.sources, result.aggregate.matchedTrips,

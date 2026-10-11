@@ -68,6 +68,18 @@ let existingFile args name description =
             invalidArg name $"{description} does not exist: {path}")
     path
 
+/// The optional route-shapes package phase: on with --route-shapes, which then
+/// needs the companion's graph and the acceptance policy.
+let routeShapeOptions args : JrUtil.RouteShapeOptions option =
+    existingFile args "--route-shapes" "Route-shapes companion"
+    |> Option.map (fun companion ->
+        let graph = argValue args "--route-shapes-graph"
+        if not (Directory.Exists(graph)) then invalidArg "--route-shapes-graph" $"Route-shapes graph does not exist: {graph}"
+        { companion = companion
+          graph = graph
+          policy = (existingFile args "--route-shapes-policy" "Route-shapes policy").Value
+          cache = optArgValue args "--route-shapes-cache" })
+
 type CommandContext(args: Args) =
     let progressEvents = argFlagSet args "--progress-events"
     let memoryRequest =

@@ -81,6 +81,54 @@ type ServingContractTests() =
         declaration.["row_count"] <- System.Text.Json.Nodes.JsonValue.Create(rows)
         File.WriteAllText(manifestPath, manifest.ToJsonString())
 
+    /// The fixture package written with the route-shapes phase, against a fake
+    /// companion that copies a prepared output for the fixture's one pattern:
+    /// `first` → a bend → `second`, the shape starting `offset` degrees north
+    /// of `first`. Also returns the package written without the phase.
+    let shapedPackage root (offset: float) =
+        let plain = Path.Combine(root, "plain")
+        StagingFixture.finalize Map.empty None (fun _ _ -> ()) (staging root) plain
+        let scan = JrUtil.Serving.RouteShapes.writePatterns plain (Path.Combine(root, "patterns"))
+        Assert.AreEqual(1, scan.patterns.Count)
+        let id = scan.patterns.Keys |> Seq.head
+        CollectionAssert.AreEqual(
+            [| "pattern_id,class,seq,lat,lon,waypoint"
+               $"{id},bus,0,50.0000000,14.0000000,0"
+               $"{id},bus,1,50.1000000,14.1000000,0" |],
+            File.ReadAllLines(Path.Combine(root, "patterns", "patterns.csv")))
+        let prepared = Path.Combine(root, "companion-output")
+        let lines (rows: string list) = String.concat "\n" rows + "\n"
+        write (Path.Combine(prepared, "pattern_status.csv"))
+            (lines [ "pattern_id,class,status,points,routed_m,beeline_m"; $"{id},bus,routed,3,14000.0,0.0" ])
+        write (Path.Combine(prepared, "shapes.csv"))
+            (lines [ "pattern_id,seq,lat,lon,dist_m"
+                     sprintf "%s,0,%.7f,14.0000000,0.0" id (50.0 + offset)
+                     $"{id},1,50.0500000,14.0800000,7000.0"
+                     $"{id},2,50.1000000,14.1000000,14000.0" ])
+        write (Path.Combine(prepared, "offsets.csv"))
+            (lines [ "pattern_id,match_seq,point_index,dist_m"; $"{id},0,0,0.0"; $"{id},1,2,14000.0" ])
+        write (Path.Combine(prepared, "manifest.json")) """{"tool": "obehy-motis-shapes", "osr_commit": "test"}"""
+        // Called as `route --graph G --patterns P --out O`: the output is argument 7.
+        let companion =
+            if OperatingSystem.IsWindows() then
+                let path = Path.Combine(root, "companion.cmd")
+                // copy, not xcopy: xcopy blocks without a console stdin.
+                File.WriteAllText(path, $"@echo off\r\nmkdir \"%%7\"\r\ncopy /y \"{prepared}\\*\" \"%%7\\\" >nul\r\n")
+                path
+            else
+                let path = Path.Combine(root, "companion.sh")
+                File.WriteAllText(path, $"#!/bin/sh\ncp -r '{prepared}' \"$7\"\n")
+                File.SetUnixFileMode(path, UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
+                path
+        let policy = Path.Combine(root, "policy.json")
+        write policy """{"bus": {"max_stop_distance_m": 60, "max_beeline_share": 0.2}}"""
+        let graph = Directory.CreateDirectory(Path.Combine(root, "graph")).FullName
+        let shaped = Path.Combine(root, "shaped")
+        StagingFixture.finalizeWithShapes
+            { companion = companion; graph = graph; policy = policy; cache = None }
+            (staging root) shaped
+        plain, shaped
+
     [<TestMethod>]
     member _.``Memory reclaim gate does not repeat collections without further growth``() =
         let gib = 1024L * 1024L * 1024L
@@ -423,7 +471,7 @@ type ServingContractTests() =
             let waits = relationRows first "transfer" [| "maximum_waiting_time" |]
             Assert.IsTrue(waits |> Array.exists (fun row -> row.[0] = "300"))
             use manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(first, "manifest.json")))
-            Assert.AreEqual("5.1", manifest.RootElement.GetProperty("serving_schema_version").GetString())
+            Assert.AreEqual("5.2", manifest.RootElement.GetProperty("serving_schema_version").GetString())
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
@@ -568,6 +616,69 @@ type ServingContractTests() =
             StagingFixture.finalize Map.empty None (fun _ _ -> ()) overlayStage output
             // Base call 2 has no output call; call 1 still exists.
             CollectionAssert.AreEqual([| "0" |], parquetStrings (Path.Combine(output, "serving", "call_key.parquet")) "source_sequence")
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``The route-shapes phase writes companion shapes with metre offsets before projection``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-route-shapes-" + Guid.NewGuid().ToString("N"))
+        try
+            let plain, shaped = shapedPackage root 0.0
+            let shape = (relationRows shaped "shape" [| "shape_id"; "generation_method" |]).[0]
+            StringAssert.StartsWith(shape.[0], "jdf:shape:motis:")
+            Assert.AreEqual("motis", shape.[1])
+            CollectionAssert.AreEqual([| shape.[0] |], (relationRows shaped "trip" [| "shape_id" |]) |> Array.map (fun row -> row.[0]))
+            CollectionAssert.AreEqual([| "0"; "14000" |], relationRows shaped "trip_call" [| "shape_distance_traveled" |] |> Array.map (fun row -> row.[0]))
+            Assert.AreEqual(3, (relationRows shaped "shape_point" [| "shape_id" |]).Length)
+            use archive = ZipFile.OpenRead(Path.Combine(shaped, "gtfs.zip"))
+            Assert.IsNotNull(archive.GetEntry("shapes.txt"))
+            use diagnostics = JsonDocument.Parse(File.ReadAllText(Path.Combine(shaped, "diagnostics.json")))
+            let section = diagnostics.RootElement.GetProperty("route_shapes")
+            Assert.AreEqual(1, section.GetProperty("shaped_trips").GetInt32())
+            Assert.AreEqual("test", section.GetProperty("companion").GetProperty("osr_commit").GetString())
+            // Without the phase the package has no shapes and no section.
+            Assert.AreEqual(0, (relationRows plain "shape" [| "shape_id" |]).Length)
+            use plainDiagnostics = JsonDocument.Parse(File.ReadAllText(Path.Combine(plain, "diagnostics.json")))
+            Assert.IsFalse(plainDiagnostics.RootElement.TryGetProperty("route_shapes") |> fst)
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``A failing route-shapes companion leaves a valid unshaped package``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-route-shapes-" + Guid.NewGuid().ToString("N"))
+        try
+            let companion =
+                if OperatingSystem.IsWindows() then
+                    let path = Path.Combine(root, "companion.cmd")
+                    write path "@echo off\r\nexit /b 3\r\n"
+                    path
+                else
+                    let path = Path.Combine(root, "companion.sh")
+                    write path "#!/bin/sh\nexit 3\n"
+                    File.SetUnixFileMode(path, UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
+                    path
+            let policy = Path.Combine(root, "policy.json")
+            write policy """{"bus": {"max_stop_distance_m": 60, "max_beeline_share": 0.2}}"""
+            let graph = Directory.CreateDirectory(Path.Combine(root, "graph")).FullName
+            let shaped = Path.Combine(root, "shaped")
+            // finalizeWithShapes validates the package.
+            StagingFixture.finalizeWithShapes
+                { companion = companion; graph = graph; policy = policy; cache = None } (staging root) shaped
+            Assert.AreEqual(0, (relationRows shaped "shape" [| "shape_id" |]).Length)
+            use diagnostics = JsonDocument.Parse(File.ReadAllText(Path.Combine(shaped, "diagnostics.json")))
+            let section = diagnostics.RootElement.GetProperty("route_shapes")
+            Assert.AreEqual(1, section.GetProperty("rejected_patterns").GetProperty("companion_failed").GetInt32())
+        finally if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``A route shape that misses a stop is rejected and the trip stays unshaped``() =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-route-shapes-" + Guid.NewGuid().ToString("N"))
+        try
+            // The shape starts ~1.1 km north of the first stop.
+            let _, shaped = shapedPackage root 0.01
+            CollectionAssert.AreEqual([| "" |], (relationRows shaped "trip" [| "shape_id" |]) |> Array.map (fun row -> row.[0]))
+            Assert.AreEqual(0, (relationRows shaped "shape" [| "shape_id" |]).Length)
+            use diagnostics = JsonDocument.Parse(File.ReadAllText(Path.Combine(shaped, "diagnostics.json")))
+            let section = diagnostics.RootElement.GetProperty("route_shapes")
+            Assert.AreEqual(1, section.GetProperty("rejected_patterns").GetProperty("stop_too_far").GetInt32())
         finally if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]

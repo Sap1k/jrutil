@@ -14,7 +14,7 @@ module Schema =
     /// `major.minor`: a minor version only adds relations, trailing nullable
     /// fields, enumeration values or namespaces.
     [<Literal>]
-    let ServingSchemaVersion = "5.1"
+    let ServingSchemaVersion = "5.2"
 
     [<Literal>]
     let ServingSchemaMajor = 5

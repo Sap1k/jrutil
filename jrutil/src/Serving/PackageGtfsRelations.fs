@@ -220,7 +220,8 @@ module PackageGtfsRelations =
         let shapePoints = CompilerOutput.rows input.gtfs "shapes.txt" |> Seq.map (fun row -> objectRow [
             "shape_id", box (value "shape_id" row); "sequence", box (integer (value "shape_pt_sequence" row))
             "longitude", box (number (value "shape_pt_lon" row)); "latitude", box (number (value "shape_pt_lat" row))
-            "distance_traveled", nullableParsed number (value "shape_dist_traveled" row) ])
+            // Unordered rows: no running distance (the ordered writer computes it).
+            "distance_traveled", box (Nullable<double>()) ])
         let transferRows = CompilerOutput.rows input.gtfs "transfers.txt" |> Seq.map (fun row ->
             let selectors = [ "from_stop_id"; "to_stop_id"; "from_route_id"; "to_route_id"; "from_trip_id"; "to_trip_id" ] |> List.map (fun name -> name, value name row)
             objectRow [
@@ -250,7 +251,6 @@ module PackageGtfsRelations =
         let parentByStop =
             CompilerOutput.values input.gtfs "stops.txt" [| "stop_id"; "parent_station" |]
             |> Seq.map (fun row -> row.[0], row.[1]) |> dict
-        let parsedNumber value = if String.IsNullOrWhiteSpace(value) then Nullable() else Nullable(number value)
         // Per CZPTT trip part: (first, last) GTFS sequence, whether it is a
         // rail part, and whether it opens or closes its path.
         let partBounds =
@@ -355,7 +355,8 @@ module PackageGtfsRelations =
                 pickup = if String.IsNullOrEmpty(row.[5]) then 0s else int16 row.[5]
                 dropoff = if String.IsNullOrEmpty(row.[6]) then 0s else int16 row.[6]
                 timepoint = row.[7] <> "0"; headsign = optionalText row.[8]
-                distance = parsedNumber row.[9]
+                // Metres along the trip's shape come from the route-shapes phase only.
+                distance = Nullable()
                 subsidiaryCode = null; subsidiaryName = null; activeLineCode = null })
         finish ()
         let written = output.Complete()
@@ -368,6 +369,10 @@ module PackageGtfsRelations =
         use shapes = new ColumnWriter.Writer(Path.Combine(serving, "shape.parquet"), shapeSchema, 8192, CancellationToken.None)
         use points = new ColumnWriter.Writer(Path.Combine(serving, "shape_point.parquet"), pointSchema, 65536, CancellationToken.None)
         let pointBuffer = ResizeArray<struct(string * int * double * double * Nullable<double>)>(65536)
+        // Distances are metres from the shape's first point, from its geometry:
+        // feed distances have no common unit.
+        let mutable travelled = 0.0
+        let mutable previousLon, previousLat = 0.0, 0.0
         let shapeIds = ResizeArray<string>(8192)
         let generation (shape: string) = if shape.StartsWith("overlay:", StringComparison.Ordinal) then "source" else "compiler"
         let flushShapes () =
@@ -396,12 +401,16 @@ module PackageGtfsRelations =
                 let order = StringComparer.Ordinal.Compare(previousShape, shape)
                 if order > 0 || (order = 0 && sequence <= previousSequence) then
                     invalidOp $"shapes.txt is not strictly ordered at {shape}/{sequence}"
+            let longitude, latitude = number row.[2], number row.[3]
             if shape <> previousShape then
                 shapeIds.Add(shape)
                 if shapeIds.Count = 8192 then flushShapes ()
-            pointBuffer.Add(struct(
-                shape, sequence, number row.[2], number row.[3],
-                if String.IsNullOrWhiteSpace(row.[4]) then Nullable() else Nullable(number row.[4])))
+                travelled <- 0.0
+            else
+                travelled <- travelled + JrUtil.Geo.haversineMetres previousLat previousLon latitude longitude
+            previousLon <- longitude
+            previousLat <- latitude
+            pointBuffer.Add(struct(shape, sequence, longitude, latitude, Nullable(Math.Round(travelled, 1))))
             if pointBuffer.Count = 65536 then flushPoints ()
             previousShape <- shape
             previousSequence <- sequence

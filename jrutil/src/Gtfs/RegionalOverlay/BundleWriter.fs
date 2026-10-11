@@ -36,6 +36,7 @@ type Input = {
     diagnosticsOutput: string option
     diagnosticTraces: bool
     routePresentationRules: JrUtil.RouteRules.PresentationRuleSet
+    routeShapes: JrUtil.RouteShapeOptions option
 }
 
 /// Stream the resolved bundle, write reports and atomically activate the output.
@@ -50,6 +51,7 @@ let private compile ({
     diagnosticsOutput = diagnosticsOutput
     diagnosticTraces = diagnosticTraces
     routePresentationRules = routePresentationRules
+    routeShapes = routeShapes
 }: Input) =
     let sibling = Path.GetDirectoryName(prepared.outputBundle)
     let temporary = Path.Combine(sibling, "." + Path.GetFileName(prepared.outputBundle) + ".tmp-" + Guid.NewGuid().ToString("N"))
@@ -172,7 +174,8 @@ let private compile ({
             manifest = json (JsonSerializer.Serialize(manifest, jsonOptions))
             diagnostics = None
             basePackage = Some basePackage
-            diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _> }
+            diagnosticFiles = diagnosticFiles :> IReadOnlyDictionary<_, _>
+            routeShapes = routeShapes }
 
         prepared.scratch.Flush()
         temporary, output, prepared.outputBundle, diagnosticsOutput, diagnosticTraces, finalResult

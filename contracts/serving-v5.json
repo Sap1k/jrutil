@@ -1,8 +1,8 @@
 {
-  "serving_schema_version": "5.1",
+  "serving_schema_version": "5.2",
   "status": "normative",
   "parquet_metadata": {
-    "obehy.schema_version": "5.1",
+    "obehy.schema_version": "5.2",
     "obehy.relation": "<relation name>",
     "jrutil.bundle_format": "jrutil-production"
   },
@@ -1004,7 +1004,7 @@
     },
     {
       "name": "shape",
-      "description": "Shapes.",
+      "description": "Shapes. Every distance along a shape (shape_point.distance_traveled, trip_call.shape_distance_traveled) is in metres from the shape's first point (5.2).",
       "fields": [
         {
           "name": "shape_id",
