@@ -1,0 +1,76 @@
+name: route-shapes
+
+# Builds and tests the route-shapes companion (route-shapes/, used by the package writer's
+# route-shapes phase) and publishes the Linux binary as release `route-shapes-<source hash>`.
+# Oběhy's nightly build downloads the release matching its JrUtil checkout, so it never
+# compiles C++.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "route-shapes/**"
+      - ".github/workflows/route-shapes.yml"
+  pull_request:
+    paths:
+      - "route-shapes/**"
+      - ".github/workflows/route-shapes.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: route-shapes-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  SRC: route-shapes
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Source hash
+        id: src
+        # Oběhy computes the same hash from its JrUtil checkout to pick the release.
+        run: echo "hash=$(git ls-files -s "$SRC" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Dependency cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SRC }}/deps
+          key: route-shapes-deps-v1-${{ hashFiles('route-shapes/.pkg.lock') }}
+
+      - name: Toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build
+
+      - name: Build
+        run: |
+          cmake -S "$SRC" -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build build --target obehy-motis-shapes obehy-motis-shapes-test
+
+      - name: Test
+        run: cd build && ./obehy-motis-shapes-test
+
+      - name: Publish
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: route-shapes-${{ steps.src.outputs.hash }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already published"; exit 0
+          fi
+          asset="$RUNNER_TEMP/obehy-motis-shapes-linux-x64.tar.gz"
+          tar -C build -czf "$asset" obehy-motis-shapes
+          version=$(build/obehy-motis-shapes version)
+          gh release create "$TAG" "$asset" --target "$GITHUB_SHA" --latest=false \
+            --title "Route-shapes companion ${{ steps.src.outputs.hash }}" \
+            --notes "$version, built from $GITHUB_SHA."

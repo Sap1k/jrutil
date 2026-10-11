@@ -1,0 +1,4 @@
+[osr]
+  url=git@github.com:motis-project/osr.git
+  branch=master
+  commit=dd079c717fc528dddc50e7b5a629087f861cf247

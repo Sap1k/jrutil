@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written test network; fixture.osm.pbf is generated from it:
+     osmium sort test/fixture.osm -o test/fixture.osm.pbf -f pbf -O  (osr needs sorted ids)
+     Road: an L (n1 → n2 corner → n3). Rail: m1 → junction m2, branching north to m3 and
+     south-east to m4. Ferry: f1 → f2 across open water, with a road at each pier. osr keeps
+     only ways that meet another way, so every way here is joined to one. -->
+<osm version="0.6" generator="hand">
+  <node id="1" version="1" lat="50.0000000" lon="14.0000000"/>
+  <node id="2" version="1" lat="50.0000000" lon="14.0050000"/>
+  <node id="3" version="1" lat="50.0000000" lon="14.0100000"/>
+  <node id="4" version="1" lat="50.0050000" lon="14.0100000"/>
+  <node id="5" version="1" lat="50.0100000" lon="14.0100000"/>
+  <node id="11" version="1" lat="50.0200000" lon="14.0000000"/>
+  <node id="12" version="1" lat="50.0200000" lon="14.0050000"/>
+  <node id="13" version="1" lat="50.0200000" lon="14.0100000"/>
+  <node id="14" version="1" lat="50.0250000" lon="14.0150000"/>
+  <node id="15" version="1" lat="50.0300000" lon="14.0200000"/>
+  <node id="16" version="1" lat="50.0150000" lon="14.0150000"/>
+  <node id="17" version="1" lat="50.0100000" lon="14.0200000"/>
+  <node id="6" version="1" lat="50.0100000" lon="14.0150000"/>
+  <node id="21" version="1" lat="50.0400000" lon="14.0000000"/>
+  <node id="22" version="1" lat="50.0400000" lon="14.0200000"/>
+  <node id="23" version="1" lat="50.0450000" lon="14.0000000"/>
+  <node id="24" version="1" lat="50.0450000" lon="14.0200000"/>
+  <way id="101" version="1">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="5"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="102" version="1">
+    <nd ref="5"/><nd ref="6"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="111" version="1">
+    <nd ref="11"/><nd ref="12"/><nd ref="13"/>
+    <tag k="railway" v="rail"/>
+  </way>
+  <way id="112" version="1">
+    <nd ref="13"/><nd ref="14"/><nd ref="15"/>
+    <tag k="railway" v="rail"/>
+  </way>
+  <way id="113" version="1">
+    <nd ref="13"/><nd ref="16"/><nd ref="17"/>
+    <tag k="railway" v="rail"/>
+  </way>
+  <way id="121" version="1">
+    <nd ref="21"/><nd ref="22"/>
+    <tag k="route" v="ferry"/>
+  </way>
+  <way id="122" version="1">
+    <nd ref="23"/><nd ref="21"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="123" version="1">
+    <nd ref="22"/><nd ref="24"/>
+    <tag k="highway" v="residential"/>
+  </way>
+</osm>
