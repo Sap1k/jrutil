@@ -2033,6 +2033,46 @@ type CzPttToGtfsTests() =
             if Directory.Exists(root) then Directory.Delete(root, true)
 
     [<TestMethod>]
+    member _.``A railway point without passenger service takes its SR70 coordinate over an OSM name match``() =
+        // Vchynice is passed without stopping, so in sidecar mode it is no GTFS stop; an OSM
+        // station with the same name lies elsewhere.
+        let value =
+            message [
+                location "57076" "Praha" "08:00:00" ["0001"] None []
+                location "57423" "Vchynice" "08:10:00" [] None []
+                location "57016" "Kolín" "08:20:00" ["0001"] None []
+            ] []
+        let serializer =
+            System.Xml.Serialization.XmlSerializer(typeof<CzPttXml.CzpttcisMessage>)
+        let root =
+            Path.Combine(Path.GetTempPath(), $"jrutil-czptt-point-sr70-{Guid.NewGuid():N}")
+        let input = Path.Combine(root, "input.xml")
+        let output = Path.Combine(root, "output")
+        let sr70 = Path.Combine(root, "SR70.csv")
+        let pbf = Path.Combine(root, "fixture.osm.pbf")
+        Directory.CreateDirectory(root) |> ignore
+        try
+            use writer = new StreamWriter(input)
+            serializer.Serialize(writer, value)
+            writer.Close()
+            File.WriteAllLines(sr70, [|
+                "57076,Praha,50.083,14.435"
+                "57423,Vchynice,50.500,14.038"
+                "57016,Kolín,50.026,15.214"
+            |])
+            writeOsmPbf pbf [| osmNode 1L 49.816 13.564 [ "railway", "station"; "name", "Vchynice" ] |]
+            CzPttBundle.convert CzPttBundle.MemoryBacked catalog { operationalPointMode = CzPttModel.Sidecar } input output (Some sr70) (Some pbf) (fun _ _ -> ())
+            |> ignore
+            let point =
+                JrUtil.Serving.PackageReader.readTextRows
+                    (Path.Combine(output, "operational_points.parquet"))
+                    [| "primary_code"; "latitude"; "longitude"; "coordinate_source" |]
+                |> Seq.find (fun row -> row.[0] = "57423")
+            CollectionAssert.AreEqual([| "57423"; "50.5"; "14.038"; "sz_sr70" |], point)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
     member _.``Authoritative SR70 survives agreeing and closer disagreeing OSM PLC``() =
         let value =
             message [

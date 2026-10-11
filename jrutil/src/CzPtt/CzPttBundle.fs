@@ -430,8 +430,17 @@ let convert storagePolicy catalog options inputPath outputDirectory
                         -evidence, countryHint, distance, candidate.objectId)
                 Some (asSelected methodName ranked.[0])
             | _ -> None)
+    let resolutionOrder =
+        journeys
+        |> Seq.collect id
+        |> Seq.map (fun call -> call.countryCode, call.primaryCode)
+        |> Seq.distinct
+        |> Seq.toArray
+    // SR70 is authoritative for every point on a path, passenger stop or not;
+    // OSM only fills points SR70 has no coordinate for.
     let authoritativeCoordinates: Map<string * string, SelectedCoordinate> =
-        usedPointIdentities
+        Seq.append usedPointIdentities resolutionOrder
+        |> Seq.distinct
         |> Seq.choose (fun identity ->
             let country, code = identity
             match Map.tryFind identity sr70.coordinates with
@@ -458,12 +467,6 @@ let convert storagePolicy catalog options inputPath outputDirectory
                     })
             | None -> None)
         |> Map
-    let resolutionOrder =
-        journeys
-        |> Seq.collect id
-        |> Seq.map (fun call -> call.countryCode, call.primaryCode)
-        |> Seq.distinct
-        |> Seq.toArray
     progress "resolve-coordinates" "started"
     let mutable selectedCoordinates:
             Map<string * string, SelectedCoordinate> = authoritativeCoordinates
