@@ -158,7 +158,9 @@ let modeClass (routeType: string) =
     | true, value when value = 0 || (value >= 900 && value <= 906) -> "tram"
     | true, value when value = 1 || (value >= 400 && value <= 405) -> "metro"
     | true, value when value = 2 || (value >= 100 && value <= 117) -> "heavy-rail"
-    | true, value when value = 3 || (value >= 700 && value <= 716) -> "bus"
+    // JDF long-distance lines (Linky type D) are coach (200-209); PID publishes the
+    // same line as plain bus (3).
+    | true, value when value = 3 || (value >= 200 && value <= 209) || (value >= 700 && value <= 716) -> "bus"
     | true, value when value = 4 || (value >= 1000 && value <= 1021) -> "ferry"
     | true, value when value = 11 || value = 800 -> "trolleybus"
     | true, value when value = 12 || (value >= 1200 && value <= 1207) -> "other-guided"

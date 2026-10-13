@@ -54,6 +54,13 @@ module PackageSemanticRelations =
                 assignmentRow { AssignmentWriter.empty with
                                     id = Identity.feedId feed "trip-feature" [ "trip", row.[0]; "code", row.[1]; "kind", row.[2] ]
                                     scope = "trip"; kind = row.[2]; trip = row.[0]; code = row.[1]; sourceObject = row.[3] })
+        // Route-level facts, e.g. the integrated systems (JDF LinExt) a line belongs to.
+        let routeFeatures =
+            read "source_route_feature_metadata" [| "gtfs_route_id"; "source_code"; "feature_kind"; "source_object_id" |]
+            |> Seq.map (fun row ->
+                assignmentRow { AssignmentWriter.empty with
+                                    id = Identity.feedId feed "route-feature" [ "route", row.[0]; "code", row.[1]; "kind", row.[2] ]
+                                    scope = "route"; kind = row.[2]; route = row.[0]; code = row.[1]; sourceObject = row.[3] })
         let locationFeatures =
             read "source_location_feature_metadata" [| "gtfs_stop_id"; "source_code"; "feature_kind"; "source_object_id" |]
             |> Seq.map (fun row ->
@@ -110,7 +117,7 @@ module PackageSemanticRelations =
                     "source_object_id", box (Identity.compositeKey [ row.[0]; row.[1]; row.[2]; row.[3]; row.[4] ]) ])
         Map [
             "service_note", notes
-            "assignment", Seq.concat [ noteLinks; features; locationFeatures ]
+            "assignment", Seq.concat [ noteLinks; routeFeatures; features; locationFeatures ]
             "connection_claim", transfers
             "travel_restriction", restrictions
         ]

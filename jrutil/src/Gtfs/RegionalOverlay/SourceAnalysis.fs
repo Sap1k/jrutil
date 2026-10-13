@@ -73,6 +73,112 @@ type MatchingIndexes = {
     candidateEquivalenceKey: CandidateMatch -> string
 }
 
+/// GTFS dates a trip by its service day, so PID runs Monday night's 00:30 tram as
+/// Monday 24:30. JDF dates it by departure: Tuesday 00:30. Fold source trips that
+/// depart after midnight onto the next day so they meet their CIS twin: the trip
+/// moves to a next-day copy of its service and its times lose 24 hours.
+let private foldAfterMidnightTrips
+        (window: DateWindow) (sourceDates: Dictionary<string, DateSet.Dates>)
+        (sourceTripRows: CsvRow array) (sourceCalls: Dictionary<string, CallValue array>) =
+    let nextDayServices = Dictionary<string, string>(StringComparer.Ordinal)
+    let nextDayService serviceId =
+        match nextDayServices.TryGetValue(serviceId) with
+        | true, shifted -> shifted
+        | _ ->
+            let shifted = serviceId + "@next-day"
+            let dates = emptyDates window
+            match sourceDates.TryGetValue(serviceId) with
+            | true, active ->
+                window.dates |> Array.iteri (fun index date ->
+                    if active.[index] then
+                        match window.index.TryGetValue(date.PlusDays(1)) with
+                        | true, next -> dates.[next] <- true
+                        | _ -> ())
+            | _ -> ()
+            sourceDates.[shifted] <- DateSet.Dates.Of dates
+            nextDayServices.[serviceId] <- shifted
+            shifted
+    let previousDayTime (value: string) =
+        let seconds = timeSeconds value
+        if seconds < 0 then value
+        else
+            let seconds = seconds - 86400
+            $"{seconds / 3600:D2}:{seconds / 60 % 60:D2}:{seconds % 60:D2}"
+    let mutable folded = 0
+    for sourceTripRow in sourceTripRows do
+        match sourceCalls.TryGetValue(rowValue sourceTripRow "trip_id") with
+        | true, calls when calls.Length > 0 && timeSeconds calls.[0].departure >= 86400 ->
+            sourceTripRow.["service_id"] <- nextDayService (rowValue sourceTripRow "service_id")
+            for index in 0 .. calls.Length - 1 do
+                let call = calls.[index]
+                calls.[index] <- { call with arrival = previousDayTime call.arrival; departure = previousDayTime call.departure }
+            folded <- folded + 1
+        | _ -> ()
+    folded
+
+/// A line of a source's integrated system runs, inside the source's feed window,
+/// only what the source runs: tram 16 (2026-10) is cancelled for trackworks, CIS
+/// still publishes it and PID simply leaves it out. Extends such lines' trip-set
+/// authority over the whole window, including lines the source runs none of.
+let private extendIdsAuthority (prepared: InputPreparation.Result) (authorityDatesByCis: Dictionary<string, bool array>) =
+    let scopes = Policy.readIdsAuthorityScopes prepared.binding.payloadPath
+    if scopes.Length > 0 then
+        let activeDatesByCis = Dictionary<string, bool array>(StringComparer.Ordinal)
+        for trip in prepared.baseTripValues do
+            match prepared.baseCisByRoute.TryGetValue(trip.routeId), prepared.baseDates.TryGetValue(trip.serviceId) with
+            | (true, cisLineId), (true, active) when anyDate active ->
+                let dates =
+                    match activeDatesByCis.TryGetValue(cisLineId) with
+                    | true, values -> values
+                    | _ ->
+                        let values = emptyDates prepared.window
+                        activeDatesByCis.[cisLineId] <- values
+                        values
+                for dateIndex in 0 .. active.Length - 1 do
+                    if active.[dateIndex] then dates.[dateIndex] <- true
+            | _ -> ()
+        for scope in scopes do
+            let inWindow dateIndex =
+                let date = prepared.window.dates.[dateIndex]
+                date >= scope.windowStart && date <= scope.windowEnd
+            let inScope routeId systems =
+                systems |> Array.contains scope.idsSystemId
+                && match prepared.baseRoutes.TryGetValue(routeId) with
+                   | true, route -> scope.modes |> Array.contains (modeClass (rowValue route "route_type"))
+                   | _ -> false
+            let runsInWindow cisLineId =
+                match activeDatesByCis.TryGetValue(cisLineId) with
+                | true, active -> active |> Array.indexed |> Array.exists (fun (index, value) -> value && inWindow index)
+                | _ -> false
+            let lines =
+                prepared.baseIdsSystemsByRoute
+                |> Seq.filter (fun pair -> inScope pair.Key pair.Value)
+                |> Seq.choose (fun pair -> match prepared.baseCisByRoute.TryGetValue(pair.Key) with | true, cis -> Some cis | _ -> None)
+                |> Seq.distinct
+                |> Seq.filter (fun cis -> not (scope.excludedCisLines |> Array.contains cis) && runsInWindow cis)
+                |> Seq.sort
+                |> Seq.toArray
+            let silenced = lines |> Array.filter (authorityDatesByCis.ContainsKey >> not)
+            if silenced.Length > scope.maximumSilencedLines then
+                let sample = silenced |> Array.truncate 20 |> String.concat ";"
+                addDiagnostic prepared.diagnostics "trip_set_authority_silence_withheld" scope.sourceId $"{scope.sourceId} runs none of {silenced.Length} {scope.idsSystemId} lines (maximum {scope.maximumSilencedLines}); national trips kept: {sample}"
+                Log.Warning("Regional overlay: {Source} runs none of {Count} {System} lines; silence withheld", scope.sourceId, silenced.Length, scope.idsSystemId)
+            else
+                for cisLineId in lines do
+                    let dates =
+                        match authorityDatesByCis.TryGetValue(cisLineId) with
+                        | true, values -> values
+                        | _ ->
+                            addDiagnostic prepared.diagnostics "trip_set_authority_silent" cisLineId $"{scope.sourceId} runs no trips of this {scope.idsSystemId} line between {dateString scope.windowStart} and {dateString scope.windowEnd}; national trips withdrawn"
+                            let values = emptyDates prepared.window
+                            authorityDatesByCis.[cisLineId] <- values
+                            values
+                    for dateIndex in 0 .. dates.Length - 1 do
+                        if inWindow dateIndex then dates.[dateIndex] <- true
+                Log.Information(
+                    "Regional overlay IDS authority: source={Source}; system={System}; lines={Lines}; silenced={Silenced}",
+                    scope.sourceId, scope.idsSystemId, lines.Length, silenced.Length)
+
 /// Collect source-qualified stop, route and authority evidence without writing output.
 let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input) : Result * MatchingIndexes =
     let sourceAgencyRows = requireTable prepared.binding.payloadPath "agency.txt"
@@ -163,6 +269,9 @@ let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input
         sourceTripsById = sourceTripsById
         sourceTripsByRoute = sourceTripsByRoute
     }
+
+    let foldedTrips = foldAfterMidnightTrips prepared.window sourceDates sourceTripRows routeMatching.sourceCalls
+    Log.Information("Regional overlay after-midnight source trips folded onto the next day: trips={Trips}", foldedTrips)
 
     let refreshSourceCallPlaces () =
         for calls in routeMatching.sourceCalls.Values do
@@ -451,6 +560,7 @@ let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input
                 values
         for dateIndex in 0 .. activeDates.Length - 1 do
             if activeDates.[dateIndex] then dates.[dateIndex] <- true
+    extendIdsAuthority prepared authorityDatesByCis
     for struct (cisLineId, dateIndex) in blockedAuthorityDates do
         match authorityDatesByCis.TryGetValue(cisLineId) with
         | true, dates -> dates.[dateIndex] <- false

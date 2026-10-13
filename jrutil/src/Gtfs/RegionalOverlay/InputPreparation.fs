@@ -62,6 +62,7 @@ type Result = {
     baseCisByRoute: IDictionary<string, string>
     baseRoutesByCis: IDictionary<string, string array>
     baseDetourRoutes: HashSet<string>
+    baseIdsSystemsByRoute: IDictionary<string, string array>
     basePlaceByStop: IDictionary<string, string>
     baseStopGroupById: IDictionary<string, StopGroup>
     approximateStopName: string -> bool
@@ -189,6 +190,7 @@ let prepare ({
         baseCisByRoute = nationalBase.baseCisByRoute
         baseRoutesByCis = nationalBase.baseRoutesByCis
         baseDetourRoutes = nationalBase.baseDetourRoutes
+        baseIdsSystemsByRoute = nationalBase.baseIdsSystemsByRoute
         basePlaceByStop = nationalBase.basePlaceByStop
         baseStopGroupById = nationalBase.baseStopGroupById
         approximateStopName = approximateStopName

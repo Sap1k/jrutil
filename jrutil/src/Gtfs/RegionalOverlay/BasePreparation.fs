@@ -25,6 +25,8 @@ type Result = {
     baseRoutesByCis: IDictionary<string, string array>
     /// Base routes carrying detour (výluka) timetables
     baseDetourRoutes: HashSet<string>
+    /// JDF LinExt integrated-system codes per base route.
+    baseIdsSystemsByRoute: IDictionary<string, string array>
     basePlaceByStop: IDictionary<string, string>
     baseStopGroupById: IDictionary<string, StopGroup>
     baseStopGroups: StopGroup array
@@ -83,6 +85,13 @@ let prepare (window: DateWindow) baseGtfs baseExtensions : Result =
         |> Array.groupBy fst
         |> Array.map (fun (cis, values) -> cis, values |> Array.map snd)
         |> dict
+    let baseIdsSystemsByRoute =
+        baseCzRouteRows
+        |> Array.choose (fun row ->
+            match (rowValue row "ids_system_ids").Split(';', System.StringSplitOptions.RemoveEmptyEntries) with
+            | [||] -> None
+            | systems -> Some (rowValue row "route_id", systems))
+        |> dict
     let baseDetourRoutes =
         baseCzRouteRows
         |> Seq.filter (fun row -> rowValue row "timetable_kind" = "detour")
@@ -105,6 +114,7 @@ let prepare (window: DateWindow) baseGtfs baseExtensions : Result =
         baseCisByRoute = baseCisByRoute
         baseRoutesByCis = baseRoutesByCis
         baseDetourRoutes = baseDetourRoutes
+        baseIdsSystemsByRoute = baseIdsSystemsByRoute
         basePlaceByStop = basePlaceByStop
         baseStopGroupById = baseStopGroupById
         baseStopGroups = baseStopGroups

@@ -14,6 +14,7 @@ open JrUtil.GtfsModel
 open JrUtil.RegionalOverlay.Types
 open JrUtil.RegionalOverlay.Model
 open JrUtil.RegionalOverlay.Values
+open JrUtil.RegionalOverlay.GtfsFiles
 open JrUtil.RegionalOverlay.StopGroups
 open JrUtil.RegionalOverlay.Support
 
@@ -82,6 +83,11 @@ let loadPolicy path =
             invalidArg "--policy" $"Unsupported source.trip_set_authority source-native mode: {mode}"
         if not (policy.source.tripSetAuthority.modes |> Array.contains mode) then
             invalidArg "--policy" $"Source-native mode must also be authoritative: {mode}"
+    if not (isNull policy.source.tripSetAuthority.idsSystemIds) && policy.source.tripSetAuthority.idsSystemIds.Length > 0 then
+        for system in policy.source.tripSetAuthority.idsSystemIds do
+            requiredText "source.trip_set_authority.ids_system_ids" system |> ignore
+        if policy.source.tripSetAuthority.maximumSilencedLines < 1 then
+            invalidArg "--policy" "source.trip_set_authority.maximum_silenced_lines must be positive with ids_system_ids"
     let tripTiers =
         set [
             "full_signature"; "pattern_endpoints"; "pattern_first"; "pattern_nearest"
@@ -101,3 +107,51 @@ let loadPolicy path =
         if not (capabilityNames.Contains(name)) then
             invalidArg "--policy" $"Unknown or base-only overlay capability: {name}"
     policy
+
+/// Carries each source's scopes through the combined multi-source payload.
+let idsAuthorityTable = "overlay_ids_authority.txt"
+let idsAuthorityColumns = [| "source_id"; "ids_system_id"; "modes"; "excluded_cis_lines"; "window_start"; "window_end"; "maximum_silenced_lines" |]
+
+/// The dates a source publishes: feed_info's window, else its calendar's extent.
+let sourceFeedWindow payloadPath =
+    match csvRows payloadPath "feed_info.txt" |> Seq.tryHead with
+    | Some row when rowValue row "feed_start_date" <> "" && rowValue row "feed_end_date" <> "" ->
+        Some (parseDate (rowValue row "feed_start_date"), parseDate (rowValue row "feed_end_date"))
+    | _ ->
+        let dates =
+            seq {
+                for row in csvRows payloadPath "calendar.txt" do
+                    yield parseDate (rowValue row "start_date")
+                    yield parseDate (rowValue row "end_date")
+                for row in csvRows payloadPath "calendar_dates.txt" do
+                    if rowValue row "exception_type" = "1" then yield parseDate (rowValue row "date")
+            }
+            |> Seq.toArray
+        if dates.Length = 0 then None else Some (Array.min dates, Array.max dates)
+
+let idsAuthorityScopes (source: SourcePolicy) payloadPath =
+    let authority = source.tripSetAuthority
+    if isNull authority.idsSystemIds || authority.idsSystemIds.Length = 0 then [||]
+    else
+        match sourceFeedWindow payloadPath with
+        | None -> [||]
+        | Some (start, finish) ->
+            authority.idsSystemIds
+            |> Array.map (fun system -> {
+                sourceId = source.sourceId; idsSystemId = system; modes = authority.modes
+                excludedCisLines = if isNull authority.excludedCisLines then [||] else authority.excludedCisLines
+                windowStart = start; windowEnd = finish; maximumSilencedLines = authority.maximumSilencedLines })
+
+let idsAuthorityRow (scope: IdsAuthorityScope) =
+    [| scope.sourceId; scope.idsSystemId; String.concat ";" scope.modes; String.concat ";" scope.excludedCisLines
+       dateString scope.windowStart; dateString scope.windowEnd; string scope.maximumSilencedLines |]
+
+let readIdsAuthorityScopes payloadPath =
+    csvRows payloadPath idsAuthorityTable
+    |> Seq.map (fun row -> {
+        sourceId = rowValue row "source_id"; idsSystemId = rowValue row "ids_system_id"
+        modes = (rowValue row "modes").Split(';', StringSplitOptions.RemoveEmptyEntries)
+        excludedCisLines = (rowValue row "excluded_cis_lines").Split(';', StringSplitOptions.RemoveEmptyEntries)
+        windowStart = parseDate (rowValue row "window_start"); windowEnd = parseDate (rowValue row "window_end")
+        maximumSilencedLines = int (rowValue row "maximum_silenced_lines") })
+    |> Seq.toArray

@@ -268,6 +268,11 @@ let prepare scratchRoot combinedPolicyPath overridesRoot baseBundle (bindings: S
     writeCombinedTables normalized preparedBindings
     let hasRouteJoin = writeRouteJoin normalized preparedBindings
     writeIdsJmkOperational normalized preparedBindings
+    // Feed windows are per source, so the scopes travel as a table.
+    writeValues (Path.Combine(normalized, idsAuthorityTable)) idsAuthorityColumns
+        (preparedBindings
+         |> Seq.collect (fun (_, binding, _, sourcePolicy) -> idsAuthorityScopes sourcePolicy.source binding.payloadPath)
+         |> Seq.map idsAuthorityRow)
 
     let embedded = Path.Combine(normalized, "_overlay")
     let embeddedDescriptors = Path.Combine(embedded, "descriptors")
@@ -338,6 +343,10 @@ let prepare scratchRoot combinedPolicyPath overridesRoot baseBundle (bindings: S
                     template.source.tripSetAuthority with
                         modes = sourcePolicies |> Array.collect (fun policy -> policy.tripSetAuthority.modes) |> Array.distinct |> Array.sort
                         sourceNativeModes = sourcePolicies |> Array.collect (fun policy -> policy.tripSetAuthority.sourceNativeModes) |> Array.distinct |> Array.sort
+                        // Carried per source in overlay_ids_authority.txt.
+                        idsSystemIds = [||]
+                        excludedCisLines = [||]
+                        maximumSilencedLines = 0
                 }
                 routeMatchTiers = canonicalRouteTiers |> Array.filter configuredRouteTiers.Contains
                 tripMatchTiers = canonicalTripTiers |> Array.filter configuredTripTiers.Contains

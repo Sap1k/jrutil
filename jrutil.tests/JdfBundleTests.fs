@@ -284,8 +284,20 @@ type JdfBundleTests() =
             assertEqual 1 ((relation "connection_claim" [|"connection_id"; "origin_trip_id"; "wait_minutes"|]).Length)
             assertEqual 5 ((relation "travel_restriction" [|"restriction_id"; "scope"; "group_code"|]).Length)
 
+            // LinExt files 586001 under PID (30001); 582486 has no LinExt row.
+            let integrations =
+                relation "assignment" [|"scope"; "kind"; "route_id"; "source_code"|]
+                |> Array.filter (fun row -> row.[0] = "route" && row.[1] = "integrated_transport")
+                |> Array.map (fun row -> row.[2], row.[3])
+            assertEqual true (integrations |> Array.contains ("jdf:route:586001", "30001"))
+            assertEqual false (integrations |> Array.exists (fun (route, _) -> route.StartsWith("jdf:route:582486", StringComparison.Ordinal)))
+
             let scratch = Path.Combine(root, "compiler-view")
-            let gtfsPath, _ = JrUtil.Serving.PackageReader.prepareCompilerView first scratch
+            let gtfsPath, extensionsPath = JrUtil.Serving.PackageReader.prepareCompilerView first scratch
+            assertEqual true
+                (File.ReadAllLines(Path.Combine(extensionsPath, "cz_routes.txt"))
+                 |> Array.map (fun line -> line.Replace("\"", ""))
+                 |> Array.exists (fun line -> line.StartsWith("jdf:route:586001,", StringComparison.Ordinal) && line.EndsWith(",30001", StringComparison.Ordinal)))
             let parsed = Gtfs.gtfsParseFolder () gtfsPath
             parsed.trips |> Seq.iter (fun trip ->
                 assertEqual true (trip.serviceId.StartsWith("jdf:service:")))

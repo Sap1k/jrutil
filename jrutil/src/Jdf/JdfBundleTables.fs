@@ -409,6 +409,20 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
                             scope = "trip"; kind = kind; trip = gtfsTripId; code = code
                             sourceObject = $"{gtfsTripId}:attribute:{Uri.EscapeDataString(code)}" })))
 
+    // LinExt: the integrated systems a line belongs to, by their CIS code (30001 = PID).
+    let routeIntegrations () : seq<JrUtil.Serving.AssignmentWriter.Row> =
+        batch.routeIntegrations
+        |> Seq.map (fun integration ->
+            JdfGtfsRules.gtfsRouteId batch integration.routeId integration.routeDistinction, string integration.transportSystemId)
+        |> Seq.filter (fun (route, _) -> retainedRouteIds.Contains(route))
+        |> Seq.distinct
+        |> Seq.sort
+        |> Seq.map (fun (route, system) ->
+            { JrUtil.Serving.AssignmentWriter.empty with
+                id = JrUtil.Serving.Identity.feedId "jdf" "route-integration" [ "route", route; "system", system ]
+                scope = "route"; kind = "integrated_transport"; route = route; code = system
+                sourceObject = $"{route}:integration:{system}" })
+
     let routeStopZones () =
         batch.routeStops
         |> Seq.collect (fun routeStop ->
@@ -773,7 +787,7 @@ let internal getTableProducers (sourceTransportModes: Map<string * int, JdfModel
             stringField "member_observation_ids" false; stringField "member_legacy_candidate_ids" false
             stringField "representative_candidate_id" false; doubleField "latitude" false
             doubleField "longitude" false; stringField "sources" false |] physicalHypothesisRows
-    |], assignmentTotal, derivedPostAssignments, notices, tripFeatures
+    |], assignmentTotal, derivedPostAssignments, notices, (fun () -> Seq.append (routeIntegrations ()) (tripFeatures ()))
 
 let internal writeParquet descriptor path table =
     task {

@@ -259,7 +259,8 @@ module PackageWriter =
                 phase "prepare-serving-semantics"
                 let semantics =
                     if [ "source_notice_metadata"; "source_route_stop_zone_metadata"; "source_transfer_metadata"
-                         "source_location_feature_metadata"; "source_travel_restriction_metadata"; "source_trip_feature_metadata" ]
+                         "source_location_feature_metadata"; "source_travel_restriction_metadata"; "source_trip_feature_metadata"
+                         "source_route_feature_metadata" ]
                        |> List.exists (CompilerOutput.has input.sidecars) then
                         semanticRelations native input
                     else Map.empty

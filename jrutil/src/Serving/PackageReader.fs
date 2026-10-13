@@ -158,9 +158,17 @@ module PackageReader =
             match timetableKinds.TryGetValue(route) with
             | true, kind -> kind
             | _ -> ""
+        // Integrated systems per route (JDF LinExt), for overlay trip-set authority.
+        let idsSystems =
+            readTextRows (serving "assignment") [| "scope"; "kind"; "route_id"; "source_code" |]
+            |> Seq.filter (fun row -> row.[0] = "route" && row.[1] = "integrated_transport" && row.[2] <> "" && row.[3] <> "")
+            |> Seq.groupBy (fun row -> row.[2])
+            |> Seq.map (fun (route, rows) -> route, rows |> Seq.map (fun row -> row.[3]) |> Seq.distinct |> Seq.sort |> String.concat ";")
+            |> dict
+        let idsSystemsOf route = match idsSystems.TryGetValue(route) with | true, value -> value | _ -> ""
         writeCsv (Path.Combine(extensions, "cz_routes.txt"))
-            [| "route_id"; "cis_line_id"; "public_line_number"; "source_provenance"; "timetable_kind" |]
-            (routeKeys |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; "serving"; timetableKind row.[0] |]))
+            [| "route_id"; "cis_line_id"; "public_line_number"; "source_provenance"; "timetable_kind"; "ids_system_ids" |]
+            (routeKeys |> Seq.map (fun row -> [| row.[0]; row.[1]; ""; "serving"; timetableKind row.[0]; idsSystemsOf row.[0] |]))
 
         let locations = readTextRows (serving "location") [| "location_id"; "parent_location_id" |]
         writeCsv (Path.Combine(extensions, "cz_stops.txt"))

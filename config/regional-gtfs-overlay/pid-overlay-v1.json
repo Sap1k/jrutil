@@ -53,6 +53,9 @@
     "trip_set_authority": {
       "modes": ["bus", "tram", "metro", "trolleybus", "ferry"],
       "source_native_modes": ["bus", "tram", "metro", "trolleybus", "ferry"],
+      "ids_system_ids": ["30001"],
+      "excluded_cis_lines": ["199041", "199042"],
+      "maximum_silenced_lines": 20,
       "route_match_tier": "companion_assertion"
     },
     "route_match_tiers": [

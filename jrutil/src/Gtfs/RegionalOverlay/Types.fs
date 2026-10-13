@@ -57,6 +57,28 @@ type SourceRevisionPolicy = {
 type TripSetAuthorityPolicy = {
     modes: string array
     sourceNativeModes: string array
+    /// Integrated systems (JDF LinExt codes, e.g. 30001 for PID) whose CIS lines
+    /// the source runs. Inside the source's feed window such a line in an
+    /// authoritative mode runs only what the source runs, even nothing.
+    idsSystemIds: string array
+    /// CIS lines LinExt files under the system that the source does not publish,
+    /// e.g. PID's historic trams 41 and 42 on their own tariff.
+    excludedCisLines: string array
+    /// The rule is withheld when it would silence more lines than this, so a
+    /// truncated source cannot wipe out its region.
+    maximumSilencedLines: int
+}
+
+/// A source's claim over the CIS lines of one integrated system: inside its feed
+/// window, such a line in one of its modes runs only what the source runs.
+type IdsAuthorityScope = {
+    sourceId: string
+    idsSystemId: string
+    modes: string array
+    excludedCisLines: string array
+    windowStart: NodaTime.LocalDate
+    windowEnd: NodaTime.LocalDate
+    maximumSilencedLines: int
 }
 
 [<CLIMutable>]

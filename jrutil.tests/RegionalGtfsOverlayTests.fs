@@ -79,6 +79,23 @@ type RegionalGtfsOverlayTests() =
                     primaryKey = [| "gtfs_route_id" |]; foreignKeys = [||] }
                 use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_route_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
                 writer.Append([| JrUtil.Serving.ColumnWriter.Text(rows |> Array.map fst); JrUtil.Serving.ColumnWriter.Text(rows |> Array.map snd) |])
+            // JDF LinExt files a line under integrated systems; they become route features.
+            if File.Exists(czRoutes) && (File.ReadLines(czRoutes) |> Seq.head).Contains("ids_system_ids") then
+                let lines = File.ReadAllLines(czRoutes) |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                let header = lines.[0].Split(',')
+                let route, systems = Array.IndexOf(header, "route_id"), Array.IndexOf(header, "ids_system_ids")
+                let rows =
+                    lines.[1..]
+                    |> Array.collect (fun line ->
+                        let fields = line.Split(',')
+                        fields.[systems].Split(';', StringSplitOptions.RemoveEmptyEntries)
+                        |> Array.map (fun system -> [| fields.[route]; system; "integrated_transport"; fields.[route] + ":integration:" + system |]))
+                let relation: JrUtil.Serving.Schema.Relation = {
+                    name = "source_route_feature_metadata"
+                    fields = [| for name in [ "gtfs_route_id"; "source_code"; "feature_kind"; "source_object_id" ] -> { name = name; dataType = JrUtil.Serving.Schema.Text; nullable = false; enumeration = null } |]
+                    primaryKey = [| "gtfs_route_id"; "source_code" |]; foreignKeys = [||] }
+                use writer = new JrUtil.Serving.ColumnWriter.Writer(Path.Combine(stage, "source_route_feature_metadata.parquet"), relation, 1024, Threading.CancellationToken.None)
+                writer.Append(Array.init 4 (fun index -> JrUtil.Serving.ColumnWriter.Text(rows |> Array.map (fun row -> row.[index]))))
             // JDF records stop name parts, okres and coordinate precision as stop metadata.
             let stopMetadata = Path.Combine(basePath, "stop-metadata.csv")
             if File.Exists(stopMetadata) then
@@ -672,6 +689,119 @@ type RegionalGtfsOverlayTests() =
             Assert.IsTrue(routeId.StartsWith("overlay:pid-gtfs:route:"))
             let routes = (readGtfs output "routes.txt").Split('\n')
             Assert.IsTrue(routes |> Array.exists (fun row -> row.Contains(routeId) && row.Contains("\"11\"")), "Every mode-split trip route must survive pruning")
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``An after-midnight source trip meets its next-day CIS twin``() =
+        // Tram 90 (2026-10-12): PID runs Monday 24:03, CIS dates the same tram Tuesday 00:03.
+        // Matched on Monday it took the 09:00 tram's place and both vanished under trip-set
+        // authority.
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-midnight-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            let gtfs = Path.Combine(basePath, "gtfs-intermediate")
+            let append name (text: string) = File.ReadAllText(name).TrimEnd() + "\n" + text + "\n" |> write name
+            append (Path.Combine(gtfs, "trips.txt")) "jdf:route:r2,jdf:service:tn,jdf:trip:bt2night,National night,,0,,,1,2"
+            append (Path.Combine(gtfs, "calendar_dates.txt")) "jdf:service:tn,20251216,1"
+            append (Path.Combine(gtfs, "stop_times.txt")) "jdf:trip:bt2night,00:03:00,00:03:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt2night,00:13:00,00:13:00,jdf:stop:bp2,2,,0,0,,1"
+            append (Path.Combine(basePath, "extensions", "cz_trips.txt")) "jdf:trip:bt2night,,7,,jdf:trip:bt2night,jdf"
+            let sourceDir = Path.Combine(root, "source")
+            append (Path.Combine(sourceDir, "trips.txt")) "srtram,jdf:service:td,st2night_251201,PID night,PID night,1,sh2,sub2"
+            append (Path.Combine(sourceDir, "stop_times.txt")) "st2night_251201,24:03:00,24:03:00,sa,1,0,0,0\nst2night_251201,24:13:00,24:13:00,sb,2,0,0,1000"
+            File.Delete(sourceZip)
+            ZipFile.CreateFromDirectory(sourceDir, sourceZip)
+            write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
+            File.ReadAllText(policy)
+                .Replace("\"modes\": []", "\"modes\": [\"tram\"]")
+                .Replace("\"source_native_modes\": []", "\"source_native_modes\": [\"tram\"]")
+                .Replace("\"enabled\": true", "\"enabled\": false") |> write policy
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            let output = Path.Combine(root, "output")
+            execute (Some (NodaTime.LocalDate(2025, 12, 15))) policy 2026 binding basePath output |> ignore
+            let tripMappings = File.ReadAllLines(diagnosticPath output "traces" "source_to_output_trips.csv")
+            Assert.IsTrue(
+                tripMappings |> Array.exists (fun row -> row.Contains("\"st2night_251201\"") && row.Contains("jdf:trip:bt2night")),
+                "The 24:03 trip binds to the next-day 00:03 CIS trip")
+            Assert.IsTrue(
+                tripMappings |> Array.exists (fun row -> row.Contains("\"st2_251201\"") && row.Contains("jdf:trip:bt2\"")),
+                "The 09:00 trip keeps its own CIS twin")
+            Assert.IsFalse((readGtfs output "stop_times.txt").Contains("24:03:00"))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<DataTestMethod>]
+    [<DataRow(20)>]
+    [<DataRow(1)>]
+    member _.``A line of the source's integrated system that the source does not run is not running``(maximumSilenced: int) =
+        // Tram 16 (2026-10): cancelled for trackworks, still in CIS, left out of PID.
+        // 199041 is filed under PID too but runs on its own tariff, outside PID's GTFS.
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-ids-authority-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            let gtfs = Path.Combine(basePath, "gtfs-intermediate")
+            let append name (text: string) = File.ReadAllText(name).TrimEnd() + "\n" + text + "\n" |> write name
+            append (Path.Combine(gtfs, "routes.txt")) "jdf:route:r16,jdf:agency:a,16,National tram 16,,900,,222222,ffffff,\njdf:route:r41,jdf:agency:a,41,Historic tram,,900,,222222,ffffff,"
+            append (Path.Combine(gtfs, "trips.txt")) "jdf:route:r16,jdf:service:two,jdf:trip:bt16,Sixteen,,0,,,1,2\njdf:route:r41,jdf:service:two,jdf:trip:bt41,Historic,,0,,,1,2"
+            append (Path.Combine(gtfs, "calendar_dates.txt")) "jdf:service:two,20251215,1\njdf:service:two,20251216,1"
+            append (Path.Combine(gtfs, "stop_times.txt")) "jdf:trip:bt16,12:00:00,12:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt16,12:10:00,12:10:00,jdf:stop:bp2,2,,0,0,,1\njdf:trip:bt41,13:00:00,13:00:00,jdf:stop:bp1,1,,0,0,,1\njdf:trip:bt41,13:10:00,13:10:00,jdf:stop:bp2,2,,0,0,,1"
+            append (Path.Combine(basePath, "extensions", "cz_trips.txt")) "jdf:trip:bt16,199016,1,,jdf:trip:bt16,jdf\njdf:trip:bt41,199041,1,,jdf:trip:bt41,jdf"
+            write (Path.Combine(basePath, "extensions", "cz_routes.txt"))
+                "route_id,cis_line_id,public_line_number,source_provenance,ids_system_ids\njdf:route:r1,000100,100,jdf,\njdf:route:r1v,000100,100,jdf,\njdf:route:r2,199010,10,jdf,30001\njdf:route:r3,000101,101,jdf,\njdf:route:r4,000102,102,jdf,\njdf:route:r16,199016,16,jdf,30001\njdf:route:r41,199041,41,jdf,30001\n"
+            let json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(policy))
+            let authority = json.["source"].["trip_set_authority"]
+            authority.["modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"tram\"]")
+            authority.["source_native_modes"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"tram\"]")
+            authority.["ids_system_ids"] <- System.Text.Json.Nodes.JsonNode.Parse("[\"30001\"]")
+            authority.["excluded_cis_lines"] <- System.Text.Json.Nodes.JsonNode.Parse(if maximumSilenced = 1 then "[]" else "[\"199041\"]")
+            authority.["maximum_silenced_lines"] <- System.Text.Json.Nodes.JsonValue.Create(maximumSilenced)
+            write policy (json.ToJsonString())
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            let output = Path.Combine(root, "output")
+            execute (Some (NodaTime.LocalDate(2025, 12, 15))) policy 2026 binding basePath output |> ignore
+            // The source publishes 2025-12-15 only, so 2025-12-16 stays national.
+            let datesOf tripId =
+                let trips = (readGtfs output "trips.txt").Split('\n')
+                let service = (trips |> Array.find (fun row -> row.Contains("\"" + tripId + "\""))).Split(',').[1].Trim('"')
+                (readGtfs output "calendar_dates.txt").Split('\n')
+                |> Array.filter (fun row -> row.StartsWith("\"" + service + "\",", StringComparison.Ordinal) || row.StartsWith(service + ",", StringComparison.Ordinal))
+                |> Array.map (fun row -> row.Split(',').[1].Trim('"'))
+                |> Array.sort
+            let diagnostics = File.ReadAllText(diagnosticPath output "events" "diagnostics.csv")
+            if maximumSilenced = 1 then
+                Assert.IsTrue(diagnostics.Contains("trip_set_authority_silence_withheld"), "Two silent lines exceed a maximum of one")
+                CollectionAssert.AreEqual([| "20251215"; "20251216" |], datesOf "jdf:trip:bt16")
+                CollectionAssert.AreEqual([| "20251215"; "20251216" |], datesOf "jdf:trip:bt41")
+            else
+                Assert.IsTrue(diagnostics.Contains("trip_set_authority_silent"))
+                CollectionAssert.AreEqual([| "20251216" |], datesOf "jdf:trip:bt16", "Tram 16 is withdrawn inside the source window only")
+                CollectionAssert.AreEqual([| "20251215"; "20251216" |], datesOf "jdf:trip:bt41", "An excluded line keeps its national trips")
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
+    [<TestMethod>]
+    member _.``Bus slice of a long-distance CIS line keeps the CIS route``() =
+        // PID L405 is CIS 690405, a JDF type-D line published as coach (202).
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-coach-route-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            let nationalRoutes = Path.Combine(basePath, "gtfs-intermediate", "routes.txt")
+            File.ReadAllText(nationalRoutes).Replace("National tram,,900", "National coach,,202") |> write nationalRoutes
+            let sourceDir = Path.Combine(root, "source")
+            let sourceRoutes = Path.Combine(sourceDir, "routes.txt")
+            File.ReadAllText(sourceRoutes).Replace("PID tram,0", "PID bus,3") |> write sourceRoutes
+            File.Delete(sourceZip)
+            ZipFile.CreateFromDirectory(sourceDir, sourceZip)
+            write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
+            File.ReadAllText(policy)
+                .Replace("\"modes\": []", "\"modes\": [\"bus\"]")
+                .Replace("\"source_native_modes\": []", "\"source_native_modes\": [\"bus\"]") |> write policy
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            let output = Path.Combine(root, "output")
+            execute None policy 2026 binding basePath output |> ignore
+            let trip = (readGtfs output "trips.txt").Split('\n') |> Array.find (fun row -> row.Contains("\"jdf:trip:bt2\""))
+            let routeId = trip.Split(',').[0].Trim('"')
+            Assert.IsTrue(routeId.StartsWith("jdf:route:", StringComparison.Ordinal), $"The PID slice must replace trips on the CIS route, not a derived one: {routeId}")
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
