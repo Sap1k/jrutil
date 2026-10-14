@@ -730,6 +730,38 @@ type RegionalGtfsOverlayTests() =
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
+    [<TestMethod>]
+    member _.``An after-midnight source trip without a CIS twin is added at its next-day time``() =
+        // Tram 17 (2026-10-14): PID's 24:03 trip, added under trip-set authority, kept its
+        // 24:03 times on the next-day service and ran a day late (00:03 two days on).
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-midnight-added-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            let append name (text: string) = File.ReadAllText(name).TrimEnd() + "\n" + text + "\n" |> write name
+            let sourceDir = Path.Combine(root, "source")
+            append (Path.Combine(sourceDir, "trips.txt")) "srtram,jdf:service:td,st2night_251201,PID night,PID night,1,sh2,sub2"
+            append (Path.Combine(sourceDir, "stop_times.txt")) "st2night_251201,24:03:00,24:03:00,sa,1,0,0,0\nst2night_251201,24:13:00,24:13:00,sb,2,0,0,1000"
+            File.Delete(sourceZip)
+            ZipFile.CreateFromDirectory(sourceDir, sourceZip)
+            write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
+            File.ReadAllText(policy)
+                .Replace("\"modes\": []", "\"modes\": [\"tram\"]")
+                .Replace("\"source_native_modes\": []", "\"source_native_modes\": [\"tram\"]")
+                .Replace("\"enabled\": true", "\"enabled\": false") |> write policy
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            let output = Path.Combine(root, "output")
+            execute (Some (NodaTime.LocalDate(2025, 12, 15))) policy 2026 binding basePath output |> ignore
+            let added =
+                File.ReadAllLines(diagnosticPath output "traces" "source_to_output_trips.csv")
+                |> Array.find (fun row -> row.Contains("\"st2night_251201\"") && row.Contains("authoritative_source_trip_set"))
+            let tripId = added.Split(',') |> Array.map (fun field -> field.Trim('"')) |> Array.find (fun field -> field.StartsWith("overlay:pid-gtfs:trip:", StringComparison.Ordinal))
+            let calls = (readGtfs output "stop_times.txt").Split('\n') |> Array.filter (fun row -> row.Contains(tripId))
+            Assert.AreEqual(2, calls.Length)
+            Assert.IsTrue(calls.[0].Contains("00:03:00") && calls.[1].Contains("00:13:00"), String.concat "\n" calls)
+            Assert.IsFalse(calls |> Array.exists (fun row -> row.Contains("24:")))
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
     [<DataTestMethod>]
     [<DataRow(20)>]
     [<DataRow(1)>]

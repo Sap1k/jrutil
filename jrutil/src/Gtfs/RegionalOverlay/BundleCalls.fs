@@ -63,9 +63,17 @@ let write (context: Context) sibling =
     let addedCall sourceTripId (sourceRow: string array) (addition: SourceTripAddition) =
         let outputRow = sourceRow
         setCallField outputRow "trip_id" <| addition.trip.id
+        let sequence = Int32.Parse(getCallField sourceRow "stop_sequence", CultureInfo.InvariantCulture)
+        // Times come from the projected calls, not the raw row: a trip folded onto the next
+        // day (PID 24:30 → 00:30, foldAfterMidnightTrips) carries its next-day service.
+        addition.projection.sourceCalls
+        |> Array.tryFind (fun call -> call.sequence = sequence)
+        |> Option.iter (fun call ->
+            setCallField outputRow "arrival_time" call.arrival
+            setCallField outputRow "departure_time" call.departure)
         let rawHeadsign = getCallField sourceRow "stop_headsign"
         if not (String.IsNullOrWhiteSpace(rawHeadsign)) then
-            setCallField outputRow "stop_headsign" <| projection.fullHeadsign sourceTripId (Int32.Parse(getCallField sourceRow "stop_sequence", CultureInfo.InvariantCulture)) rawHeadsign
+            setCallField outputRow "stop_headsign" <| projection.fullHeadsign sourceTripId sequence rawHeadsign
         let sourceStopId = getCallField sourceRow "stop_id"
         setCallField outputRow "stop_id" <| projection.outputStopForSource.[sourceStopId]
         if addition.trip.shapeId.IsNone then setCallField outputRow "shape_dist_traveled" <| ""
