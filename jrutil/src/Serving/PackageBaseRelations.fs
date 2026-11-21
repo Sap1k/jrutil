@@ -72,6 +72,27 @@ module PackageBaseRelations =
                         if not (isNull result.["service_id"]) then result.["service_id"] <- box service
                         result.[idField] <- box (Identity.feedId feed kind (identity row target))
                         result)
+            // Where the overlay keeps further source calls, the base calls after
+            // them moved to later sequences.
+            let resequenced = Dictionary<struct(string * int), int>()
+            if CompilerOutput.has input.mappings "resequenced_calls.csv" then
+                for row in CompilerOutput.values input.mappings "resequenced_calls.csv" [| "output_trip_id"; "base_sequence"; "output_sequence" |] do
+                    resequenced.[struct(row.[0], int row.[1])] <- int row.[2]
+            let resequence (tripField: string) (sequenceFields: string list) (row: IDictionary<string,obj>) =
+                if resequenced.Count = 0 then row else
+                let trip = nullableText tripField row
+                let moved =
+                    sequenceFields |> List.choose (fun field ->
+                        match row.[field] with
+                        | :? int as sequence ->
+                            match resequenced.TryGetValue(struct(trip, sequence)) with
+                            | true, target -> Some (field, target)
+                            | _ -> None
+                        | _ -> None)
+                if moved.IsEmpty then row else
+                    let result = copyRow row
+                    for field, target in moved do result.[field] <- box target
+                    result
             let notes = direct "service_note"
             let assignments =
                 direct "assignment" |> Seq.collect (fun row ->
@@ -102,9 +123,9 @@ module PackageBaseRelations =
                     [ "restriction", unbox<string> row.["restriction_id"]; "trip", target ]))
             Map [
                 "service_note", notes
-                "assignment", assignments
-                "connection_claim", connections
-                "travel_restriction", restrictions
+                "assignment", assignments |> Seq.map (resequence "trip_id" [ "call_sequence"; "call_sequence_to" ])
+                "connection_claim", connections |> Seq.map (resequence "origin_trip_id" [ "origin_sequence" ])
+                "travel_restriction", restrictions |> Seq.map (resequence "trip_id" [ "call_sequence" ])
             ]
 
     /// Deduplicate a generic relation by primary key without sorting it.

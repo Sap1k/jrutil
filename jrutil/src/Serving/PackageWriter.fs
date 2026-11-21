@@ -93,7 +93,7 @@ module PackageWriter =
                            |> Seq.map (fun (severity, _, sourceObject, message) -> dict [ "severity", box severity; "source_object_id", box sourceObject; "message", box message ]) |> Seq.toArray))
             |> dict
         let coverage = Dictionary<string,obj>(StringComparer.Ordinal)
-        for fileName in [| "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "trip_coverage_populations.csv"; "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" |] do
+        for fileName in [| "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "coverage_by_source.csv"; "trip_coverage_populations.csv"; "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" |] do
             let rows =
                 CompilerOutput.rows input.reports fileName
                 |> Seq.map (fun (row: CsvRow) ->
@@ -364,7 +364,7 @@ module PackageWriter =
         try
             // Coverage and matching summaries already live in diagnostics.json.
             let summarizedReports = set [
-                "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "trip_coverage_populations.csv"
+                "coverage.csv"; "coverage_by_mode.csv"; "coverage_by_tier.csv"; "coverage_by_source.csv"; "trip_coverage_populations.csv"
                 "trip_coverage_populations_by_mode.csv"; "snapshot_day_coverage.csv"; "exclusions.csv" ]
             let writeTables (tables: IReadOnlyDictionary<string, CompilerOutput.Table>) (directory: string) (keep: string -> bool) =
                 for KeyValue(name, table) in tables do

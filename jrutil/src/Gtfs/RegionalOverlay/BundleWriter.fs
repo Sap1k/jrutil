@@ -64,6 +64,7 @@ let private compile ({
             prepared = prepared; projection = projection; source = source; matches = matches
             gtfsOutput = gtfsOutput; extensionsOutput = extensionsOutput
             usedStopIds = usedStopIds; usedRouteIds = usedRouteIds; usedAgencyIds = usedAgencyIds
+            resequencedCalls = Dictionary<string, Dictionary<int, int array>>(StringComparer.Ordinal)
             routePresentationRules = routePresentationRules }
         BundleCalls.write context sibling
         BundleGtfs.writeTrips context
@@ -89,6 +90,7 @@ let private compile ({
             usedOutputShapeIds = usedOutputShapeIds
             slicesForBinding = slicesForBinding
             transferProvenance = transferProvenance
+            resequencedCalls = context.resequencedCalls
         }
         let fullyCoveredSourceTrips = reports.fullyCoveredSourceTrips
         let matchedSourceTripSet = reports.matchedSourceTripSet

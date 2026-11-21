@@ -119,7 +119,7 @@ type RegionalOverlayStorageTests() =
     [<TestMethod>]
     member _.``Winner selection preserves tier precedence equivalent ties and ambiguity``() =
         let candidate id tier delta : CandidateMatch = {
-            tripId = id; tier = tier; sourceOrdinalByTarget = [| Some 0; Some 1 |]
+            tripId = id; tier = tier; sourceOrdinalByTarget = [| Some 0; Some 1 |]; sourceRunLengthByTarget = [||]
             editCount = 0; alignedCallCount = 2; firstDepartureDelta = delta
             aggregateTimeDelta = int64 delta; durationDelta = 0; maximumTimeDelta = delta; squaredTimeDelta = int64 delta * int64 delta
         }

@@ -337,8 +337,12 @@ let prepare scratchRoot combinedPolicyPath overridesRoot baseBundle (bindings: S
                         postColumn = "overlay_post_id"
                         coordinateIdentityMaximumMetres = sourcePolicies |> Array.map (fun policy -> policy.stopMatch.coordinateIdentityMaximumMetres) |> Array.max
                         coordinateIdentityMinimumMarginMetres = sourcePolicies |> Array.map (fun policy -> policy.stopMatch.coordinateIdentityMinimumMarginMetres) |> Array.max
+                        contextualInference = {
+                            template.source.stopMatch.contextualInference with
+                                maximumUnresolvedGroupsPerTrip = sourcePolicies |> Array.map (fun policy -> policy.stopMatch.contextualInference.maximumUnresolvedGroupsPerTrip) |> Array.max
+                        }
                 }
-                tripMatch = { template.source.tripMatch with minimumCapabilityTier = capabilityTiers; sourceRevision = { column = "overlay_revision"; regex = "(?<revision>\\d{6})"; dateFormat = "yyMMdd" } }
+                tripMatch = { template.source.tripMatch with keepSourceCalls = sourcePolicies |> Array.exists (fun policy -> policy.tripMatch.keepSourceCalls); minimumCapabilityTier = capabilityTiers; sourceRevision = { column = "overlay_revision"; regex = "(?<revision>\\d{6})"; dateFormat = "yyMMdd" } }
                 tripSetAuthority = {
                     template.source.tripSetAuthority with
                         modes = sourcePolicies |> Array.collect (fun policy -> policy.tripSetAuthority.modes) |> Array.distinct |> Array.sort

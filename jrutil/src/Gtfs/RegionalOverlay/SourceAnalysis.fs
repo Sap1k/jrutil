@@ -232,17 +232,22 @@ let private resolveStopsFromContext (context: Context) =
         let unresolved = groups |> Array.filter (stopMatching.stopGroupMatches.ContainsKey >> not)
         let unresolvedGroups = Array.distinct unresolved
         let policy = prepared.policy.source.stopMatch.contextualInference
-        // Context can place exactly one unresolved stop group per trip.
-        if unresolvedGroups.Length <> 1 || calls.Length - unresolved.Length < policy.minimumMappedCalls then None
+        // Context places a few unresolved stop groups per trip, each called once.
+        let maximumGroups = max 1 policy.maximumUnresolvedGroupsPerTrip
+        if unresolvedGroups.Length = 0 || unresolvedGroups.Length > maximumGroups
+           || calls.Length - unresolved.Length < policy.minimumMappedCalls then None
         else
-            let group = unresolvedGroups.[0]
-            let ordinals = calls |> Array.indexed |> Array.choose (fun (index, call) ->
-                match sourceGroupByMember.TryGetValue(call.stopId) with
-                | true, candidate when candidate = group -> Some index
-                | _ -> None)
-            match ordinals with
-            | [| ordinal |] -> Some (group, ordinal, routeMatching.sourcePattern calls)
-            | _ -> None
+            let gaps =
+                unresolvedGroups
+                |> Array.map (fun group ->
+                    group,
+                    calls |> Array.indexed |> Array.choose (fun (index, call) ->
+                        match sourceGroupByMember.TryGetValue(call.stopId) with
+                        | true, candidate when candidate = group -> Some index
+                        | _ -> None))
+            if gaps |> Array.forall (fun (_, ordinals) -> ordinals.Length = 1) then
+                Some (gaps |> Array.map (fun (group, ordinals) -> group, ordinals.[0]), routeMatching.sourcePattern calls)
+            else None
 
     let collectStopProposals () =
         let proposed = Dictionary<string, ResizeArray<StopInferenceEvidence>>(StringComparer.Ordinal)
@@ -254,7 +259,7 @@ let private resolveStopsFromContext (context: Context) =
             | (true, sourceActive), (true, calls) when anyDate sourceActive ->
                 match inferenceGap calls with
                 | None -> ()
-                | Some (unresolvedGroup, unresolvedOrdinal, sourcePlaces) ->
+                | Some (gaps, sourcePlaces) ->
                     let sourceArrivals, sourceDepartures = sourceTimeArrays calls
                     let primaryRoutes, _ = routeMatching.routeCandidates.[sourceRouteId]
                     let candidateRoutes =
@@ -286,6 +291,7 @@ let private resolveStopsFromContext (context: Context) =
                                     tripId = tripId
                                     tier = ContextStopInference
                                     sourceOrdinalByTarget = alignment
+                                    sourceRunLengthByTarget = [||]
                                     editCount = 0
                                     alignedCallCount = alignedCalls
                                     firstDepartureDelta = firstDelta
@@ -293,26 +299,27 @@ let private resolveStopsFromContext (context: Context) =
                                     durationDelta = durationDelta
                                     maximumTimeDelta = maximumDelta
                                     squaredTimeDelta = squaredDelta
-                                }, fingerprint.pattern.[unresolvedOrdinal])
+                                }, fingerprint.pattern)
                             else None)
                     if candidates.Length > 0 then
                         let bestScore = candidates |> Array.map (fst >> candidateRank) |> Array.min
                         let best = candidates |> Array.filter (fst >> candidateRank >> (=) bestScore)
-                        let targets = best |> Array.map snd |> Array.distinct
-                        if targets.Length = 1 then
-                            let evidence = {
-                                sourceGroupId = unresolvedGroup
-                                sourceTripId = sourceTripId
-                                targetStopPlaceId = targets.[0]
-                                sourceCallOrdinal = unresolvedOrdinal + 1
-                                method = "trip_context_unique"
-                            }
-                            match proposed.TryGetValue(unresolvedGroup) with
-                            | true, values -> values.Add(evidence)
-                            | _ ->
-                                let values = ResizeArray<StopInferenceEvidence>()
-                                values.Add(evidence)
-                                proposed.[unresolvedGroup] <- values
+                        for unresolvedGroup, unresolvedOrdinal in gaps do
+                            let targets = best |> Array.map (fun (_, pattern) -> pattern.[unresolvedOrdinal]) |> Array.distinct
+                            if targets.Length = 1 then
+                                let evidence = {
+                                    sourceGroupId = unresolvedGroup
+                                    sourceTripId = sourceTripId
+                                    targetStopPlaceId = targets.[0]
+                                    sourceCallOrdinal = unresolvedOrdinal + 1
+                                    method = "trip_context_unique"
+                                }
+                                match proposed.TryGetValue(unresolvedGroup) with
+                                | true, values -> values.Add(evidence)
+                                | _ ->
+                                    let values = ResizeArray<StopInferenceEvidence>()
+                                    values.Add(evidence)
+                                    proposed.[unresolvedGroup] <- values
             | _ -> ()
         proposed
 

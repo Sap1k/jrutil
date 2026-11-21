@@ -31,6 +31,8 @@ type Input = {
     usedOutputShapeIds: Set<string>
     slicesForBinding: MatchBinding -> (TripSlice * DateSet.Dates) array
     transferProvenance: ResizeArray<string array>
+    /// Output trips whose base calls moved to later sequences (BundleOutput.Context).
+    resequencedCalls: Dictionary<string, Dictionary<int, int array>>
 }
 
 type Result = {
@@ -50,6 +52,7 @@ let write ({
     usedOutputShapeIds = usedOutputShapeIds
     slicesForBinding = slicesForBinding
     transferProvenance = transferProvenance
+    resequencedCalls = resequencedCalls
 }: Input) : Result =
     let modeForSourceTrip = SourceAnalysis.modeOfTrip source
     let dateRanges (values: seq<bool>) =
@@ -223,14 +226,24 @@ let write ({
                     for slice, sharedDates in slicesForBinding binding do
                         if anyDate sharedDates then
                             let selection = projection.selectionByBinding.[projection.bindingKey binding]
+                            // Kept repeated calls take positions of their own; a run folded into
+                            // one output call maps all its source calls there.
+                            let mutable repeatsBefore = 0
                             for targetIndex in 0 .. selection.sourceOrdinalByTarget.Length - 1 do
-                                match selection.sourceOrdinalByTarget.[targetIndex] with
-                                | Some sourceIndex ->
+                                let struct (first, length) = sourceRun binding.sourceOrdinalByTarget binding.sourceRunLengthByTarget targetIndex
+                                let kept = selection.repeats |> Array.filter (fun call -> call.targetOrdinal = targetIndex)
+                                let position = targetIndex + 1 + repeatsBefore
+                                let folded =
+                                    seq { first .. first + length - 1 }
+                                    |> Seq.filter (fun sourceIndex -> kept |> Array.forall (fun call -> call.sourceOrdinal <> sourceIndex))
+                                    |> Seq.map (fun sourceIndex -> sourceIndex, position, selection.outputStopIds.[targetIndex])
+                                let further = kept |> Seq.mapi (fun index call -> call.sourceOrdinal, position + 1 + index, call.outputStopId)
+                                for sourceIndex, outputPosition, outputStop in Seq.append folded further do
                                     let sourceSequence = binding.sourceCalls.[sourceIndex].sequence
-                                    match emit sourceSequence selection.sourceStopIds.[sourceIndex] slice.trip.id (targetIndex + 1) selection.outputStopIds.[targetIndex] with
+                                    match emit sourceSequence selection.sourceStopIds.[sourceIndex] slice.trip.id outputPosition outputStop with
                                     | Some row -> yield row
                                     | None -> ()
-                                | None -> ()
+                                repeatsBefore <- repeatsBefore + kept.Length
             | _ -> ()
             match projection.sourceTripAdditionsBySourceId.TryGetValue(sourceTripId) with
             | true, addition ->
@@ -245,6 +258,16 @@ let write ({
     writeValues (Path.Combine(temporary, "mappings", "source_to_output_calls.csv"))
         [| "source_id"; "source_trip_id"; "source_call_ordinal"; "source_stop_id"; "output_trip_id"; "output_call_ordinal"; "output_stop_id" |]
         callMappings
+    // Base facts that name a call by its sequence follow it through this table.
+    if resequencedCalls.Count > 0 then
+        writeValues (Path.Combine(temporary, "mappings", "resequenced_calls.csv"))
+            [| "output_trip_id"; "base_sequence"; "output_sequence" |]
+            (seq {
+                for KeyValue(tripId, sequences) in resequencedCalls |> Seq.sortBy (fun pair -> pair.Key) do
+                    for KeyValue(baseSequence, outputSequences) in sequences |> Seq.sortBy (fun pair -> pair.Key) do
+                        if outputSequences.[0] <> baseSequence then
+                            yield [| tripId; string baseSequence; string outputSequences.[0] |]
+            })
     logProgress "write-coverage-reports" 0L None
     let acceptedDateBuilders = Dictionary<string, System.Collections.BitArray>(StringComparer.Ordinal)
     let acceptDate sourceTripId dateIndex =
@@ -586,6 +609,36 @@ let write ({
          |> Seq.distinct
          |> Seq.groupBy (fun (mode, methodName, _) -> mode, methodName)
          |> Seq.map (fun ((mode, methodName), values) -> [| mode; methodName; string (Seq.length values) |]))
+    // The combined run hides which source a number belongs to; a source that owns
+    // its lines also counts as covered when its trip was added beside the base trip
+    // instead of bound to it.
+    let sourceCoverage =
+        let tripKey (row: CsvRow) = struct (sourceIdentity prepared.binding.sourceId row, originalIdentity "trip_id" row)
+        let bound = sourceTripMappings |> Seq.filter (fun row -> row.[2] <> "") |> Seq.map (fun row -> struct (row.[0], row.[1])) |> HashSet
+        let added = sourceTripMappings |> Seq.filter (fun row -> row.[2] = "") |> Seq.map (fun row -> struct (row.[0], row.[1])) |> HashSet
+        let stopGroupSource (group: StopGroup) = sourceIdentity prepared.binding.sourceId group.members.[0]
+        let stopGroupMethod (group: StopGroup) =
+            match source.stopMatchMethods.TryGetValue(group.groupId) with
+            | true, value when source.stopGroupMatches.ContainsKey(group.groupId) -> value
+            | _ -> ""
+        seq {
+            for sourceId, trips in activeSourceTrips |> Array.groupBy (fun row -> sourceIdentity prepared.binding.sourceId row) |> Array.sortBy fst do
+                let keys = trips |> Array.map tripKey
+                let boundCount = keys |> Array.filter bound.Contains |> Array.length
+                let addedOnly = keys |> Array.filter (fun key -> added.Contains(key) && not (bound.Contains(key))) |> Array.length
+                yield [| sourceId; "trip"; "active"; string keys.Length |]
+                yield [| sourceId; "trip"; "bound_to_base_trip"; string boundCount |]
+                yield [| sourceId; "trip"; "added_as_source_trip"; string addedOnly |]
+                yield [| sourceId; "trip"; "unrepresented"; string (keys.Length - boundCount - addedOnly) |]
+            for sourceId, groups in source.stopGroups |> Array.groupBy stopGroupSource |> Array.sortBy fst do
+                let methods = groups |> Array.map stopGroupMethod
+                yield [| sourceId; "stop_group"; "scheduled"; string groups.Length |]
+                yield [| sourceId; "stop_group"; "matched_to_base_place"; string (methods |> Array.filter (fun value -> value <> "" && value <> "source_native") |> Array.length) |]
+                yield [| sourceId; "stop_group"; "source_native"; string (methods |> Array.filter ((=) "source_native") |> Array.length) |]
+                yield [| sourceId; "stop_group"; "unresolved"; string (methods |> Array.filter ((=) "") |> Array.length) |]
+        }
+    writeValues (Path.Combine(temporary, "reports", "coverage_by_source.csv"))
+        [| "source_id"; "object_type"; "population"; "count" |] sourceCoverage
     writeValues (Path.Combine(temporary, "reports", "trip_coverage_populations_by_mode.csv"))
         [| "mode"; "population"; "matched"; "total"; "coverage" |]
         (seq {

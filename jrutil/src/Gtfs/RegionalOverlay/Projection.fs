@@ -64,9 +64,11 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
             (matches.bindings
              |> Seq.filter (bindingEligible "call_boarding_points")
              |> Seq.collect (fun binding ->
-                 binding.sourceOrdinalByTarget
-                 |> Seq.choose id
-                 |> Seq.map (fun ordinal -> binding.sourceCalls.[ordinal].stopId)))
+                 // A binding that covers its whole target may keep any source call.
+                 if prepared.policy.source.tripMatch.keepSourceCalls && binding.sourceOrdinalByTarget |> Array.forall Option.isSome then
+                     binding.sourceCalls |> Seq.filter (fun call -> source.mappedPlaceBySourceStop.ContainsKey(call.stopId)) |> Seq.map (fun call -> call.stopId)
+                 else
+                     binding.sourceOrdinalByTarget |> Seq.choose id |> Seq.map (fun ordinal -> binding.sourceCalls.[ordinal].stopId)))
             (source.tripProjections |> Seq.collect (fun projection -> projection.sourceCalls |> Seq.map (fun call -> call.stopId)))
         |> Set.ofSeq
     let sourceStops = source.stopRows |> Array.map (fun row -> rowValue row "stop_id", row) |> dict
@@ -160,15 +162,29 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
     let selectionForBinding (value: MatchBinding) =
         let selectSchedules = bindingEligible "schedules" value
         let selectBoardingPoints = bindingEligible "call_boarding_points" value
+        // The source's further calls are kept only where it may state both where
+        // and when the trip calls, the base trip is covered call by call, and every
+        // further call follows one of them at a resolved stop place. Otherwise a
+        // run of posts stays one call that arrives with its first and departs with
+        // its last source call.
+        let primaries = value.sourceOrdinalByTarget |> Array.choose id
+        let keepRepeats =
+            selectSchedules && selectBoardingPoints
+            && primaries.Length = value.sourceOrdinalByTarget.Length
+            && primaries.Length < value.sourceCalls.Length
+            && primaries.[0] = 0
+            && primaries |> Array.pairwise |> Array.forall (fun (left, right) -> left < right)
+            && value.sourceCalls |> Array.forall (fun call -> source.mappedPlaceBySourceStop.ContainsKey(call.stopId))
+        let runOf targetOrdinal = sourceRun value.sourceOrdinalByTarget value.sourceRunLengthByTarget targetOrdinal
+        let outputStopOf (call: CallValue) =
+            match outputStopForSource.TryGetValue(call.stopId) with
+            | true, outputStop -> outputStop
+            | _ -> call.stopPlaceId
         let outputStops =
             value.sourceOrdinalByTarget
             |> Array.map (fun sourceOrdinal ->
                 match sourceOrdinal with
-                | Some ordinal when selectBoardingPoints ->
-                    let call = value.sourceCalls.[ordinal]
-                    match outputStopForSource.TryGetValue(call.stopId) with
-                    | true, outputStop -> outputStop
-                    | _ -> call.stopPlaceId
+                | Some ordinal when selectBoardingPoints -> outputStopOf value.sourceCalls.[ordinal]
                 | _ -> "")
         let allDistances =
             value.sourceOrdinalByTarget
@@ -203,9 +219,31 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
                         else None)
                 departures =
                     value.sourceOrdinalByTarget
-                    |> Array.map (fun sourceOrdinal ->
-                        if selectSchedules then sourceOrdinal |> Option.bind (fun ordinal -> scheduleValue value.sourceCalls.[ordinal].departure)
+                    |> Array.mapi (fun targetOrdinal sourceOrdinal ->
+                        if selectSchedules then
+                            sourceOrdinal
+                            |> Option.bind (fun ordinal ->
+                                let struct (_, length) = runOf targetOrdinal
+                                let departing = if keepRepeats then ordinal else ordinal + length - 1
+                                scheduleValue value.sourceCalls.[departing].departure)
                         else None)
+                repeats =
+                    if not keepRepeats then [||]
+                    else
+                        [|
+                            for targetOrdinal in 0 .. primaries.Length - 1 do
+                                let next = if targetOrdinal + 1 < primaries.Length then primaries.[targetOrdinal + 1] else value.sourceCalls.Length
+                                for ordinal in primaries.[targetOrdinal] + 1 .. next - 1 do
+                                    let call = value.sourceCalls.[ordinal]
+                                    {
+                                        targetOrdinal = targetOrdinal
+                                        sourceOrdinal = ordinal
+                                        outputStopId = outputStopOf call
+                                        arrival = call.arrival
+                                        departure = call.departure
+                                        distance = if outputShape.IsSome then call.distance else None
+                                    }
+                        |]
             }
         { selection with factKey = sha256Text (selectionEncoding selection) }
 
@@ -219,6 +257,7 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
         && Array.forall2 compatibleOption left.distances right.distances
         && Array.forall2 compatibleOption left.arrivals right.arrivals
         && Array.forall2 compatibleOption left.departures right.departures
+        && left.repeats |> Array.map (fun call -> { call with sourceOrdinal = 0 }) = (right.repeats |> Array.map (fun call -> { call with sourceOrdinal = 0 }))
     let mergeSelections (values: OverlaySelection array) =
         let ordered = values |> Array.sortBy (fun value -> value.sourceId, value.sourceTripId)
         let mergeValue empty (items: 'a array) = items |> Array.tryFind ((<>) empty) |> Option.defaultValue empty
@@ -295,8 +334,12 @@ let resolve ({ prepared = prepared; source = source; matches = matches }: Input)
         for binding in bindings do
             match projectionsBySource.TryGetValue(binding.sourceTripId) with
             | true, projection ->
+                // Every source call is in the output: one per target call, the rest kept.
+                let coversEveryCall =
+                    binding.sourceOrdinalByTarget |> Array.forall Option.isSome
+                    && binding.sourceOrdinalByTarget.Length + selectionByBinding.[bindingKey binding].repeats.Length = projection.sourceCalls.Length
                 let complete =
-                    binding.sourceOrdinalByTarget = identityAlignment projection.sourceCalls.Length
+                    coversEveryCall
                     && bindingEligible "schedules" binding && bindingEligible "call_boarding_points" binding
                 if not complete then
                     for dateIndex in 0 .. projection.dates.Length - 1 do

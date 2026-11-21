@@ -4,9 +4,9 @@
 module internal JrUtil.RegionalOverlay.Names
 
 open System
-open JrUtil.GtfsModel
-open JrUtil.RegionalOverlay.Types
-open JrUtil.RegionalOverlay.Model
+open System.Collections.Generic
+open System.IO
+open System.Text.RegularExpressions
 
 let normalizeName (value: string) =
     value.ToLowerInvariant()
@@ -15,62 +15,133 @@ let normalizeName (value: string) =
     |> String
     |> fun value -> value.Split(' ', StringSplitOptions.RemoveEmptyEntries)
 
-let internal canonicalStopNameTokens (value: string) =
-    let tokens = normalizeName value
-    let expanded = ResizeArray<string>()
-    let mutable index = 0
-    while index < tokens.Length do
-        let token = tokens.[index]
-        let next = if index + 1 < tokens.Length then tokens.[index + 1] else ""
-        match token, next with
-        | "žel", "st" ->
-            expanded.Add("železniční")
-            expanded.Add("stanice")
-            index <- index + 2
-        | "čerp", "st" ->
-            expanded.Add("čerpací")
-            expanded.Add("stanice")
-            index <- index + 2
-        | "obch", "stř" ->
-            expanded.Add("obchodní")
-            expanded.Add("středisko")
-            index <- index + 2
-        | "obú", _ ->
-            expanded.Add("obecní")
-            expanded.Add("úřad")
-            index <- index + 1
-        | "nám", _ -> expanded.Add("náměstí"); index <- index + 1
-        | "rozc", _ -> expanded.Add("rozcestí"); index <- index + 1
-        | "rest", _ -> expanded.Add("restaurace"); index <- index + 1
-        | "zast", _ -> expanded.Add("zastávka"); index <- index + 1
-        | "dol", _ -> expanded.Add("dolní"); index <- index + 1
-        | "hor", _ -> expanded.Add("horní"); index <- index + 1
-        | "nem", _ -> expanded.Add("nemocnice"); index <- index + 1
-        | "kult", _ -> expanded.Add("kulturní"); index <- index + 1
-        | "mech", _ -> expanded.Add("mechanizační"); index <- index + 1
-        | "stř", _ -> expanded.Add("středisko"); index <- index + 1
-        | "záv", _ -> expanded.Add("závod"); index <- index + 1
-        | "n", _ -> expanded.Add("nad"); index <- index + 1
-        | _ -> expanded.Add(token); index <- index + 1
-    expanded.ToArray()
+/// One word of a stop name. `dotted` marks a word written as an abbreviation
+/// ("žel.", "n."), which may stand for any word it begins.
+[<Struct>]
+type private NameToken = { text: string; dotted: bool }
 
+let private nameTokens (value: string) =
+    let tokens = ResizeArray<NameToken>()
+    let word = Text.StringBuilder()
+    let flush dotted =
+        if word.Length > 0 then
+            tokens.Add({ text = word.ToString(); dotted = dotted })
+            word.Clear() |> ignore
+    for character in value.ToLowerInvariant() do
+        if Char.IsLetterOrDigit(character) then word.Append(character) |> ignore
+        else flush (character = '.')
+    flush false
+    tokens.ToArray()
+
+/// CIS writes a junction with its distance from the village: "Miroslav,rozc.4.0".
+let private junctionDistance = Regex(@"\s*\d+[.,]\d+\s*$", RegexOptions.CultureInvariant)
+
+/// The comma-separated parts of a name (municipality, part, place), without
+/// the empty ones of "Obec,,místo".
+let private nameSegments (value: string) =
+    value.Split(',')
+    |> Array.map (fun segment ->
+        let segment = segment.Trim()
+        if segment.Contains("rozc", StringComparison.OrdinalIgnoreCase) then junctionDistance.Replace(segment, "") else segment)
+    |> Array.map nameTokens
+    |> Array.filter (fun tokens -> tokens.Length > 0)
+
+/// Expansions that a prefix cannot find: acronyms and the like. The shared
+/// vocabulary is `StopMatcherSynonyms.txt`; a line's first member and every
+/// member ending with a dot abbreviate the others.
+let private overlayExpansions = [|
+    "žst", "železniční stanice"
+    "zd", "zemědělské družstvo"
+    "mš", "mateřská škola"
+    "zš", "základní škola"
+    "kd", "kulturní dům"
+|]
+
+let private expansions =
+    lazy (
+        let result = Dictionary<string, ResizeArray<string array>>(StringComparer.Ordinal)
+        let add (abbreviation: string) (expansion: string) =
+            let key = abbreviation.Trim().TrimEnd('.')
+            let words = nameTokens expansion |> Array.map (fun token -> token.text)
+            // One-word expansions of a dotted abbreviation are found as prefixes already.
+            if key <> "" && not (key.Contains(' ')) && words.Length > 0 && not (words.Length = 1 && words.[0] = key) then
+                match result.TryGetValue(key) with
+                | true, values -> values.Add(words)
+                | _ -> result.[key] <- ResizeArray([| words |])
+        for abbreviation, expansion in overlayExpansions do add abbreviation expansion
+        let path = JrUtil.GeoData.StopMatcher.synonymsFile
+        if File.Exists(path) then
+            for line in File.ReadLines(path) do
+                let members =
+                    line.Split('#').[0].ToLowerInvariant().Split(',')
+                    |> Array.map (fun item -> item.Trim())
+                    |> Array.filter (fun item -> item <> "")
+                if members.Length > 1 then
+                    let abbreviations = members |> Array.indexed |> Array.filter (fun (index, item) -> index = 0 || item.EndsWith('.')) |> Array.map snd
+                    let full = members |> Array.filter (fun item -> not (item.EndsWith('.')))
+                    for abbreviation in abbreviations do
+                        for expansion in full do
+                            if expansion <> abbreviation then add abbreviation expansion
+        result)
+
+let private sameWord (left: NameToken) (right: NameToken) =
+    left.text = right.text
+    || (left.dotted && right.text.StartsWith(left.text, StringComparison.Ordinal))
+    || (right.dotted && left.text.StartsWith(right.text, StringComparison.Ordinal))
+    || (min left.text.Length right.text.Length >= 3
+        && (left.text.StartsWith(right.text, StringComparison.Ordinal) || right.text.StartsWith(left.text, StringComparison.Ordinal)))
+
+/// How many words differ in spelling when the two names say the same, else None.
+let private nameDifference (left: NameToken array) (right: NameToken array) =
+    let known = Dictionary<struct (int * int), int option>()
+    let expandsTo (short: NameToken array) index (long: NameToken array) position =
+        match expansions.Value.TryGetValue(short.[index].text) with
+        | true, values ->
+            values
+            |> Seq.filter (fun words ->
+                position + words.Length <= long.Length
+                && words |> Array.indexed |> Array.forall (fun (offset, word) -> long.[position + offset].text = word))
+            |> Seq.map (fun words -> words.Length)
+            |> Seq.toArray
+        | _ -> [||]
+    let rec from i j =
+        if i = left.Length && j = right.Length then Some 0
+        elif i = left.Length || j = right.Length then None
+        else
+            match known.TryGetValue(struct (i, j)) with
+            | true, value -> value
+            | _ ->
+                let word =
+                    if sameWord left.[i] right.[j] then
+                        from (i + 1) (j + 1) |> Option.map (fun rest -> rest + (if left.[i].text = right.[j].text then 0 else 1))
+                    else None
+                let leftExpanded = expandsTo left i right j |> Array.choose (fun length -> from (i + 1) (j + length) |> Option.map ((+) 1))
+                let rightExpanded = expandsTo right j left i |> Array.choose (fun length -> from (i + length) (j + 1) |> Option.map ((+) 1))
+                let options = Seq.concat [ Option.toArray word; leftExpanded; rightExpanded ] |> Seq.toArray
+                let value = if options.Length = 0 then None else Some (Array.min options)
+                known.[struct (i, j)] <- value
+                value
+    from 0 0
+
+/// Rank two stop names that say the same place, lower being closer: 0 for the
+/// same words, more for abbreviations spelled out and for leading locality
+/// segments ("Brno,Bystrc,ZOO" against "ZOO") one side leaves out. None when
+/// the names differ.
 let stopNameMatchRank (leftRaw: string) (rightRaw: string) =
-    let left = canonicalStopNameTokens leftRaw
-    let right = canonicalStopNameTokens rightRaw
-    let localitySuffix (shorter: string array) (longerRaw: string) =
-        let comma = longerRaw.IndexOf(',')
-        comma >= 0 && canonicalStopNameTokens longerRaw.[comma + 1..] = shorter
-    let prefixEquivalent (left: string array) (right: string array) =
-        left.Length = right.Length
-        && Array.zip left right
-           |> Array.forall (fun (a, b) ->
-               a = b
-               || (min a.Length b.Length >= 3 && (a.StartsWith(b, StringComparison.Ordinal) || b.StartsWith(a, StringComparison.Ordinal))))
-    if left = right then Some 0
-    elif localitySuffix left rightRaw || localitySuffix right leftRaw then Some (abs (left.Length - right.Length))
-    elif prefixEquivalent left right then
-        Some (Array.zip left right |> Array.sumBy (fun (a, b) -> if a = b then 0 else 1))
-    else None
+    let left, right = nameSegments leftRaw, nameSegments rightRaw
+    let whole (segments: NameToken array array) = Array.concat segments
+    match nameDifference (whole left) (whole right) with
+    | Some difference -> Some difference
+    | None ->
+        // The longer name may lead with locality segments the other leaves out.
+        let withoutLocality (longer: NameToken array array) (shorter: NameToken array array) =
+            seq { 1 .. longer.Length - 1 }
+            |> Seq.choose (fun dropped ->
+                nameDifference (whole longer.[dropped..]) (whole shorter)
+                |> Option.map (fun difference -> difference + (longer.[.. dropped - 1] |> Array.sumBy Array.length)))
+            |> Seq.toArray
+        let ranks = Array.append (withoutLocality left right) (withoutLocality right left)
+        if ranks.Length = 0 then None else Some (Array.min ranks)
 
 let compatibleModeClasses (left: string) (right: string) =
     left = right

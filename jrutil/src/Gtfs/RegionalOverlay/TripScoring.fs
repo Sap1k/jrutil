@@ -101,6 +101,50 @@ let patternEditAlignment (policy: PatternEditPolicy) (source: string array) (tar
                         targetIndex <- targetIndex - 1
                 Some (edits, alignment)
 
+/// Fold consecutive calls at one stop place into a single matching call: it
+/// arrives with the first and departs with the last. Returns the folded calls
+/// and, for each, the ordinal of its first call and how many calls it folds.
+let collapseRepeatedPlaces (calls: CallValue array) =
+    let folded = ResizeArray<CallValue>()
+    let starts = ResizeArray<int>()
+    let lengths = ResizeArray<int>()
+    let mutable index = 0
+    while index < calls.Length do
+        let mutable last = index
+        while last + 1 < calls.Length && calls.[last + 1].stopPlaceId = calls.[index].stopPlaceId do
+            last <- last + 1
+        folded.Add({ calls.[index] with departure = calls.[last].departure })
+        starts.Add(index)
+        lengths.Add(last - index + 1)
+        index <- last + 1
+    folded.ToArray(), starts.ToArray(), lengths.ToArray()
+
+/// Align a target pattern that the source pattern contains in order, between
+/// the same endpoints, with at most `maximumExtra` further source calls.
+/// Returns the count of those and each target call's source ordinal.
+let supersetAlignment (maximumExtra: int) (source: string array) (target: string array) =
+    let extra = source.Length - target.Length
+    if target.Length = 0 || extra <= 0 || extra > maximumExtra then None
+    elif source.[0] <> target.[0] || source.[source.Length - 1] <> target.[target.Length - 1] then None
+    else
+        let alignment = Array.create target.Length None
+        let mutable sourceIndex = 0
+        let mutable contained = true
+        for targetIndex in 0 .. target.Length - 1 do
+            if contained then
+                if targetIndex = target.Length - 1 then
+                    // The trip ends where the source ends.
+                    if sourceIndex <= source.Length - 1 then alignment.[targetIndex] <- Some (source.Length - 1)
+                    else contained <- false
+                else
+                    while sourceIndex < source.Length - 1 && source.[sourceIndex] <> target.[targetIndex] do
+                        sourceIndex <- sourceIndex + 1
+                    if sourceIndex < source.Length - 1 then
+                        alignment.[targetIndex] <- Some sourceIndex
+                        sourceIndex <- sourceIndex + 1
+                    else contained <- false
+        if contained then Some (extra, alignment) else None
+
 let sourceTimeArrays (sourceCalls: CallValue array) =
     sourceCalls |> Array.map (fun call -> timeSeconds call.arrival),
     sourceCalls |> Array.map (fun call -> timeSeconds call.departure)

@@ -137,7 +137,16 @@ let write (context: Context) (zones: StopZones) =
                 let baseTripId = rowValue row "trip_id"
                 match projection.slicesByBaseTrip.TryGetValue(baseTripId) with
                 | true, slices ->
-                    for slice in slices do yield cloneRow row |> setRow <| "trip_id" <| slice.trip.id
+                    for slice in slices do
+                        match context.resequencedCalls.TryGetValue(slice.trip.id) with
+                        | true, resequenced ->
+                            // Repeated calls of a stop place share its zones.
+                            match resequenced.TryGetValue(int (rowValue row "stop_sequence")) with
+                            | true, sequences ->
+                                for sequence in sequences do
+                                    yield cloneRow row |> setRow <| "trip_id" <| slice.trip.id |> setRow <| "stop_sequence" <| string sequence
+                            | _ -> yield cloneRow row |> setRow <| "trip_id" <| slice.trip.id
+                        | _ -> yield cloneRow row |> setRow <| "trip_id" <| slice.trip.id
                 | _ -> ()
         }
         |> writeRows (Path.Combine(extensionsOutput, "cz_trip_stop_zones.txt")) (columnsOf prepared.baseExtensions "cz_trip_stop_zones.txt")

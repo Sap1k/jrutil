@@ -99,12 +99,18 @@ type private SourceView = {
     patternKey: string
     arrivals: int array
     departures: int array
+    /// For a view folded by `collapseRepeatedPlaces`: each view call's first
+    /// source call and how many it folds. Empty for the calls as they are.
+    runStarts: int array
+    runLengths: int array
 }
 
-let private sourceView normalizeTime (calls: CallValue array) =
+let private sourceView normalizeTime (calls: CallValue array) (runStarts: int array) (runLengths: int array) =
     let pattern = calls |> Array.map (fun call -> call.stopPlaceId)
     let arrivals, departures = sourceTimeArrays calls
     {
+        runStarts = runStarts
+        runLengths = runLengths
         full = signature normalizeTime "" calls true true
         endpoints = signature normalizeTime "" calls false true
         first = signature normalizeTime "" calls false false
@@ -127,18 +133,32 @@ let private candidateFor (matcher: Matcher) (view: SourceView) tripId =
             elif exactPattern && target.patternEndpoints = view.endpoints && matcher.tierEnabled PatternEndpoints then exact PatternEndpoints
             elif exactPattern && target.patternFirst = view.first && matcher.tierEnabled PatternFirst then exact PatternFirst
             elif exactPattern && policy.exactPatternProximity && matcher.tierEnabled PatternNearest then exact PatternNearest
-            elif matcher.tierEnabled PatternEditNearest then
-                patternEditAlignment policy.patternEdit view.pattern target.pattern
-                |> Option.map (fun (edits, alignment) -> PatternEditNearest, edits, alignment)
-            else None
+            else
+                // The base trip's calls, all present in order: as good as its own
+                // pattern, and the source's further calls are kept in the output.
+                let contained =
+                    if policy.keepSourceCalls && policy.exactPatternProximity && matcher.tierEnabled PatternNearest then
+                        supersetAlignment policy.patternEdit.maximumEdits view.pattern target.pattern
+                        |> Option.map (fun (extra, alignment) -> PatternNearest, extra, alignment)
+                    else None
+                match contained with
+                | Some _ -> contained
+                | None when matcher.tierEnabled PatternEditNearest ->
+                    patternEditAlignment policy.patternEdit view.pattern target.pattern
+                    |> Option.map (fun (edits, alignment) -> PatternEditNearest, edits, alignment)
+                | None -> None
         tierAndAlignment
         |> Option.map (fun (tier, edits, alignment) ->
             let firstDelta, aggregateDelta, durationDelta, maximumDelta, squaredDelta, alignedCalls =
                 candidateTimeScore view.arrivals view.departures target alignment
+            let folded = view.runStarts.Length > 0
             {
                 tripId = tripId
                 tier = tier
-                sourceOrdinalByTarget = alignment
+                sourceOrdinalByTarget =
+                    if folded then alignment |> Array.map (Option.map (fun viewOrdinal -> view.runStarts.[viewOrdinal])) else alignment
+                sourceRunLengthByTarget =
+                    if folded then alignment |> Array.map (function Some viewOrdinal -> view.runLengths.[viewOrdinal] | None -> 0) else [||]
                 editCount = edits
                 alignedCallCount = alignedCalls
                 firstDepartureDelta = firstDelta
@@ -158,7 +178,7 @@ type private TripCandidates = {
     routeTripCount: int
 }
 
-let private tripCandidates (matcher: Matcher) sourceRouteId (view: SourceView) =
+let private tripCandidates (matcher: Matcher) sourceRouteId (view: SourceView) (foldedView: SourceView option) =
     let indexes = matcher.indexes
     let primaryRoutes, primaryRouteMethod = indexes.routeCandidates.[sourceRouteId]
     let structuralRoutes = indexes.structuralRouteCandidates.[sourceRouteId] |> Array.filter (fun route -> not (primaryRoutes |> Array.contains route))
@@ -166,7 +186,7 @@ let private tripCandidates (matcher: Matcher) sourceRouteId (view: SourceView) =
         routes
         |> Array.collect (fun routeId -> match indexes.baseTripIdsByRoute.TryGetValue(routeId) with | true, ids -> ids | _ -> [||])
         |> Array.distinct
-    let exactTripsForRoutes routes =
+    let exactTripsForRoutes (view: SourceView) routes =
         routes
         |> Array.collect (fun routeId ->
             match indexes.baseTripIdsByRouteAndPattern.TryGetValue(struct (routeId, view.patternKey)) with
@@ -176,9 +196,21 @@ let private tripCandidates (matcher: Matcher) sourceRouteId (view: SourceView) =
     let primaryTrips = tripsForRoutes primaryRoutes
     let structuralTrips = tripsForRoutes structuralRoutes
     // Trips with the very same stop pattern make every other trip of the route irrelevant.
-    let matching routes trips =
-        let exact = exactTripsForRoutes routes
+    let matchingView view routes trips =
+        let exact = exactTripsForRoutes view routes
         (if exact.Length > 0 then exact else trips) |> Array.choose (candidateFor matcher view)
+    let fewestEdits (values: CandidateMatch array) =
+        if values.Length = 0 then Int32.MaxValue else values |> Array.map (fun candidate -> candidate.editCount) |> Array.min
+    // The base usually has one call where the source calls several posts of a
+    // stop place. The folded view applies only where it fits the base better
+    // than the calls as they are.
+    let matching routes trips =
+        let asIs = matchingView view routes trips
+        match foldedView with
+        | Some foldedView when fewestEdits asIs > 0 ->
+            let folded = matchingView foldedView routes trips
+            if fewestEdits folded < fewestEdits asIs then folded else asIs
+        | _ -> asIs
     {
         primaryRouteMethod = primaryRouteMethod
         primary = matching primaryRoutes primaryTrips
@@ -205,6 +237,7 @@ let private bindingFor (matcher: Matcher) (collected: Collected) (sourceTripRow:
         sourceCalls = calls
         sourceShapeId = optionText (rowValue sourceTripRow "shape_id")
         sourceOrdinalByTarget = candidate.sourceOrdinalByTarget
+        sourceRunLengthByTarget = candidate.sourceRunLengthByTarget
         editCount = candidate.editCount
         firstDepartureDelta = candidate.firstDepartureDelta
         aggregateTimeDelta = candidate.aggregateTimeDelta
@@ -217,7 +250,12 @@ let private bindingFor (matcher: Matcher) (collected: Collected) (sourceTripRow:
 let private matchSourceTrip (matcher: Matcher) (collected: Collected) (sourceTripRow: CsvRow) (sourceActive: DateSet.Dates) (calls: CallValue array) =
     let prepared = matcher.prepared
     let sourceTripId = rowValue sourceTripRow "trip_id"
-    let candidates = tripCandidates matcher (rowValue sourceTripRow "route_id") (sourceView prepared.normalizeMatchingTime calls)
+    let foldedView =
+        if not prepared.policy.source.tripMatch.keepSourceCalls then None
+        else
+            let folded, starts, lengths = collapseRepeatedPlaces calls
+            if folded.Length = calls.Length then None else Some (sourceView prepared.normalizeMatchingTime folded starts lengths)
+    let candidates = tripCandidates matcher (rowValue sourceTripRow "route_id") (sourceView prepared.normalizeMatchingTime calls [||] [||]) foldedView
     let assignments = Dictionary<string, CandidateMatch * RouteMethod * bool array * int64 option>(StringComparer.Ordinal)
     let mutable sourceHadMatch = false
     let mutable sourceHadSharedCandidate = false
@@ -265,7 +303,10 @@ let private matchSourceTrip (matcher: Matcher) (collected: Collected) (sourceTri
     if sourceHadSharedCandidate then collected.sharedDateCandidateSourceTrips.Add(sourceTripId) |> ignore
     if sourceHadCompatibleCandidate then collected.patternCompatibleSourceTrips.Add(sourceTripId) |> ignore
     if not sourceHadMatch then
-        if candidates.routeTripCount = 0 then
+        // A call at an unresolved stop place can only count as a pattern edit.
+        if calls |> Array.exists (fun call -> not (matcher.source.mappedPlaceBySourceStop.ContainsKey(call.stopId))) then
+            addDiagnostic prepared.diagnostics "trip_stop_unresolved" sourceTripId "At least one complete-pattern stop place is unresolved"
+        elif candidates.routeTripCount = 0 then
             addDiagnostic prepared.diagnostics "trip_route_candidate_unresolved" sourceTripId "No target trips exist on the candidate routes inside the GVD"
         elif candidates.primary.Length = 0 && candidates.structural.Length = 0 then
             addDiagnostic prepared.diagnostics "trip_signature_unresolved" sourceTripId "No candidate has an exact configured stop/time signature"
@@ -472,10 +513,7 @@ let matchTrips ({ prepared = prepared; source = source; indexes = indexes }: Inp
         let sourceTripId = rowValue sourceTripRow "trip_id"
         match source.dates.TryGetValue(rowValue sourceTripRow "service_id"), indexes.sourceCalls.TryGetValue(sourceTripId) with
         | (true, sourceActive), (true, calls) when anyDate sourceActive ->
-            if calls |> Array.forall (fun call -> source.mappedPlaceBySourceStop.ContainsKey(call.stopId)) then
-                matchSourceTrip matcher collected sourceTripRow sourceActive calls
-            else
-                addDiagnostic prepared.diagnostics "trip_stop_unresolved" sourceTripId "At least one complete-pattern stop place is unresolved"
+            matchSourceTrip matcher collected sourceTripRow sourceActive calls
         | (true, sourceActive), _ when anyDate sourceActive ->
             addDiagnostic prepared.diagnostics "trip_call_pattern_unavailable" sourceTripId "The active source trip has no eligible parsed call pattern"
         | _ -> ()

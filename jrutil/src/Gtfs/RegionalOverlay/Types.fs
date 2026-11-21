@@ -36,6 +36,9 @@ type StopMatchPolicy = {
 and [<CLIMutable>] ContextualStopInferencePolicy = {
     enabled: bool
     minimumMappedCalls: int
+    /// How many unresolved stop groups one trip may place from its context;
+    /// absent or zero means one.
+    maximumUnresolvedGroupsPerTrip: int
 }
 
 [<CLIMutable>]
@@ -85,6 +88,10 @@ type IdsAuthorityScope = {
 type TripMatchPolicy = {
     timeResolutionSeconds: int
     exactPatternProximity: bool
+    /// Bind a source trip to a base trip whose every call it also makes, in
+    /// order, and keep the source's further calls in the output: another post
+    /// of a stop place, or a stop the base leaves out.
+    keepSourceCalls: bool
     patternEdit: PatternEditPolicy
     sourceRevision: SourceRevisionPolicy
     minimumCapabilityTier: Dictionary<string, string>

@@ -994,6 +994,58 @@ type RegionalGtfsOverlayTests() =
         finally
             if Directory.Exists(root) then Directory.Delete(root, true)
 
+    [<DataTestMethod>]
+    [<DataRow("post", true)>]
+    [<DataRow("stop", true)>]
+    [<DataRow("post", false)>]
+    member _.``A trip with a call the base trip lacks binds to it and keeps the call``(further: string, collapse: bool) =
+        let root = Path.Combine(Path.GetTempPath(), "jrutil-overlay-repeated-" + Guid.NewGuid().ToString("N"))
+        try
+            let basePath, sourceZip, descriptor, policy = makeFixture root
+            let json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(policy))
+            json.["source"].["trip_match"].["keep_source_calls"] <- System.Text.Json.Nodes.JsonValue.Create(collapse)
+            write policy (json.ToJsonString())
+            // The base trip has one call at City Alpha and none at Gamma. The tram
+            // either departs from another post of City Alpha or also calls at Gamma.
+            let stops = Path.Combine(root, "source", "stops.txt")
+            write stops (File.ReadAllText(stops) + "sa2,City Alpha,50.0002,14.0002,0,,1,S,A1\n")
+            let stopTimes = Path.Combine(root, "source", "stop_times.txt")
+            let furtherStop = if further = "post" then "sa2" else "sg"
+            File.ReadAllText(stopTimes)
+                .Replace("st2_251201,09:10:05,09:10:05,sb,2,0,0,1000", "st2_251201,09:01:30,09:02:00," + furtherStop + ",2,0,0,100\nst2_251201,09:10:05,09:10:05,sb,3,0,0,1000")
+            |> write stopTimes
+            File.Delete(sourceZip)
+            ZipFile.CreateFromDirectory(Path.Combine(root, "source"), sourceZip)
+            write descriptor ($"{{\"retrieved_at\":\"2026-08-20T00:00:00+02:00\",\"payload_sha256\":\"{sha sourceZip}\"}}")
+            let binding: SourceBinding = { sourceId = "pid-gtfs"; payloadPath = sourceZip; descriptorPath = descriptor }
+            let output = Path.Combine(root, "output")
+            execute None policy 2026 binding basePath output |> ignore
+            JrUtil.Serving.Validation.validatePackage output |> ignore
+            let tramCalls =
+                (readGtfs output "stop_times.txt").Replace("\"", "").Split('\n')
+                |> Array.filter (fun line -> line.StartsWith("jdf:trip:bt2", StringComparison.Ordinal))
+            let tripMappings = File.ReadAllText(diagnosticPath output "traces" "source_to_output_trips.csv")
+            if collapse then
+                Assert.IsTrue(tripMappings.Contains("\"st2_251201\",\"jdf:trip:bt2\""), tripMappings)
+                Assert.AreEqual(3, tramCalls.Length, String.concat "\n" tramCalls)
+                Assert.IsTrue(tramCalls.[0].Contains("09:00:45,09:00:45"), tramCalls.[0])
+                Assert.IsTrue(tramCalls.[1].Contains("09:01:30,09:02:00"), tramCalls.[1])
+                Assert.IsTrue(tramCalls.[2].Contains("09:10:05,09:10:05"), tramCalls.[2])
+                let sequenceColumn = (readGtfs output "stop_times.txt").Replace("\"", "").Split('\n').[0].Split(',') |> Array.findIndex ((=) "stop_sequence")
+                CollectionAssert.AreEqual([| "1"; "2"; "3" |], tramCalls |> Array.map (fun line -> line.Split(',').[sequenceColumn]))
+                // Each source call maps to an output call of its own.
+                let callMappings =
+                    File.ReadAllLines(diagnosticPath output "traces" "source_to_output_calls.csv")
+                    |> Array.filter (fun line -> line.Contains("\"st2_251201\""))
+                    |> Array.map (fun line -> let fields = line.Replace("\"", "").Split(',') in fields.[2], fields.[5])
+                    |> Array.sort
+                CollectionAssert.AreEqual([| "1", "1"; "2", "2"; "3", "3" |], callMappings)
+            else
+                Assert.IsFalse(tripMappings.Contains("\"st2_251201\",\"jdf:trip:bt2\""), tripMappings)
+                Assert.AreEqual(2, tramCalls.Length, String.concat "\n" tramCalls)
+        finally
+            if Directory.Exists(root) then Directory.Delete(root, true)
+
     [<TestMethod>]
     member _.``Czech stop-name abbreviations match their verbose IDS JMK forms``() =
         let rank left right = JrUtil.RegionalOverlay.Names.stopNameMatchRank left right
@@ -1002,6 +1054,24 @@ type RegionalGtfsOverlayTests() =
         Assert.IsTrue(rank "Moravský Krumlov, náměstí" "Moravský Krumlov,nám." |> Option.isSome)
         Assert.IsTrue(rank "Svatobořice-Mistřín, restaurace" "Svatobořice-Mistřín,rest." |> Option.isSome)
         Assert.IsTrue(rank "Ochoz u Brna, obecní úřad" "Ochoz u Brna, železniční stanice" |> Option.isNone)
+        // A dotted abbreviation stands for any word it begins, however short.
+        Assert.IsTrue(rank "Brno, hlavní nádraží" "Brno,,hl.nádr." |> Option.isSome)
+        Assert.IsTrue(rank "Branišovice, státní silnice" "Branišovice,st.silnice" |> Option.isSome)
+        Assert.IsTrue(rank "Břeclav, Charvátská Nová Ves, Lednická" "Břeclav,Charvátská N.Ves,Lednická" |> Option.isSome)
+        Assert.IsTrue(rank "Blansko, autobusové stanoviště" "Blansko,aut.st." |> Option.isSome)
+        // Acronyms expand to several words.
+        Assert.IsTrue(rank "Starovice, zemědělské družstvo" "Starovice,ZD" |> Option.isSome)
+        Assert.IsTrue(rank "Jamolice, mateřská škola" "Jamolice,MŠ" |> Option.isSome)
+        // CIS writes a junction with its distance from the village.
+        Assert.IsTrue(rank "Miroslav, rozcestí" "Miroslav,rozc.4.0" |> Option.isSome)
+        Assert.IsTrue(rank "Slavkov u Brna, rozcestí k žel. st." "Slavkov u Brna,rozc.k žel.st.0.5" |> Option.isSome)
+        Assert.IsTrue(rank "Blansko, 9. května" "Blansko,9.května" |> Option.isSome)
+        // Leading locality segments may be left out by one side; other words may not.
+        Assert.IsTrue(rank "ZOO" "Brno,Bystrc,ZOO" |> Option.isSome)
+        Assert.AreEqual(Some 0, rank "Hevlín, škola" "Hevlín,,škola")
+        Assert.IsTrue(rank "Jevišovice, policie" "Jevišovice,odd.policie" |> Option.isNone)
+        Assert.IsTrue(rank "Bílovice nad Svitavou, náměstí" "Bílovice n.Svit.,u kapličky" |> Option.isNone)
+        Assert.IsTrue(rank "Poliklinika Budějovická" "Budějovická" |> Option.isNone)
         Assert.IsTrue(JrUtil.RegionalOverlay.Names.compatibleModeClasses "trolleybus" "bus")
         Assert.IsTrue(JrUtil.RegionalOverlay.Names.structurallyCompatibleRouteLabels "H4" "H")
         Assert.IsFalse(JrUtil.RegionalOverlay.Names.structurallyCompatibleRouteLabels "25" "2")

@@ -44,6 +44,15 @@ let selectionEncoding (value: OverlaySelection) =
         |> String.concat ";"
         value.arrivals |> Array.map (Option.defaultValue "") |> String.concat ";"
         value.departures |> Array.map (Option.defaultValue "") |> String.concat ";"
+        // Selections without repeated calls keep the encoding they always had.
+        if value.repeats.Length > 0 then
+            value.repeats
+            |> Array.map (fun call ->
+                String.concat "@" [
+                    string call.targetOrdinal; call.outputStopId; call.arrival; call.departure
+                    call.distance |> Option.map (fun item -> item.ToString(CultureInfo.InvariantCulture)) |> Option.defaultValue ""
+                ])
+            |> String.concat ";"
     ]
 
 let selectionKey selection =

@@ -96,6 +96,7 @@ type MatchBinding = {
     sourceCalls: CallValue array
     sourceShapeId: string option
     sourceOrdinalByTarget: int option array
+    sourceRunLengthByTarget: int array
     editCount: int
     firstDepartureDelta: int
     aggregateTimeDelta: int64
@@ -105,6 +106,18 @@ type MatchBinding = {
     with
     /// The method name reports and mappings carry.
     member this.method = RouteMethod.name this.routeMethod + "+" + TripTier.name this.tier
+
+/// A source call the base trip does not have, kept in the output after the
+/// target call it follows: another post of that stop place, or a stop the
+/// base leaves out.
+type RepeatedCall = {
+    targetOrdinal: int
+    sourceOrdinal: int
+    outputStopId: string
+    arrival: string
+    departure: string
+    distance: decimal option
+}
 
 type OverlaySelection = {
     factKey: string
@@ -119,6 +132,8 @@ type OverlaySelection = {
     sourceOrdinalByTarget: int option array
     arrivals: string option array
     departures: string option array
+    /// Calls added after their target call, in call order.
+    repeats: RepeatedCall array
 }
 
 type StopInferenceEvidence = {
@@ -148,7 +163,11 @@ type CandidateScoreReport = {
 type CandidateMatch = {
     tripId: string
     tier: TripTier
+    /// The first source call aligned with each target call.
     sourceOrdinalByTarget: int option array
+    /// How many consecutive source calls each target call stands for; empty
+    /// when every aligned target call stands for one.
+    sourceRunLengthByTarget: int array
     editCount: int
     alignedCallCount: int
     firstDepartureDelta: int
@@ -157,6 +176,12 @@ type CandidateMatch = {
     maximumTimeDelta: int
     squaredTimeDelta: int64
 }
+
+/// The source calls a target call stands for.
+let sourceRun (ordinals: int option array) (runLengths: int array) targetOrdinal =
+    match ordinals.[targetOrdinal] with
+    | Some first -> struct (first, (if runLengths.Length = 0 then 1 else runLengths.[targetOrdinal]))
+    | None -> struct (0, 0)
 
 type PendingAmbiguity = {
     sourceTripId: string

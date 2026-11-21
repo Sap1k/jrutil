@@ -19,6 +19,9 @@ type Context = {
     usedStopIds: HashSet<string>
     usedRouteIds: HashSet<string>
     usedAgencyIds: HashSet<string>
+    /// For output trips that keep repeated source calls: each base stop
+    /// sequence and the output sequences of the calls it became.
+    resequencedCalls: Dictionary<string, Dictionary<int, int array>>
     /// Reviewed route presentation overrides; they win over source values.
     routePresentationRules: JrUtil.RouteRules.PresentationRuleSet
 }
