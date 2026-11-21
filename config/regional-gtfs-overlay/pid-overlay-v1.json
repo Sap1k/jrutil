@@ -1,16 +1,21 @@
 {
-  "schema_version": 3,
-  "calibration": true,
-  "publication_enabled": false,
-  "minimum_coverage": {},
+  "schema_version": 4,
   "source": {
     "source_id": "pid-gtfs",
-    "excluded_route_types": ["2"],
+    "excluded_route_types": [
+      "2"
+    ],
     "maximum_snapshot_skew_days": 7,
     "route_join": {
       "table": "route_sub_agencies.txt",
-      "source_keys": ["route_id", "sub_agency_id"],
-      "lookup_keys": ["route_id", "sub_agency_id"],
+      "source_keys": [
+        "route_id",
+        "sub_agency_id"
+      ],
+      "lookup_keys": [
+        "route_id",
+        "sub_agency_id"
+      ],
       "value_column": "route_licence_number",
       "target_namespace": "cis_line_id"
     },
@@ -21,17 +26,12 @@
       "split_flat_groups_by_name": true,
       "contextual_inference": {
         "enabled": true,
-        "maximum_unresolved_groups_per_trip": 1,
-        "require_equal_call_count": true,
-        "minimum_mapped_calls": 1,
-        "conflict_policy": "quarantine"
+        "minimum_mapped_calls": 1
       }
     },
     "trip_match": {
       "time_resolution_seconds": 60,
-      "time_rounding": "floor",
       "exact_pattern_proximity": true,
-      "require_unique_best": true,
       "pattern_edit": {
         "enabled": true,
         "maximum_edits": 3,
@@ -51,16 +51,31 @@
       }
     },
     "trip_set_authority": {
-      "modes": ["bus", "tram", "metro", "trolleybus", "ferry"],
-      "source_native_modes": ["bus", "tram", "metro", "trolleybus", "ferry"],
-      "ids_system_ids": ["30001"],
-      "excluded_cis_lines": ["199041", "199042"],
-      "maximum_silenced_lines": 20,
-      "route_match_tier": "companion_assertion"
+      "modes": [
+        "bus",
+        "tram",
+        "metro",
+        "trolleybus",
+        "ferry"
+      ],
+      "source_native_modes": [
+        "bus",
+        "tram",
+        "metro",
+        "trolleybus",
+        "ferry"
+      ],
+      "ids_system_ids": [
+        "30001"
+      ],
+      "excluded_cis_lines": [
+        "199041",
+        "199042"
+      ],
+      "maximum_silenced_lines": 20
     },
     "route_match_tiers": [
       "companion_assertion",
-      "reviewed_override",
       "structural_trip_evidence"
     ],
     "trip_match_tiers": [
@@ -68,30 +83,21 @@
       "pattern_endpoints",
       "pattern_first",
       "pattern_nearest",
-      "pattern_edit_nearest",
-      "reviewed_override"
+      "pattern_edit_nearest"
     ],
-    "never_inherit": ["pathways.txt", "levels.txt"],
-    "capabilities": {
-      "stop_coordinates": { "mode": "authoritative", "priority": 100 },
-      "boarding_points": { "mode": "authoritative", "priority": 100 },
-      "call_boarding_points": { "mode": "authoritative", "priority": 100 },
-      "shapes": { "mode": "authoritative", "priority": 100 },
-      "route_short_name": { "mode": "preferred", "priority": 50 },
-      "route_long_name": { "mode": "preferred", "priority": 50 },
-      "route_color": { "mode": "preferred", "priority": 50 },
-      "route_text_color": { "mode": "preferred", "priority": 50 },
-      "transfers": { "mode": "additive", "priority": 50 },
-      "stop_names": { "mode": "disabled", "priority": 0 },
-      "trip_headsigns": { "mode": "disabled", "priority": 0 },
-      "trip_short_names": { "mode": "disabled", "priority": 0 },
-      "schedules": { "mode": "authoritative", "priority": 100 },
-      "calendars": { "mode": "disabled", "priority": 0 },
-      "agencies": { "mode": "disabled", "priority": 0 }
-    },
+    "capabilities": [
+      "stop_coordinates",
+      "boarding_points",
+      "call_boarding_points",
+      "shapes",
+      "route_short_name",
+      "route_long_name",
+      "route_color",
+      "route_text_color",
+      "transfers",
+      "schedules"
+    ],
     "overrides": {
-      "routes": "pid-route-overrides.csv",
-      "trips": "pid-trip-overrides.csv",
       "stops": "pid-stop-overrides.csv"
     }
   }

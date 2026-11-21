@@ -7,7 +7,6 @@ open JrUtil.Hashing
 open System.Collections.Generic
 open System.Globalization
 open System.IO
-open System.Text
 
 open JrUtil.RegionalOverlay.Types
 open JrUtil.RegionalOverlay.Model

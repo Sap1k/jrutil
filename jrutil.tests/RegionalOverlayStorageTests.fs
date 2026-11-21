@@ -123,10 +123,10 @@ type RegionalOverlayStorageTests() =
             editCount = 0; alignedCallCount = 2; firstDepartureDelta = delta
             aggregateTimeDelta = int64 delta; durationDelta = 0; maximumTimeDelta = delta; squaredTimeDelta = int64 delta * int64 delta
         }
-        let a, b = candidate "a" "exact" 10, candidate "b" "exact" 10
-        let tierRank tier = if tier = "exact" then 0 else 1
+        let a, b = candidate "a" FullSignature 10, candidate "b" FullSignature 10
+        let tierRank tier = if tier = FullSignature then 0 else 1
         let choose = TripMatching.chooseCandidates tierRank
-        match choose (fun _ -> "same") [| a; b; candidate "c" "fallback" 0 |] with
+        match choose (fun _ -> "same") [| a; b; candidate "c" PatternEditNearest 0 |] with
         | TripMatching.Accepted(winners, _) -> Assert.AreEqual(2, winners.Length)
         | other -> Assert.Fail($"Unexpected decision {other}")
         match choose (fun candidate -> candidate.tripId) [| a; b |] with

@@ -5,9 +5,7 @@ module internal JrUtil.RegionalOverlay.SourceAnalysis
 open System
 open System.Collections.Generic
 open System.Globalization
-open System.IO
 open System.Text.RegularExpressions
-open NodaTime
 open Serilog
 
 open JrUtil.GtfsModel
@@ -64,7 +62,7 @@ type Result = {
 /// They must not be retained by projection or output/report records.
 type MatchingIndexes = {
     joinedValues: Dictionary<string, ResizeArray<string>>
-    routeCandidates: Dictionary<string, (string array * string)>
+    routeCandidates: Dictionary<string, (string array * RouteMethod)>
     structuralRouteCandidates: Dictionary<string, string array>
     baseSignatures: Dictionary<string, BaseSignature>
     sourceCalls: Dictionary<string, CallValue array>
@@ -72,6 +70,11 @@ type MatchingIndexes = {
     baseTripIdsByRouteAndPattern: Dictionary<struct (string * string), ResizeArray<string>>
     candidateEquivalenceKey: CandidateMatch -> string
 }
+
+/// The mode class of a source trip's route.
+let modeOfTrip (source: Result) sourceTripId =
+    let routeId = rowValue source.tripsById.[sourceTripId] "route_id"
+    modeClass (rowValue source.routes.[routeId] "route_type")
 
 /// GTFS dates a trip by its service day, so PID runs Monday night's 00:30 tram as
 /// Monday 24:30. JDF dates it by departure: Tuesday 00:30. Fold source trips that
@@ -179,6 +182,383 @@ let private extendIdsAuthority (prepared: InputPreparation.Result) (authorityDat
                     "Regional overlay IDS authority: source={Source}; system={System}; lines={Lines}; silenced={Silenced}",
                     scope.sourceId, scope.idsSystemId, lines.Length, silenced.Length)
 
+/// What the stages of source analysis share. Stop places resolved later (from trip
+/// context, or as source-native places) are added to `mappedPlaceBySourceStop`.
+type private Context = {
+    prepared: InputPreparation.Result
+    routes: IDictionary<string, CsvRow>
+    tripRows: CsvRow array
+    dates: Dictionary<string, DateSet.Dates>
+    stopGroupById: IDictionary<string, StopGroup>
+    groupByMember: Dictionary<string, string>
+    stopMatching: StopMatching.Result
+    routeMatching: RouteMatching.Result
+    mutable mappedPlaceBySourceStop: Map<string, string>
+}
+
+let private tripSetAuthorityAllowed (prepared: InputPreparation.Result) (row: CsvRow) mode =
+    match row.TryGetValue("overlay_trip_set_authority_allowed") with
+    | true, value -> value = "1"
+    | _ -> prepared.policy.source.tripSetAuthority.modes |> Array.contains mode
+
+let private sourceNativeAllowed (prepared: InputPreparation.Result) (row: CsvRow) mode =
+    match row.TryGetValue("overlay_source_native_allowed") with
+    | true, value -> value = "1"
+    | _ -> prepared.policy.source.tripSetAuthority.sourceNativeModes |> Array.contains mode
+
+/// Place stop groups that names and coordinates left unresolved from the trips
+/// calling them, then let the source correct approximate base stops. Returns the
+/// inference evidence and the corrected base stop places.
+let private resolveStopsFromContext (context: Context) =
+    let prepared = context.prepared
+    let sourceTripRows = context.tripRows
+    let sourceDates = context.dates
+    let sourceRoutes = context.routes
+    let routeMatching = context.routeMatching
+    let stopMatching = context.stopMatching
+    let sourceStopGroupById = context.stopGroupById
+    let sourceGroupByMember = context.groupByMember
+    let refreshSourceCallPlaces () =
+        for calls in routeMatching.sourceCalls.Values do
+            for index in 0 .. calls.Length - 1 do
+                let call = calls.[index]
+                let place = context.mappedPlaceBySourceStop |> Map.tryFind call.stopId |> Option.defaultValue call.stopId
+                if place <> call.stopPlaceId then calls.[index] <- { call with stopPlaceId = place }
+
+    let stopInferenceEvidence = ResizeArray<StopInferenceEvidence>()
+    let inferenceGap (calls: CallValue array) =
+        let groups = calls |> Array.choose (fun call ->
+            match sourceGroupByMember.TryGetValue(call.stopId) with | true, group -> Some group | _ -> None)
+        let unresolved = groups |> Array.filter (stopMatching.stopGroupMatches.ContainsKey >> not)
+        let unresolvedGroups = Array.distinct unresolved
+        let policy = prepared.policy.source.stopMatch.contextualInference
+        // Context can place exactly one unresolved stop group per trip.
+        if unresolvedGroups.Length <> 1 || calls.Length - unresolved.Length < policy.minimumMappedCalls then None
+        else
+            let group = unresolvedGroups.[0]
+            let ordinals = calls |> Array.indexed |> Array.choose (fun (index, call) ->
+                match sourceGroupByMember.TryGetValue(call.stopId) with
+                | true, candidate when candidate = group -> Some index
+                | _ -> None)
+            match ordinals with
+            | [| ordinal |] -> Some (group, ordinal, routeMatching.sourcePattern calls)
+            | _ -> None
+
+    let collectStopProposals () =
+        let proposed = Dictionary<string, ResizeArray<StopInferenceEvidence>>(StringComparer.Ordinal)
+        for sourceTripRow in sourceTripRows do
+            let sourceTripId = rowValue sourceTripRow "trip_id"
+            let sourceRouteId = rowValue sourceTripRow "route_id"
+            let sourceServiceId = rowValue sourceTripRow "service_id"
+            match sourceDates.TryGetValue(sourceServiceId), routeMatching.sourceCalls.TryGetValue(sourceTripId) with
+            | (true, sourceActive), (true, calls) when anyDate sourceActive ->
+                match inferenceGap calls with
+                | None -> ()
+                | Some (unresolvedGroup, unresolvedOrdinal, sourcePlaces) ->
+                    let sourceArrivals, sourceDepartures = sourceTimeArrays calls
+                    let primaryRoutes, _ = routeMatching.routeCandidates.[sourceRouteId]
+                    let candidateRoutes =
+                        Seq.append primaryRoutes routeMatching.structuralRouteCandidates.[sourceRouteId]
+                        |> Seq.distinct
+                        |> Seq.toArray
+                    let candidates =
+                        candidateRoutes
+                        |> Array.collect (fun routeId ->
+                            match routeMatching.baseTripIdsByRouteAndLength.TryGetValue(struct (routeId, calls.Length)) with
+                            | true, values -> values |> Seq.toArray
+                            | _ -> [||])
+                        |> Array.distinct
+                        |> Array.choose (fun tripId ->
+                            let fingerprint = routeMatching.baseSignatures.[tripId]
+                            let targetDates = prepared.baseDates.[prepared.baseTrips.[tripId].serviceId]
+                            let knownPositionsMatch =
+                                sourcePlaces
+                                |> Array.mapi (fun index place ->
+                                    match place with
+                                    | Some sourcePlace -> sourcePlace = fingerprint.pattern.[index]
+                                    | None -> true)
+                                |> Array.forall id
+                            if datesOverlap sourceActive targetDates && knownPositionsMatch then
+                                let alignment = identityAlignment calls.Length
+                                let firstDelta, aggregateDelta, durationDelta, maximumDelta, squaredDelta, alignedCalls =
+                                    candidateTimeScore sourceArrivals sourceDepartures fingerprint alignment
+                                Some ({
+                                    tripId = tripId
+                                    tier = ContextStopInference
+                                    sourceOrdinalByTarget = alignment
+                                    editCount = 0
+                                    alignedCallCount = alignedCalls
+                                    firstDepartureDelta = firstDelta
+                                    aggregateTimeDelta = aggregateDelta
+                                    durationDelta = durationDelta
+                                    maximumTimeDelta = maximumDelta
+                                    squaredTimeDelta = squaredDelta
+                                }, fingerprint.pattern.[unresolvedOrdinal])
+                            else None)
+                    if candidates.Length > 0 then
+                        let bestScore = candidates |> Array.map (fst >> candidateRank) |> Array.min
+                        let best = candidates |> Array.filter (fst >> candidateRank >> (=) bestScore)
+                        let targets = best |> Array.map snd |> Array.distinct
+                        if targets.Length = 1 then
+                            let evidence = {
+                                sourceGroupId = unresolvedGroup
+                                sourceTripId = sourceTripId
+                                targetStopPlaceId = targets.[0]
+                                sourceCallOrdinal = unresolvedOrdinal + 1
+                                method = "trip_context_unique"
+                            }
+                            match proposed.TryGetValue(unresolvedGroup) with
+                            | true, values -> values.Add(evidence)
+                            | _ ->
+                                let values = ResizeArray<StopInferenceEvidence>()
+                                values.Add(evidence)
+                                proposed.[unresolvedGroup] <- values
+            | _ -> ()
+        proposed
+
+    let resolveStopProposals (proposed: Dictionary<string, ResizeArray<StopInferenceEvidence>>) = [|
+        for KeyValue(groupId, evidence) in proposed do
+            let targets = evidence |> Seq.map (fun value -> value.targetStopPlaceId) |> Seq.distinct |> Seq.toArray
+            let sourceGroup = sourceStopGroupById.[groupId]
+            match targets with
+            | [| targetId |] when prepared.baseStopGroupById.ContainsKey(targetId) ->
+                let target = prepared.baseStopGroupById.[targetId]
+                if prepared.approximateStopName target.name || stopNameMatchRank sourceGroup.name target.name |> Option.isSome then
+                    yield sourceGroup, targetId, target, evidence
+                else
+                    addDiagnostic prepared.diagnostics "stop_context_name_conflict" groupId $"Context target {target.name} is incompatible with {sourceGroup.name}"
+            | targets when targets.Length > 1 ->
+                addDiagnostic prepared.diagnostics "stop_context_conflict" groupId $"Context proposed {targets.Length} target stop places"
+            | _ -> ()
+    |]
+
+    let applyStopProposals accepted =
+        for sourceGroup, targetId, target, evidence in accepted do
+            let groupId = sourceGroup.groupId
+            stopMatching.stopGroupMatches.[groupId] <- targetId
+            stopMatching.stopMatchMethods.[groupId] <- if prepared.approximateStopName target.name then "trip_context_gtfs_authoritative" else "trip_context_unique"
+            prepared.stopGroupDistance sourceGroup target |> Option.iter (fun distance ->
+                stopMatching.stopMatchDistances.[groupId] <- distance
+                if distance > prepared.policy.source.stopMatch.maximumDistanceMetres && not (prepared.approximateStopName target.name) then
+                    addDiagnostic prepared.diagnostics "stop_context_distance_warning" groupId $"Strong route/call context accepted a compatible established stop at {distance:F1} m")
+            for memberRow in sourceGroup.members do
+                context.mappedPlaceBySourceStop <- context.mappedPlaceBySourceStop |> Map.add (rowValue memberRow "stop_id") targetId
+            stopInferenceEvidence.AddRange(evidence)
+
+    if prepared.policy.source.stopMatch.contextualInference.enabled then
+        let mutable iteration = 0
+        let mutable changed = true
+        while changed do
+            iteration <- iteration + 1
+            let accepted = collectStopProposals () |> resolveStopProposals
+            applyStopProposals accepted
+            changed <- accepted.Length > 0
+            if changed then refreshSourceCallPlaces ()
+            logProgress $"infer-stop-context-{iteration}" (int64 accepted.Length) None
+        Log.Information(
+            "Regional overlay contextual stop inference: inferred_groups={InferredGroups}; evidence_rows={EvidenceRows}",
+            stopInferenceEvidence |> Seq.map (fun value -> value.sourceGroupId) |> Seq.distinct |> Seq.length,
+            stopInferenceEvidence.Count)
+    let authoritativeGtfsStopCorrections = Dictionary<string, StopGroup>(StringComparer.Ordinal)
+    let approximateMatchedGroups =
+        stopMatching.stopGroupMatches
+        |> Seq.choose (fun pair ->
+            if prepared.baseStopGroupById.ContainsKey(pair.Value) && prepared.approximateStopName prepared.baseStopGroupById.[pair.Value].name then
+                Some (pair.Value, sourceStopGroupById.[pair.Key])
+            else None)
+        |> Seq.groupBy fst
+    for targetId, matches in approximateMatchedGroups do
+        let sourceGroups = matches |> Seq.map snd |> Seq.distinctBy (fun group -> group.groupId) |> Seq.toArray
+        if sourceGroups.Length = 1 then
+            authoritativeGtfsStopCorrections.[targetId] <- sourceGroups.[0]
+            let groupId = sourceGroups.[0].groupId
+            if not (stopMatching.stopMatchMethods.[groupId].Contains("gtfs_authoritative", StringComparison.Ordinal)) then
+                stopMatching.stopMatchMethods.[groupId] <- stopMatching.stopMatchMethods.[groupId] + "+gtfs_authoritative"
+            addDiagnostic prepared.diagnostics "stop_approximate_corrected" targetId $"{prepared.binding.sourceId} GTFS supplied authoritative name and geodata: {sourceGroups.[0].name}"
+        else
+            // A provisional JDF row cannot collapse multiple distinct source places.
+            for sourceGroup in sourceGroups do
+                stopMatching.stopGroupMatches.Remove(sourceGroup.groupId) |> ignore
+                stopMatching.stopMatchMethods.Remove(sourceGroup.groupId) |> ignore
+                stopMatching.stopMatchDistances.Remove(sourceGroup.groupId) |> ignore
+                for memberRow in sourceGroup.members do
+                    context.mappedPlaceBySourceStop <- context.mappedPlaceBySourceStop |> Map.remove (rowValue memberRow "stop_id")
+            addDiagnostic prepared.diagnostics "stop_approximate_split" targetId $"{sourceGroups.Length} {prepared.binding.sourceId} places remain distinct instead of sharing one approximate JDF stop"
+    refreshSourceCallPlaces ()
+    stopInferenceEvidence, authoritativeGtfsStopCorrections
+
+/// Stop places only the source knows, for trips it may run on its own.
+let private nativeStopPlaces (context: Context) (pinnedStopPlaces: IReadOnlyDictionary<string, string>) =
+    let prepared = context.prepared
+    let sourceTripRows = context.tripRows
+    let sourceDates = context.dates
+    let sourceRoutes = context.routes
+    let routeMatching = context.routeMatching
+    let stopMatching = context.stopMatching
+    let sourceStopGroupById = context.stopGroupById
+    let sourceGroupByMember = context.groupByMember
+    let sourceNativeAllowed = sourceNativeAllowed prepared
+    let sourceNativeStopPlaces = Dictionary<string, StopGroup>(StringComparer.Ordinal)
+    for sourceTripRow in sourceTripRows do
+        let sourceRouteId = rowValue sourceTripRow "route_id"
+        let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
+        match sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(rowValue sourceTripRow "trip_id") with
+        | (true, activeDates), (true, calls)
+            when sourceNativeAllowed sourceTripRow sourceMode && anyDate activeDates ->
+            for call in calls do
+                if not (context.mappedPlaceBySourceStop.ContainsKey(call.stopId)) then
+                    let groupId = sourceGroupByMember.[call.stopId]
+                    let group = sourceStopGroupById.[groupId]
+                    let sourceId = sourceIdentity prepared.binding.sourceId group.members.[0]
+                    let outputPlaceId =
+                        match pinnedStopPlaces.TryGetValue(pinnedPlaceKey sourceId groupId) with
+                        | true, placeId -> placeId
+                        | false, _ -> sourceStopPlaceId sourceId groupId
+                    sourceNativeStopPlaces.[outputPlaceId] <- group
+                    stopMatching.stopGroupMatches.[groupId] <- outputPlaceId
+                    stopMatching.stopMatchMethods.[groupId] <- "source_native"
+                    for memberRow in group.members do
+                        context.mappedPlaceBySourceStop <- context.mappedPlaceBySourceStop |> Map.add (rowValue memberRow "stop_id") outputPlaceId
+        | _ -> ()
+    sourceNativeStopPlaces
+
+/// Decide on which CIS lines and dates the source owns the trip set, and project
+/// its trips there. Returns derived source routes, authority dates per line and
+/// the projected trips.
+let private tripSetAuthority (context: Context) =
+    let prepared = context.prepared
+    let sourceTripRows = context.tripRows
+    let sourceDates = context.dates
+    let sourceRoutes = context.routes
+    let routeMatching = context.routeMatching
+    let stopMatching = context.stopMatching
+    let sourceStopGroupById = context.stopGroupById
+    let sourceGroupByMember = context.groupByMember
+    let tripSetAuthorityAllowed = tripSetAuthorityAllowed prepared
+    let sourceNativeAllowed = sourceNativeAllowed prepared
+    let sourceNativeRoutes = Dictionary<string, CsvRow * string>(StringComparer.Ordinal)
+    let authorityCandidates = ResizeArray<string * string * string array * DateSet.Dates * CallValue array * CsvRow>()
+    let blockedAuthorityDates = HashSet<struct (string * int)>()
+    // A CIS line can have a regular and a detour (výluka) base route. Source trips
+    // belong to the regular one; trip matching still considers both.
+    let preferRegularRoutes (routes: string array) =
+        let regular = routes |> Array.filter (fun route -> not (prepared.baseDetourRoutes.Contains route))
+        if regular.Length = 0 then routes else regular
+    let authorityIdentity (sourceTripRow: CsvRow) =
+        match routeMatching.cisForSourceTrip sourceTripRow with
+        | Some cisLineId -> Some (cisLineId, preferRegularRoutes (routeMatching.directBaseRoutesForSourceTrip sourceTripRow))
+        | None ->
+            let sourceRouteId = rowValue sourceTripRow "route_id"
+            match routeMatching.routeCandidates.TryGetValue(sourceRouteId) with
+            | true, (routes, StructuralTripEvidence) when (preferRegularRoutes routes).Length = 1 ->
+                let routes = preferRegularRoutes routes
+                match prepared.baseCisByRoute.TryGetValue(routes.[0]) with
+                | true, cisLineId -> Some (cisLineId, routes)
+                | _ -> None
+            | _ ->
+                let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
+                if sourceNativeAllowed sourceTripRow sourceMode then
+                    let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                    Some ("source:" + sourceId + ":" + originalIdentity "route_id" sourceRoutes.[sourceRouteId], [||])
+                else None
+    let assertedCisBySourceRoute =
+        sourceTripRows
+        |> Seq.choose (fun row -> authorityIdentity row |> Option.map (fun (cis, _) -> rowValue row "route_id", cis))
+        |> Seq.groupBy fst
+        |> Seq.map (fun (sourceRouteId, values) -> sourceRouteId, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
+        |> dict
+    let blockAuthorityDates cisLineId (activeDates: DateSet.Dates) =
+        for dateIndex in 0 .. activeDates.Length - 1 do
+            if activeDates.[dateIndex] then blockedAuthorityDates.Add(struct (cisLineId, dateIndex)) |> ignore
+    for sourceTripRow in sourceTripRows do
+        let sourceTripId = rowValue sourceTripRow "trip_id"
+        let sourceRouteId = rowValue sourceTripRow "route_id"
+        let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
+        if tripSetAuthorityAllowed sourceTripRow sourceMode then
+            match authorityIdentity sourceTripRow, sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(sourceTripId) with
+            | Some (cisLineId, directTargetRoutes), (true, activeDates), (true, calls) when anyDate activeDates ->
+                let targetRoutes =
+                    if directTargetRoutes.Length = 1
+                       && modeClass (rowValue prepared.baseRoutes.[directTargetRoutes.[0]] "route_type") = sourceMode then directTargetRoutes
+                    elif directTargetRoutes.Length = 1
+                         && compatibleModeClasses (modeClass (rowValue prepared.baseRoutes.[directTargetRoutes.[0]] "route_type")) sourceMode then
+                        // JDF represents trolleybus service as road/bus. Preserve the
+                        // source mode on a derived route while retaining the proven
+                        // national CIS identity and replacing its baseline dates.
+                        let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                        let outputRouteId = sourceRouteOutputId sourceId (originalIdentity "route_id" sourceRoutes.[sourceRouteId]) cisLineId
+                        sourceNativeRoutes.[outputRouteId] <- sourceRoutes.[sourceRouteId], cisLineId
+                        [| outputRouteId |]
+                    elif sourceNativeAllowed sourceTripRow sourceMode then
+                        let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                        let outputRouteId = sourceRouteOutputId sourceId (originalIdentity "route_id" sourceRoutes.[sourceRouteId]) cisLineId
+                        sourceNativeRoutes.[outputRouteId] <- sourceRoutes.[sourceRouteId], cisLineId
+                        [| outputRouteId |]
+                    else [||]
+                if targetRoutes.Length = 0 then
+                    blockAuthorityDates cisLineId activeDates
+                    addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The asserted CIS line has no compatible base route"
+                elif calls |> Array.forall (fun call -> context.mappedPlaceBySourceStop.ContainsKey(call.stopId)) then
+                    authorityCandidates.Add(sourceTripId, cisLineId, targetRoutes, activeDates, calls, sourceTripRow)
+                else
+                    blockAuthorityDates cisLineId activeDates
+                    addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "At least one source call has no resolved stop place"
+            | Some (cisLineId, _), (true, activeDates), _ when anyDate activeDates ->
+                blockAuthorityDates cisLineId activeDates
+                addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The active source trip has no call pattern"
+            | None, (true, activeDates), _ when anyDate activeDates ->
+                match assertedCisBySourceRoute.TryGetValue(sourceRouteId) with
+                | true, cisLineIds ->
+                    for cisLineId in cisLineIds do blockAuthorityDates cisLineId activeDates
+                | _ -> ()
+                addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The active source trip has no unique companion CIS line assertion"
+            | _ -> ()
+    let authorityDatesByCis = Dictionary<string, bool array>(StringComparer.Ordinal)
+    for _, cisLineId, _, activeDates, _, _ in authorityCandidates do
+        let dates =
+            match authorityDatesByCis.TryGetValue(cisLineId) with
+            | true, values -> values
+            | _ ->
+                let values = emptyDates prepared.window
+                authorityDatesByCis.[cisLineId] <- values
+                values
+        for dateIndex in 0 .. activeDates.Length - 1 do
+            if activeDates.[dateIndex] then dates.[dateIndex] <- true
+    extendIdsAuthority prepared authorityDatesByCis
+    for struct (cisLineId, dateIndex) in blockedAuthorityDates do
+        match authorityDatesByCis.TryGetValue(cisLineId) with
+        | true, dates -> dates.[dateIndex] <- false
+        | _ -> ()
+    let sourceTripProjections =
+        authorityCandidates
+        |> Seq.choose (fun (sourceTripId, cisLineId, targetRoutes, activeDates, calls, sourceTripRow) ->
+            let dates = emptyDates prepared.window
+            match authorityDatesByCis.TryGetValue(cisLineId) with
+            | true, authoritativeDates ->
+                for dateIndex in 0 .. activeDates.Length - 1 do
+                    dates.[dateIndex] <- activeDates.[dateIndex] && authoritativeDates.[dateIndex]
+            | _ -> ()
+            if anyDate dates then
+                Some {
+                    sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
+                    sourceIds = [| sourceIdentity prepared.binding.sourceId sourceTripRow |]
+                    sourceTripReferences = [| sourceIdentity prepared.binding.sourceId sourceTripRow, originalIdentity "trip_id" sourceTripRow |]
+                    sourceTripId = sourceTripId
+                    sourceRouteId = rowValue sourceTripRow "route_id"
+                    targetRouteId = targetRoutes.[0]
+                    cisLineId = cisLineId
+                    dates = DateSet.Dates.Of dates
+                    sourceCalls = calls
+                    sourceShapeId = optionText (rowValue sourceTripRow "shape_id")
+                    sourceRow = sourceTripRow
+                }
+            else None)
+        |> Seq.toArray
+    Log.Information(
+        "Regional overlay trip-set authority: candidate_trips={CandidateTrips}; projected_trips={ProjectedTrips}; authoritative_lines={AuthoritativeLines}; blocked_line_dates={BlockedLineDates}",
+        authorityCandidates.Count, sourceTripProjections.Length, authorityDatesByCis.Count, blockedAuthorityDates.Count)
+    sourceNativeRoutes, authorityDatesByCis, sourceTripProjections
+
 /// Collect source-qualified stop, route and authority evidence without writing output.
 let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input) : Result * MatchingIndexes =
     let sourceAgencyRows = requireTable prepared.binding.payloadPath "agency.txt"
@@ -259,7 +639,6 @@ let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input
         sourceStopGroups = sourceStopGroups
         sourceGroupByMember = sourceGroupByMember
     }
-    let mutable mappedPlaceBySourceStop = stopMatching.mappedPlaceBySourceStop
 
     let routeMatching = RouteMatching.buildCandidates {
         prepared = prepared
@@ -273,326 +652,21 @@ let analyze ({ prepared = prepared; pinnedStopPlaces = pinnedStopPlaces }: Input
     let foldedTrips = foldAfterMidnightTrips prepared.window sourceDates sourceTripRows routeMatching.sourceCalls
     Log.Information("Regional overlay after-midnight source trips folded onto the next day: trips={Trips}", foldedTrips)
 
-    let refreshSourceCallPlaces () =
-        for calls in routeMatching.sourceCalls.Values do
-            for index in 0 .. calls.Length - 1 do
-                let call = calls.[index]
-                let place = mappedPlaceBySourceStop |> Map.tryFind call.stopId |> Option.defaultValue call.stopId
-                if place <> call.stopPlaceId then calls.[index] <- { call with stopPlaceId = place }
-
-    let stopInferenceEvidence = ResizeArray<StopInferenceEvidence>()
-    let inferenceGap (calls: CallValue array) =
-        let groups = calls |> Array.choose (fun call ->
-            match sourceGroupByMember.TryGetValue(call.stopId) with | true, group -> Some group | _ -> None)
-        let unresolved = groups |> Array.filter (stopMatching.stopGroupMatches.ContainsKey >> not)
-        let unresolvedGroups = Array.distinct unresolved
-        let policy = prepared.policy.source.stopMatch.contextualInference
-        // Context can place exactly one unresolved stop group per trip.
-        if unresolvedGroups.Length <> 1 || calls.Length - unresolved.Length < policy.minimumMappedCalls then None
-        else
-            let group = unresolvedGroups.[0]
-            let ordinals = calls |> Array.indexed |> Array.choose (fun (index, call) ->
-                match sourceGroupByMember.TryGetValue(call.stopId) with
-                | true, candidate when candidate = group -> Some index
-                | _ -> None)
-            match ordinals with
-            | [| ordinal |] -> Some (group, ordinal, routeMatching.sourcePattern calls)
-            | _ -> None
-
-    let collectStopProposals () =
-        let proposed = Dictionary<string, ResizeArray<StopInferenceEvidence>>(StringComparer.Ordinal)
-        for sourceTripRow in sourceTripRows do
-            let sourceTripId = rowValue sourceTripRow "trip_id"
-            let sourceRouteId = rowValue sourceTripRow "route_id"
-            let sourceServiceId = rowValue sourceTripRow "service_id"
-            match sourceDates.TryGetValue(sourceServiceId), routeMatching.sourceCalls.TryGetValue(sourceTripId) with
-            | (true, sourceActive), (true, calls) when anyDate sourceActive ->
-                match inferenceGap calls with
-                | None -> ()
-                | Some (unresolvedGroup, unresolvedOrdinal, sourcePlaces) ->
-                    let sourceArrivals, sourceDepartures = sourceTimeArrays calls
-                    let primaryRoutes, _ = routeMatching.routeCandidates.[sourceRouteId]
-                    let candidateRoutes =
-                        Seq.append primaryRoutes routeMatching.structuralRouteCandidates.[sourceRouteId]
-                        |> Seq.distinct
-                        |> Seq.toArray
-                    let candidates =
-                        candidateRoutes
-                        |> Array.collect (fun routeId ->
-                            match routeMatching.baseTripIdsByRouteAndLength.TryGetValue(struct (routeId, calls.Length)) with
-                            | true, values -> values |> Seq.toArray
-                            | _ -> [||])
-                        |> Array.distinct
-                        |> Array.choose (fun tripId ->
-                            let fingerprint = routeMatching.baseSignatures.[tripId]
-                            let targetDates = prepared.baseDates.[prepared.baseTrips.[tripId].serviceId]
-                            let knownPositionsMatch =
-                                sourcePlaces
-                                |> Array.mapi (fun index place ->
-                                    match place with
-                                    | Some sourcePlace -> sourcePlace = fingerprint.pattern.[index]
-                                    | None -> true)
-                                |> Array.forall id
-                            if datesOverlap sourceActive targetDates && knownPositionsMatch then
-                                let alignment = identityAlignment calls.Length
-                                let firstDelta, aggregateDelta, durationDelta, maximumDelta, squaredDelta, alignedCalls =
-                                    candidateTimeScore sourceArrivals sourceDepartures fingerprint alignment
-                                Some ({
-                                    tripId = tripId
-                                    tier = "context_stop_inference"
-                                    sourceOrdinalByTarget = alignment
-                                    editCount = 0
-                                    alignedCallCount = alignedCalls
-                                    firstDepartureDelta = firstDelta
-                                    aggregateTimeDelta = aggregateDelta
-                                    durationDelta = durationDelta
-                                    maximumTimeDelta = maximumDelta
-                                    squaredTimeDelta = squaredDelta
-                                }, fingerprint.pattern.[unresolvedOrdinal])
-                            else None)
-                    if candidates.Length > 0 then
-                        let bestScore = candidates |> Array.map (fst >> candidateRank) |> Array.min
-                        let best = candidates |> Array.filter (fst >> candidateRank >> (=) bestScore)
-                        let targets = best |> Array.map snd |> Array.distinct
-                        if targets.Length = 1 then
-                            let evidence = {
-                                sourceGroupId = unresolvedGroup
-                                sourceTripId = sourceTripId
-                                targetStopPlaceId = targets.[0]
-                                sourceCallOrdinal = unresolvedOrdinal + 1
-                                method = "trip_context_unique"
-                            }
-                            match proposed.TryGetValue(unresolvedGroup) with
-                            | true, values -> values.Add(evidence)
-                            | _ ->
-                                let values = ResizeArray<StopInferenceEvidence>()
-                                values.Add(evidence)
-                                proposed.[unresolvedGroup] <- values
-            | _ -> ()
-        proposed
-
-    let resolveStopProposals (proposed: Dictionary<string, ResizeArray<StopInferenceEvidence>>) = [|
-        for KeyValue(groupId, evidence) in proposed do
-            let targets = evidence |> Seq.map (fun value -> value.targetStopPlaceId) |> Seq.distinct |> Seq.toArray
-            let sourceGroup = sourceStopGroupById.[groupId]
-            match targets with
-            | [| targetId |] when prepared.baseStopGroupById.ContainsKey(targetId) ->
-                let target = prepared.baseStopGroupById.[targetId]
-                if prepared.approximateStopName target.name || stopNameMatchRank sourceGroup.name target.name |> Option.isSome then
-                    yield sourceGroup, targetId, target, evidence
-                else
-                    addDiagnostic prepared.diagnostics "stop_context_name_conflict" groupId $"Context target {target.name} is incompatible with {sourceGroup.name}"
-            | targets when targets.Length > 1 ->
-                addDiagnostic prepared.diagnostics "stop_context_conflict" groupId $"Context proposed {targets.Length} target stop places"
-            | _ -> ()
-    |]
-
-    let applyStopProposals accepted =
-        for sourceGroup, targetId, target, evidence in accepted do
-            let groupId = sourceGroup.groupId
-            stopMatching.stopGroupMatches.[groupId] <- targetId
-            stopMatching.stopMatchMethods.[groupId] <- if prepared.approximateStopName target.name then "trip_context_gtfs_authoritative" else "trip_context_unique"
-            prepared.stopGroupDistance sourceGroup target |> Option.iter (fun distance ->
-                stopMatching.stopMatchDistances.[groupId] <- distance
-                if distance > prepared.policy.source.stopMatch.maximumDistanceMetres && not (prepared.approximateStopName target.name) then
-                    addDiagnostic prepared.diagnostics "stop_context_distance_warning" groupId $"Strong route/call context accepted a compatible established stop at {distance:F1} m")
-            for memberRow in sourceGroup.members do
-                mappedPlaceBySourceStop <- mappedPlaceBySourceStop |> Map.add (rowValue memberRow "stop_id") targetId
-            stopInferenceEvidence.AddRange(evidence)
-
-    if prepared.policy.source.stopMatch.contextualInference.enabled then
-        let mutable iteration = 0
-        let mutable changed = true
-        while changed do
-            iteration <- iteration + 1
-            let accepted = collectStopProposals () |> resolveStopProposals
-            applyStopProposals accepted
-            changed <- accepted.Length > 0
-            if changed then refreshSourceCallPlaces ()
-            logProgress $"infer-stop-context-{iteration}" (int64 accepted.Length) None
-        Log.Information(
-            "Regional overlay contextual stop inference: inferred_groups={InferredGroups}; evidence_rows={EvidenceRows}",
-            stopInferenceEvidence |> Seq.map (fun value -> value.sourceGroupId) |> Seq.distinct |> Seq.length,
-            stopInferenceEvidence.Count)
-    let authoritativeGtfsStopCorrections = Dictionary<string, StopGroup>(StringComparer.Ordinal)
-    let approximateMatchedGroups =
-        stopMatching.stopGroupMatches
-        |> Seq.choose (fun pair ->
-            if prepared.baseStopGroupById.ContainsKey(pair.Value) && prepared.approximateStopName prepared.baseStopGroupById.[pair.Value].name then
-                Some (pair.Value, sourceStopGroupById.[pair.Key])
-            else None)
-        |> Seq.groupBy fst
-    for targetId, matches in approximateMatchedGroups do
-        let sourceGroups = matches |> Seq.map snd |> Seq.distinctBy (fun group -> group.groupId) |> Seq.toArray
-        if sourceGroups.Length = 1 then
-            authoritativeGtfsStopCorrections.[targetId] <- sourceGroups.[0]
-            let groupId = sourceGroups.[0].groupId
-            if not (stopMatching.stopMatchMethods.[groupId].Contains("gtfs_authoritative", StringComparison.Ordinal)) then
-                stopMatching.stopMatchMethods.[groupId] <- stopMatching.stopMatchMethods.[groupId] + "+gtfs_authoritative"
-            addDiagnostic prepared.diagnostics "stop_approximate_corrected" targetId $"{prepared.binding.sourceId} GTFS supplied authoritative name and geodata: {sourceGroups.[0].name}"
-        else
-            // A provisional JDF row cannot collapse multiple distinct source places.
-            for sourceGroup in sourceGroups do
-                stopMatching.stopGroupMatches.Remove(sourceGroup.groupId) |> ignore
-                stopMatching.stopMatchMethods.Remove(sourceGroup.groupId) |> ignore
-                stopMatching.stopMatchDistances.Remove(sourceGroup.groupId) |> ignore
-                for memberRow in sourceGroup.members do
-                    mappedPlaceBySourceStop <- mappedPlaceBySourceStop |> Map.remove (rowValue memberRow "stop_id")
-            addDiagnostic prepared.diagnostics "stop_approximate_split" targetId $"{sourceGroups.Length} {prepared.binding.sourceId} places remain distinct instead of sharing one approximate JDF stop"
-    refreshSourceCallPlaces ()
-    let tripSetAuthorityModes = prepared.policy.source.tripSetAuthority.modes |> Set.ofArray
-    let sourceNativeModes = prepared.policy.source.tripSetAuthority.sourceNativeModes |> Set.ofArray
-    let tripSetAuthorityAllowed (row: CsvRow) mode =
-        match row.TryGetValue("overlay_trip_set_authority_allowed") with
-        | true, value -> value = "1"
-        | _ -> tripSetAuthorityModes.Contains(mode)
-    let sourceNativeAllowed (row: CsvRow) mode =
-        match row.TryGetValue("overlay_source_native_allowed") with
-        | true, value -> value = "1"
-        | _ -> sourceNativeModes.Contains(mode)
-    let sourceNativeStopPlaces = Dictionary<string, StopGroup>(StringComparer.Ordinal)
-    for sourceTripRow in sourceTripRows do
-        let sourceRouteId = rowValue sourceTripRow "route_id"
-        let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
-        match sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(rowValue sourceTripRow "trip_id") with
-        | (true, activeDates), (true, calls)
-            when sourceNativeAllowed sourceTripRow sourceMode && anyDate activeDates ->
-            for call in calls do
-                if not (mappedPlaceBySourceStop.ContainsKey(call.stopId)) then
-                    let groupId = sourceGroupByMember.[call.stopId]
-                    let group = sourceStopGroupById.[groupId]
-                    let sourceId = sourceIdentity prepared.binding.sourceId group.members.[0]
-                    let outputPlaceId =
-                        match pinnedStopPlaces.TryGetValue(pinnedPlaceKey sourceId groupId) with
-                        | true, placeId -> placeId
-                        | false, _ -> sourceStopPlaceId sourceId groupId
-                    sourceNativeStopPlaces.[outputPlaceId] <- group
-                    stopMatching.stopGroupMatches.[groupId] <- outputPlaceId
-                    stopMatching.stopMatchMethods.[groupId] <- "source_native"
-                    for memberRow in group.members do
-                        mappedPlaceBySourceStop <- mappedPlaceBySourceStop |> Map.add (rowValue memberRow "stop_id") outputPlaceId
-        | _ -> ()
-    let sourceNativeRoutes = Dictionary<string, CsvRow * string>(StringComparer.Ordinal)
-    let authorityCandidates = ResizeArray<string * string * string array * DateSet.Dates * CallValue array * CsvRow>()
-    let blockedAuthorityDates = HashSet<struct (string * int)>()
-    // A CIS line can have a regular and a detour (výluka) base route. Source trips
-    // belong to the regular one; trip matching still considers both.
-    let preferRegularRoutes (routes: string array) =
-        let regular = routes |> Array.filter (fun route -> not (prepared.baseDetourRoutes.Contains route))
-        if regular.Length = 0 then routes else regular
-    let authorityIdentity (sourceTripRow: CsvRow) =
-        match routeMatching.cisForSourceTrip sourceTripRow with
-        | Some cisLineId -> Some (cisLineId, preferRegularRoutes (routeMatching.directBaseRoutesForSourceTrip sourceTripRow))
-        | None ->
-            let sourceRouteId = rowValue sourceTripRow "route_id"
-            match routeMatching.routeCandidates.TryGetValue(sourceRouteId) with
-            | true, (routes, "structural_trip_evidence") when (preferRegularRoutes routes).Length = 1 ->
-                let routes = preferRegularRoutes routes
-                match prepared.baseCisByRoute.TryGetValue(routes.[0]) with
-                | true, cisLineId -> Some (cisLineId, routes)
-                | _ -> None
-            | _ ->
-                let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
-                if sourceNativeAllowed sourceTripRow sourceMode then
-                    let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
-                    Some ("source:" + sourceId + ":" + originalIdentity "route_id" sourceRoutes.[sourceRouteId], [||])
-                else None
-    let assertedCisBySourceRoute =
-        sourceTripRows
-        |> Seq.choose (fun row -> authorityIdentity row |> Option.map (fun (cis, _) -> rowValue row "route_id", cis))
-        |> Seq.groupBy fst
-        |> Seq.map (fun (sourceRouteId, values) -> sourceRouteId, values |> Seq.map snd |> Seq.distinct |> Seq.toArray)
-        |> dict
-    let blockAuthorityDates cisLineId (activeDates: DateSet.Dates) =
-        for dateIndex in 0 .. activeDates.Length - 1 do
-            if activeDates.[dateIndex] then blockedAuthorityDates.Add(struct (cisLineId, dateIndex)) |> ignore
-    for sourceTripRow in sourceTripRows do
-        let sourceTripId = rowValue sourceTripRow "trip_id"
-        let sourceRouteId = rowValue sourceTripRow "route_id"
-        let sourceMode = modeClass (rowValue sourceRoutes.[sourceRouteId] "route_type")
-        if tripSetAuthorityAllowed sourceTripRow sourceMode then
-            match authorityIdentity sourceTripRow, sourceDates.TryGetValue(rowValue sourceTripRow "service_id"), routeMatching.sourceCalls.TryGetValue(sourceTripId) with
-            | Some (cisLineId, directTargetRoutes), (true, activeDates), (true, calls) when anyDate activeDates ->
-                let targetRoutes =
-                    if directTargetRoutes.Length = 1
-                       && modeClass (rowValue prepared.baseRoutes.[directTargetRoutes.[0]] "route_type") = sourceMode then directTargetRoutes
-                    elif directTargetRoutes.Length = 1
-                         && compatibleModeClasses (modeClass (rowValue prepared.baseRoutes.[directTargetRoutes.[0]] "route_type")) sourceMode then
-                        // JDF represents trolleybus service as road/bus. Preserve the
-                        // source mode on a derived route while retaining the proven
-                        // national CIS identity and replacing its baseline dates.
-                        let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
-                        let outputRouteId = sourceRouteOutputId sourceId (originalIdentity "route_id" sourceRoutes.[sourceRouteId]) cisLineId
-                        sourceNativeRoutes.[outputRouteId] <- sourceRoutes.[sourceRouteId], cisLineId
-                        [| outputRouteId |]
-                    elif sourceNativeAllowed sourceTripRow sourceMode then
-                        let sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
-                        let outputRouteId = sourceRouteOutputId sourceId (originalIdentity "route_id" sourceRoutes.[sourceRouteId]) cisLineId
-                        sourceNativeRoutes.[outputRouteId] <- sourceRoutes.[sourceRouteId], cisLineId
-                        [| outputRouteId |]
-                    else [||]
-                if targetRoutes.Length = 0 then
-                    blockAuthorityDates cisLineId activeDates
-                    addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The asserted CIS line has no compatible base route"
-                elif calls |> Array.forall (fun call -> mappedPlaceBySourceStop.ContainsKey(call.stopId)) then
-                    authorityCandidates.Add(sourceTripId, cisLineId, targetRoutes, activeDates, calls, sourceTripRow)
-                else
-                    blockAuthorityDates cisLineId activeDates
-                    addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "At least one source call has no resolved stop place"
-            | Some (cisLineId, _), (true, activeDates), _ when anyDate activeDates ->
-                blockAuthorityDates cisLineId activeDates
-                addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The active source trip has no call pattern"
-            | None, (true, activeDates), _ when anyDate activeDates ->
-                match assertedCisBySourceRoute.TryGetValue(sourceRouteId) with
-                | true, cisLineIds ->
-                    for cisLineId in cisLineIds do blockAuthorityDates cisLineId activeDates
-                | _ -> ()
-                addDiagnostic prepared.diagnostics "trip_set_authority_withheld" sourceTripId "The active source trip has no unique companion CIS line assertion"
-            | _ -> ()
-    let authorityDatesByCis = Dictionary<string, bool array>(StringComparer.Ordinal)
-    for _, cisLineId, _, activeDates, _, _ in authorityCandidates do
-        let dates =
-            match authorityDatesByCis.TryGetValue(cisLineId) with
-            | true, values -> values
-            | _ ->
-                let values = emptyDates prepared.window
-                authorityDatesByCis.[cisLineId] <- values
-                values
-        for dateIndex in 0 .. activeDates.Length - 1 do
-            if activeDates.[dateIndex] then dates.[dateIndex] <- true
-    extendIdsAuthority prepared authorityDatesByCis
-    for struct (cisLineId, dateIndex) in blockedAuthorityDates do
-        match authorityDatesByCis.TryGetValue(cisLineId) with
-        | true, dates -> dates.[dateIndex] <- false
-        | _ -> ()
-    let sourceTripProjections =
-        authorityCandidates
-        |> Seq.choose (fun (sourceTripId, cisLineId, targetRoutes, activeDates, calls, sourceTripRow) ->
-            let dates = emptyDates prepared.window
-            match authorityDatesByCis.TryGetValue(cisLineId) with
-            | true, authoritativeDates ->
-                for dateIndex in 0 .. activeDates.Length - 1 do
-                    dates.[dateIndex] <- activeDates.[dateIndex] && authoritativeDates.[dateIndex]
-            | _ -> ()
-            if anyDate dates then
-                Some {
-                    sourceId = sourceIdentity prepared.binding.sourceId sourceTripRow
-                    sourceIds = [| sourceIdentity prepared.binding.sourceId sourceTripRow |]
-                    sourceTripReferences = [| sourceIdentity prepared.binding.sourceId sourceTripRow, originalIdentity "trip_id" sourceTripRow |]
-                    sourceTripId = sourceTripId
-                    sourceRouteId = rowValue sourceTripRow "route_id"
-                    targetRouteId = targetRoutes.[0]
-                    cisLineId = cisLineId
-                    dates = DateSet.Dates.Of dates
-                    sourceCalls = calls
-                    sourceShapeId = optionText (rowValue sourceTripRow "shape_id")
-                    sourceRow = sourceTripRow
-                }
-            else None)
-        |> Seq.toArray
-    Log.Information(
-        "Regional overlay trip-set authority: candidate_trips={CandidateTrips}; projected_trips={ProjectedTrips}; authoritative_lines={AuthoritativeLines}; blocked_line_dates={BlockedLineDates}",
-        authorityCandidates.Count, sourceTripProjections.Length, authorityDatesByCis.Count, blockedAuthorityDates.Count)
+    let context = {
+        prepared = prepared
+        routes = sourceRoutes
+        tripRows = sourceTripRows
+        dates = sourceDates
+        stopGroupById = sourceStopGroupById
+        groupByMember = sourceGroupByMember
+        stopMatching = stopMatching
+        routeMatching = routeMatching
+        mappedPlaceBySourceStop = stopMatching.mappedPlaceBySourceStop
+    }
+    let stopInferenceEvidence, authoritativeGtfsStopCorrections = resolveStopsFromContext context
+    let sourceNativeStopPlaces = nativeStopPlaces context pinnedStopPlaces
+    let sourceNativeRoutes, authorityDatesByCis, sourceTripProjections = tripSetAuthority context
+    let mappedPlaceBySourceStop = context.mappedPlaceBySourceStop
     let evidence: Result =
         {
             sourceId = prepared.binding.sourceId

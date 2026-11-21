@@ -4,7 +4,6 @@ module internal JrUtil.RegionalOverlay.Model
 
 open System
 open System.Collections.Generic
-open System.IO
 open NodaTime
 
 open JrUtil.GtfsModel
@@ -35,6 +34,47 @@ type CallValue = {
     stopHeadsign: string option
 }
 
+/// How strongly a source trip's calls agree with a base trip's, strongest first.
+type TripTier =
+    | FullSignature
+    | PatternEndpoints
+    | PatternFirst
+    | PatternNearest
+    | PatternEditNearest
+    /// Used only while contextual stop inference scores its candidates.
+    | ContextStopInference
+
+module TripTier =
+    let name tier =
+        match tier with
+        | FullSignature -> "full_signature"
+        | PatternEndpoints -> "pattern_endpoints"
+        | PatternFirst -> "pattern_first"
+        | PatternNearest -> "pattern_nearest"
+        | PatternEditNearest -> "pattern_edit_nearest"
+        | ContextStopInference -> "context_stop_inference"
+
+    /// The tiers a policy may list in `trip_match_tiers`.
+    let configurable = [| FullSignature; PatternEndpoints; PatternFirst; PatternNearest; PatternEditNearest |]
+
+    let parse (value: string) =
+        match configurable |> Array.tryFind (fun tier -> name tier = value) with
+        | Some tier -> tier
+        | None -> invalidArg "--policy" $"Unknown trip matching tier: {value}"
+
+/// What ties a source route to its base routes.
+type RouteMethod =
+    | CompanionAssertion
+    | StructuralTripEvidence
+
+module RouteMethod =
+    let name method =
+        match method with
+        | CompanionAssertion -> "companion_assertion"
+        | StructuralTripEvidence -> "structural_trip_evidence"
+
+    let all = [| CompanionAssertion; StructuralTripEvidence |]
+
 type BaseSignature = {
     tripId: string
     full: string
@@ -51,7 +91,8 @@ type MatchBinding = {
     sourceTripId: string
     targetTripId: string
     dates: DateSet.Dates
-    method: string
+    routeMethod: RouteMethod
+    tier: TripTier
     sourceCalls: CallValue array
     sourceShapeId: string option
     sourceOrdinalByTarget: int option array
@@ -60,8 +101,10 @@ type MatchBinding = {
     aggregateTimeDelta: int64
     durationDelta: int
     runnerUpMargin: int64 option
-    completePattern: bool
 }
+    with
+    /// The method name reports and mappings carry.
+    member this.method = RouteMethod.name this.routeMethod + "+" + TripTier.name this.tier
 
 type OverlaySelection = {
     factKey: string
@@ -104,7 +147,7 @@ type CandidateScoreReport = {
 
 type CandidateMatch = {
     tripId: string
-    tier: string
+    tier: TripTier
     sourceOrdinalByTarget: int option array
     editCount: int
     alignedCallCount: int
@@ -118,7 +161,7 @@ type CandidateMatch = {
 type PendingAmbiguity = {
     sourceTripId: string
     dateIndex: int
-    routeMethod: string
+    routeMethod: RouteMethod
     candidates: CandidateMatch array
 }
 

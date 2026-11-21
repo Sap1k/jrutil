@@ -4,8 +4,6 @@ module internal JrUtil.RegionalOverlay.RouteMatching
 
 open System
 open System.Collections.Generic
-open System.IO
-open NodaTime
 
 open JrUtil.GtfsModel
 
@@ -34,7 +32,7 @@ type Result = {
     joinedValues: Dictionary<string, ResizeArray<string>>
     cisForSourceTrip: CsvRow -> string option
     directBaseRoutesForSourceTrip: CsvRow -> string array
-    routeCandidates: Dictionary<string, (string array * string)>
+    routeCandidates: Dictionary<string, (string array * RouteMethod)>
     structuralRouteCandidates: Dictionary<string, string array>
     baseSignatures: Dictionary<string, BaseSignature>
     sourceCalls: Dictionary<string, CallValue array>
@@ -94,7 +92,8 @@ let buildCandidates ({
             | _ -> [||])
         |> Option.defaultValue [||]
 
-    let routeCandidates = Dictionary<string, string array * string>(StringComparer.Ordinal)
+    let routeCandidates = Dictionary<string, string array * RouteMethod>(StringComparer.Ordinal)
+    let routeMethodEnabled method = prepared.policy.source.routeMatchTiers |> Array.contains (RouteMethod.name method)
     let structuralRouteCandidates = Dictionary<string, string array>(StringComparer.Ordinal)
     for sourceRoute in sourceRouteRows do
         let sourceRouteId = rowValue sourceRoute "route_id"
@@ -116,12 +115,11 @@ let buildCandidates ({
             |> Array.map (fun row -> rowValue row "route_id")
             |> Array.distinct
         structuralRouteCandidates.[sourceRouteId] <- structural
-        if direct.Length > 0 && prepared.policy.source.routeMatchTiers |> Array.contains "companion_assertion" then
-            routeCandidates.[sourceRouteId] <- direct, "companion_assertion"
+        if direct.Length > 0 && routeMethodEnabled CompanionAssertion then
+            routeCandidates.[sourceRouteId] <- (direct, CompanionAssertion)
         else
-            let candidates =
-                if prepared.policy.source.routeMatchTiers |> Array.contains "structural_trip_evidence" then structuralExact else [||]
-            routeCandidates.[sourceRouteId] <- candidates, "structural_trip_evidence"
+            let candidates = if routeMethodEnabled StructuralTripEvidence then structuralExact else [||]
+            routeCandidates.[sourceRouteId] <- (candidates, StructuralTripEvidence)
     logProgress "build-route-candidates" (int64 sourceRouteRows.Length) (Some (int64 sourceRouteRows.Length))
 
     let candidateRouteIds =

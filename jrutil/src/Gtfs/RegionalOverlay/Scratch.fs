@@ -3,7 +3,6 @@ module internal JrUtil.RegionalOverlay.Scratch
 
 open System
 open System.IO
-open System.Diagnostics
 open System.Runtime
 open System.Text
 open System.Collections.Generic

@@ -7,8 +7,6 @@ open JrUtil.Hashing
 open System.Collections.Generic
 open System.Globalization
 open System.IO
-open System.Text
-open NodaTime
 
 open JrUtil.GtfsModel
 
@@ -53,6 +51,7 @@ let write ({
     slicesForBinding = slicesForBinding
     transferProvenance = transferProvenance
 }: Input) : Result =
+    let modeForSourceTrip = SourceAnalysis.modeOfTrip source
     let dateRanges (values: seq<bool>) =
         let dates = Seq.toArray values
         seq {
@@ -440,7 +439,7 @@ let write ({
     let matchedSourceTripDates = acceptedDates.Values |> Seq.sumBy countDates
     let matchedSourceCallDates =
         acceptedDates
-        |> Seq.sumBy (fun pair -> countDates pair.Value * matches.sourceCallCountByTrip.[pair.Key])
+        |> Seq.sumBy (fun pair -> countDates pair.Value * matches.coverage.sourceCallCountByTrip.[pair.Key])
     let totalSourceShapeIds = activeSourceTrips |> Array.choose (fun row -> optionText (rowValue row "shape_id")) |> Set.ofArray
     let usedSourceShapeIds =
         Seq.append
@@ -460,8 +459,8 @@ let write ({
         "stop", source.stopGroupMatches.Count, source.stopGroups.Length
         "trip", matchedSourceTripSet.Count, activeSourceTrips.Length
         "trip_date", matchedSourceTripDates, totalSourceTripDates
-        "call", matches.coverageMatchedSourceCalls, matches.coverageTotalSourceCalls
-        "call_date", matchedSourceCallDates, matches.coverageTotalSourceCallDates
+        "call", matches.coverage.matchedSourceCalls, matches.coverage.totalSourceCalls
+        "call_date", matchedSourceCallDates, matches.coverage.totalSourceCallDates
         "shape", usedSourceShapeIds.Count, totalSourceShapeIds.Count
         "transfer", projectedTransferClaims, totalSourceTransfers
     |]
@@ -471,7 +470,7 @@ let write ({
     let dailyCoverage = Dictionary<string, int array * int array>(StringComparer.Ordinal)
     for trip in activeSourceTrips do
         let tripId = rowValue trip "trip_id"
-        let mode = matches.modeForSourceTrip tripId
+        let mode = modeForSourceTrip tripId
         let represented, total =
             match dailyCoverage.TryGetValue(mode) with
             | true, counts -> counts
@@ -522,27 +521,27 @@ let write ({
         |> dict
     let matchedRoutesByMode =
         matchedSourceTripSet
-        |> Seq.groupBy matches.modeForSourceTrip
+        |> Seq.groupBy modeForSourceTrip
         |> Seq.map (fun (mode, tripIds) -> mode, tripIds |> Seq.map (fun id -> rowValue source.tripsById.[id] "route_id") |> Set.ofSeq)
         |> dict
     let activeTripsByMode = activeSourceTrips |> Seq.groupBy (rowValue >> fun get -> modeClass (rowValue source.routes.[get "route_id"] "route_type")) |> dict
-    let matchedTripsByMode = matchedSourceTripSet |> Seq.groupBy matches.modeForSourceTrip |> dict
+    let matchedTripsByMode = matchedSourceTripSet |> Seq.groupBy modeForSourceTrip |> dict
     let activeTripDatesByMode = Dictionary<string, int>(StringComparer.Ordinal)
     for sourceTrip in activeSourceTrips do
         let sourceTripId = rowValue sourceTrip "trip_id"
-        let mode = matches.modeForSourceTrip sourceTripId
-        matches.addCount activeTripDatesByMode mode (source.dates.[rowValue sourceTrip "service_id"].Count)
+        let mode = modeForSourceTrip sourceTripId
+        addCount activeTripDatesByMode mode (source.dates.[rowValue sourceTrip "service_id"].Count)
     let matchedTripDatesByMode = Dictionary<string, int>(StringComparer.Ordinal)
     let matchedCallDatesByMode = Dictionary<string, int>(StringComparer.Ordinal)
     for KeyValue(sourceTripId, dates) in acceptedDates do
-        let mode = matches.modeForSourceTrip sourceTripId
-        matches.addCount matchedTripDatesByMode mode (countDates dates)
-        matches.addCount matchedCallDatesByMode mode (countDates dates * matches.sourceCallCountByTrip.[sourceTripId])
+        let mode = modeForSourceTrip sourceTripId
+        addCount matchedTripDatesByMode mode (countDates dates)
+        addCount matchedCallDatesByMode mode (countDates dates * matches.coverage.sourceCallCountByTrip.[sourceTripId])
     let totalCallDatesByMode = Dictionary<string, int>(StringComparer.Ordinal)
     for sourceTrip in activeSourceTrips do
         let sourceTripId = rowValue sourceTrip "trip_id"
         let dateCount = source.dates.[rowValue sourceTrip "service_id"].Count
-        matches.addCount totalCallDatesByMode (matches.modeForSourceTrip sourceTripId) (dateCount * matches.sourceCallCountByTrip.[sourceTripId])
+        addCount totalCallDatesByMode (modeForSourceTrip sourceTripId) (dateCount * matches.coverage.sourceCallCountByTrip.[sourceTripId])
     let activeShapesByMode =
         activeSourceTrips
         |> Seq.groupBy (rowValue >> fun get -> modeClass (rowValue source.routes.[get "route_id"] "route_type"))
@@ -553,7 +552,7 @@ let write ({
         |> Seq.choose (fun row ->
             optionText (rowValue row "shape_id")
             |> Option.filter usedSourceShapeIds.Contains
-            |> Option.map (fun shapeId -> matches.modeForSourceTrip (rowValue row "trip_id"), shapeId))
+            |> Option.map (fun shapeId -> modeForSourceTrip (rowValue row "trip_id"), shapeId))
         |> Seq.groupBy fst
         |> Seq.map (fun (mode, values) -> mode, values |> Seq.map snd |> Set.ofSeq)
         |> dict
@@ -566,11 +565,11 @@ let write ({
                 yield mode, "route", countSet matchedRoutesByMode mode, countSet activeRoutesByMode mode
                 yield mode, "trip", countSeq matchedTripsByMode mode, countSeq activeTripsByMode mode
                 yield mode, "trip_date", (match matchedTripDatesByMode.TryGetValue(mode) with | true, value -> value | _ -> 0), activeTripDatesByMode.[mode]
-                match matches.stopCoverageByMode |> Array.tryFind (fun (value, _, _) -> value = mode) with
+                match matches.coverage.stopCoverageByMode |> Array.tryFind (fun (value, _, _) -> value = mode) with
                 | Some (_, matched, total) -> yield mode, "stop", matched, total
                 | None -> ()
                 yield mode, "call_date", (match matchedCallDatesByMode.TryGetValue(mode) with | true, value -> value | _ -> 0), totalCallDatesByMode.[mode]
-                match matches.callCoverageByMode |> Array.tryFind (fun (value, _, _) -> value = mode) with
+                match matches.coverage.callCoverageByMode |> Array.tryFind (fun (value, _, _) -> value = mode) with
                 | Some (_, matched, total) -> yield mode, "call", matched, total
                 | None -> ()
                 yield mode, "shape", countSet usedShapesByMode mode, countSet activeShapesByMode mode
@@ -583,7 +582,7 @@ let write ({
     writeValues (Path.Combine(temporary, "reports", "coverage_by_tier.csv"))
         [| "mode"; "matching_tier"; "matched_trips" |]
         (matches.bindings
-         |> Seq.map (fun value -> matches.modeForSourceTrip value.sourceTripId, value.method, value.sourceTripId)
+         |> Seq.map (fun value -> modeForSourceTrip value.sourceTripId, value.method, value.sourceTripId)
          |> Seq.distinct
          |> Seq.groupBy (fun (mode, methodName, _) -> mode, methodName)
          |> Seq.map (fun ((mode, methodName), values) -> [| mode; methodName; string (Seq.length values) |]))

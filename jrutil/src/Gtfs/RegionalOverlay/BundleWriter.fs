@@ -5,12 +5,9 @@ module internal JrUtil.RegionalOverlay.BundleWriter
 open System
 open JrUtil.Hashing
 open System.Collections.Generic
-open System.Globalization
 open System.IO
 open System.Runtime.CompilerServices
-open System.Text
 open System.Text.Json
-open NodaTime
 
 open JrUtil.GtfsModel
 

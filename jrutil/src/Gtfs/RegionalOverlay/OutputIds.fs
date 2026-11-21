@@ -5,17 +5,8 @@ module internal JrUtil.RegionalOverlay.OutputIds
 
 open System
 open JrUtil.Hashing
-open System.Collections.Generic
 open System.Globalization
-open System.IO
-open System.IO.Compression
-open System.Text.RegularExpressions
-open System.Security.Cryptography
 open System.Text
-open System.Text.Json
-open Microsoft.VisualBasic.FileIO
-open NodaTime
-open NodaTime.Text
 open JrUtil.GtfsModel
 open JrUtil.RegionalOverlay.Types
 open JrUtil.RegionalOverlay.Model

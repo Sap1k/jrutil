@@ -3,11 +3,9 @@
 module internal JrUtil.RegionalOverlay.Policy
 
 open System
-open System.Collections.Generic
 open System.IO
 open System.Text.RegularExpressions
 open System.Text.Json
-open NodaTime
 
 open JrUtil.GtfsModel
 

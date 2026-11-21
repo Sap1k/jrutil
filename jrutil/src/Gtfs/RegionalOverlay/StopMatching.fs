@@ -4,8 +4,6 @@ module internal JrUtil.RegionalOverlay.StopMatching
 
 open System
 open System.Collections.Generic
-open System.IO
-open NodaTime
 open Serilog
 
 open JrUtil.GtfsModel

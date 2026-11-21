@@ -3,8 +3,6 @@
 module internal JrUtil.RegionalOverlay.BundleCalls
 
 open System
-open JrUtil.Hashing
-open System.Collections.Generic
 open System.Globalization
 open System.IO
 open System.Text

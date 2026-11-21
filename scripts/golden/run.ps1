@@ -17,6 +17,10 @@ param(
     [string] $OsmPbf = "E:/Git/obehy/work/regional-merged.osm.pbf",
     # Oběhy passes the learned scorer to every estimated-posts build.
     [string] $PostInferencePolicy = "E:/Git/obehy/repo/src/obehy/data/post-inference/learned-v1.json",
+    # The frozen golden inputs date from 2026-09; a root built from newer snapshots
+    # passes its own dates so the overlay's snapshot-skew check still holds.
+    [string] $ReferenceDate = "2026-09-16",
+    [string] $RetrievedAt = "2026-09-28T12:00:00+00:00",
     [switch] $NoPublish
 )
 
@@ -107,7 +111,7 @@ function Write-Descriptor([string] $Payload, [string] $Destination) {
     [ordered]@{
         schema_version = 1
         source_id = "national-jdf-vld-drahy"
-        retrieved_at = "2026-09-28T12:00:00+00:00"
+        retrieved_at = $RetrievedAt
         retrieval_method = "derived-from-https-and-configured-snapshots"
         source_uri = "obehy:derived:national-jdf-vld-drahy"
         licence = "CIS JR public data; OSM ODbL; external geodata source-specific"
@@ -142,8 +146,8 @@ function Get-StageArguments([string] $Stage, [string] $Target) {
     switch ($Stage) {
         "fix" { Get-FixArguments $Target $false }
         "fix-posts" { Get-FixArguments $Target $true }
-        "merge" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=2026-09-16") + $common + @($Target, "$out/fix") }
-        "merge-posts" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=2026-09-16") + $common + @($Target, "$out/fix-posts") }
+        "merge" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=$ReferenceDate") + $common + @($Target, "$out/fix") }
+        "merge-posts" { @("merge-jdf", "--strict", "--gvd-year=2026", "--reference-date=$ReferenceDate") + $common + @($Target, "$out/fix-posts") }
         "bundle" { Get-BundleArguments $Target "merge" @("--no-estimated-posts") }
         "bundle-posts" { Get-BundleArguments $Target "merge-posts" @("--routing-osm-pbf=$routingPbf", "--post-inference-policy=$PostInferencePolicy") }
         "overlay" { @("regional-gtfs-overlay", "--policy=$config/pid-ids-jmk-production-v1.json", "--gvd-year=2026", "--converter-version=golden",

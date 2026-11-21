@@ -5,9 +5,6 @@ module internal JrUtil.RegionalOverlay.Projection
 open System
 open JrUtil.Hashing
 open System.Collections.Generic
-open System.Globalization
-open System.IO
-open NodaTime
 
 open JrUtil.GtfsModel
 
@@ -53,7 +50,7 @@ type Result = {
 /// Resolve claims and construct complete trip/date slices before serialization.
 let resolve ({ prepared = prepared; source = source; matches = matches }: Input) : Result =
     let bindingTier (value: MatchBinding) =
-        value.method.Split('+') |> Array.last
+        TripTier.name value.tier
     let ranks = prepared.policy.source.tripMatchTiers |> Array.mapi (fun index tier -> tier, index) |> dict
     let bindingEligible capabilityName (value: MatchBinding) =
         match prepared.policy.source.tripMatch.minimumCapabilityTier.TryGetValue(capabilityName) with

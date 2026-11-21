@@ -3,18 +3,12 @@
 module internal JrUtil.RegionalOverlay.Support
 
 open System
-open JrUtil.Hashing
 open System.Collections.Generic
 open System.Globalization
 open System.IO
-open System.IO.Compression
 open System.Text.RegularExpressions
-open System.Security.Cryptography
-open System.Text
 open System.Text.Json
-open Microsoft.VisualBasic.FileIO
 open NodaTime
-open NodaTime.Text
 
 open JrUtil.GtfsModel
 
@@ -72,6 +66,11 @@ let datesOverlap (left: DateSet.Dates) right = left.Overlaps(right)
 
 let addDiagnostic (diagnostics: DiagnosticLog) code objectId message =
     diagnostics.Add({ code = code; sourceObjectId = objectId; message = message })
+
+let addCount (values: Dictionary<string, int>) key count =
+    match values.TryGetValue(key) with
+    | true, current -> values.[key] <- current + count
+    | _ -> values.[key] <- count
 
 let setRow (row: CsvRow) name value =
     row.[name] <- value
